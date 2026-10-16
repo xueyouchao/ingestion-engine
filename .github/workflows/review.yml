@@ -1,9 +1,10 @@
 name: Review
 
-# The review loop: a model reads the pull-request diff on two axes (Standards, Spec) and upserts one
-# comment. It is deliberately non-blocking -- no model, no credentials and no comment may ever stop a
-# merge -- and with no repository secret configured it reaches GitHub Models through the built-in
-# GITHUB_TOKEN, so it works with zero setup.
+# The review loop: two models read the pull-request diff, one per axis (Standards, Spec), and upsert
+# one comment with both axes side by side. It is deliberately non-blocking -- no model, no credentials
+# and no comment may ever stop a merge. It needs the OLLAMA_API_KEY repository secret to reach a model;
+# without it the job still comments, saying so and how to set the secret, and exits 0. There is no
+# built-in-credential fallback.
 
 on:
   pull_request:
@@ -16,7 +17,6 @@ concurrency:
 permissions:
   contents: read
   pull-requests: write
-  models: read
 
 jobs:
   review:
@@ -37,10 +37,10 @@ jobs:
       - name: Review
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
-          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          REVIEW_MODEL_STANDARDS: ${{ vars.REVIEW_MODEL_STANDARDS }}
+          REVIEW_MODEL_SPEC: ${{ vars.REVIEW_MODEL_SPEC }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}

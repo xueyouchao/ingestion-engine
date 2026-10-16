@@ -1,9 +1,12 @@
-"""Assemble a two-axis review prompt, ask an LLM, and upsert one pull-request comment.
+"""Assemble a two-axis review prompt, ask one model per axis, and upsert one pull-request comment.
 
-The workflow YAML stays thin: this module owns prompt assembly, the API call and the comment
+The workflow YAML stays thin: this module owns prompt assembly, the two API calls and the comment
 bookkeeping, so the prompt can be printed and checked locally with ``--print-prompt`` and no
 credentials. It uses only the standard library, and it shells out to ``gh`` to post, so no token
 ever appears in this file or in the YAML beyond an environment variable.
+
+The two axes are reviewed by two different models in two independent calls and presented side by
+side in one comment. They are never ranked, merged or averaged into a single verdict.
 
 The review is a comment, never a gate. Every failure below ends in a short comment (or a quiet
 exit) with status 0, because a model outage must not hold up a merge.
@@ -17,31 +20,47 @@ import os
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
 MARKER = "<!-- finepdfs-review -->"
-GITHUB_MODELS_URL = "https://models.github.ai/inference/chat/completions"
-GITHUB_MODELS_MODEL = "openai/gpt-4o-mini"
-DEFAULT_OPENAI_URL = "https://api.openai.com/v1"
-DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+DEFAULT_BASE_URL = "https://ollama.com/v1"
+DEFAULT_STANDARDS_MODEL = "deepseek-v4.1-flash"
+DEFAULT_SPEC_MODEL = "glm-5.3-flash"
 SYSTEM_PROMPT = (
     "You are a precise code reviewer. You follow the repository's own documented standards, "
     "and you answer with one markdown comment."
 )
 MAX_DIFF_CHARS = 60_000
+MAX_ERROR_BODY_CHARS = 200
 REQUEST_TIMEOUT_SECONDS = 180
 
 
 @dataclass(frozen=True, slots=True)
 class Backend:
-    """One chat-completions endpoint and the credentials and model to reach it."""
+    """One OpenAI-compatible chat-completions endpoint and the credential to reach it."""
 
     url: str
     api_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class Axis:
+    """One review axis and the model that reviews it."""
+
+    name: str
     model: str
-    label: str
+
+
+class ReviewCallError(RuntimeError):
+    """A call that reached the endpoint but did not come back with an assistant message.
+
+    The message names the status, the content type and a bounded snippet of the body, so the posted
+    comment shows what the endpoint actually answered instead of a bare ``JSONDecodeError`` -- which
+    reads as a credential problem even when the endpoint is a tombstone.
+    """
 
 
 def fill(template: str, values: dict[str, str]) -> str:
@@ -53,7 +72,7 @@ def fill(template: str, values: dict[str, str]) -> str:
 
 
 def build_prompt(template: str, diff: str, context: dict[str, str]) -> str:
-    """The prompt sent to the model: the versioned instructions with this diff dropped in.
+    """The prompt sent to one model: the versioned instructions with this diff and axis dropped in.
 
     A diff larger than :data:`MAX_DIFF_CHARS` is truncated with a visible note, so an oversized pull
     request produces a partial review rather than an API error that comments nothing useful.
@@ -64,31 +83,53 @@ def build_prompt(template: str, diff: str, context: dict[str, str]) -> str:
 
 
 def resolve_backend(env: dict[str, str]) -> Backend | None:
-    """Pick the endpoint in the documented order: an explicit key first, GitHub Models otherwise.
+    """The endpoint and key, or ``None`` when the repository secret is absent; there is no fallback.
 
-    A repository secret ``LLM_API_KEY`` wins, with ``LLM_BASE_URL`` and ``LLM_MODEL`` as overrides.
-    With no such secret -- the state today -- the built-in ``GITHUB_TOKEN`` reaches GitHub Models,
-    so the workflow works with zero setup.
+    ``OLLAMA_API_KEY`` is required. ``LLM_BASE_URL`` defaults to the Ollama cloud OpenAI-compatible
+    base. No built-in credential reaches a model, so a missing key posts an actionable comment
+    instead of calling one.
     """
-    api_key = env.get("LLM_API_KEY", "").strip()
-    if api_key:
-        base = (env.get("LLM_BASE_URL") or DEFAULT_OPENAI_URL).rstrip("/")
-        model = env.get("LLM_MODEL") or DEFAULT_OPENAI_MODEL
-        return Backend(f"{base}/chat/completions", api_key, model, f"configured endpoint ({model})")
-
-    github_token = env.get("GITHUB_TOKEN", "").strip()
-    if github_token:
-        return Backend(
-            GITHUB_MODELS_URL, github_token, GITHUB_MODELS_MODEL, f"GitHub Models ({GITHUB_MODELS_MODEL})"
-        )
-    return None
+    api_key = env.get("OLLAMA_API_KEY", "").strip()
+    if not api_key:
+        return None
+    base = (env.get("LLM_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
+    return Backend(f"{base}/chat/completions", api_key)
 
 
-def chat(backend: Backend, prompt: str) -> str:
-    """One chat-completions call, returning the assistant text. Raises on any transport or shape error."""
+def review_axes(env: dict[str, str]) -> tuple[Axis, Axis]:
+    """The two axes and their models; each id is overridable by a repository variable."""
+    return (
+        Axis("Standards", env.get("REVIEW_MODEL_STANDARDS") or DEFAULT_STANDARDS_MODEL),
+        Axis("Spec", env.get("REVIEW_MODEL_SPEC") or DEFAULT_SPEC_MODEL),
+    )
+
+
+def _snippet(text: str, limit: int = MAX_ERROR_BODY_CHARS) -> str:
+    """A bounded, single-line excerpt of a response body fit for a public comment."""
+    collapsed = " ".join(text.split())
+    if len(collapsed) > limit:
+        return collapsed[:limit] + "..."
+    return collapsed or "(empty body)"
+
+
+def _where(response) -> str:
+    """The status and content type of a response, as far as the response exposes them."""
+    status = getattr(response, "status", None)
+    headers = getattr(response, "headers", None)
+    content_type = headers.get("Content-Type") if headers is not None else None
+    return f"HTTP {status if status is not None else 'unknown'} with Content-Type {content_type or 'unknown'}"
+
+
+def chat(backend: Backend, model: str, prompt: str, opener=None) -> str:
+    """One chat-completions call, returning the assistant text.
+
+    A connection failure propagates. An HTTP error, a body that is not JSON, and JSON without an
+    assistant message each raise :class:`ReviewCallError` naming the status, the content type and a
+    bounded body snippet.
+    """
     payload = json.dumps(
         {
-            "model": backend.model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
@@ -106,9 +147,37 @@ def chat(backend: Backend, prompt: str) -> str:
             "Authorization": f"Bearer {backend.api_key}",
         },
     )
-    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-        answer = json.loads(response.read().decode("utf-8"))
-    return str(answer["choices"][0]["message"]["content"]).strip()
+    open_ = opener or urllib.request.urlopen
+    try:
+        with open_(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            where = _where(response)
+    except urllib.error.HTTPError as error:
+        # A rejected model id or a wrong endpoint answers 4xx; its body is the useful part.
+        body = error.read().decode("utf-8", errors="replace")
+        raise ReviewCallError(f"the endpoint answered {_where(error)}: {_snippet(body)}") from None
+
+    try:
+        answer = json.loads(body)
+    except json.JSONDecodeError:
+        raise ReviewCallError(
+            f"the endpoint answered {where} but the body is not JSON: {_snippet(body)}"
+        ) from None
+
+    try:
+        content = answer["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        content = None
+    if not isinstance(content, str):
+        raise ReviewCallError(
+            f"the endpoint answered {where} but the JSON carries no assistant message: {_snippet(body)}"
+        )
+    return content.strip()
+
+
+def section_body(axis: Axis, outcome: str) -> str:
+    """One axis's section, headed by the axis and the model that produced it; never a merged verdict."""
+    return f"### {axis.name} — `{axis.model}`\n\n{outcome.strip()}\n"
 
 
 def comment_body(markdown: str) -> str:
@@ -166,7 +235,7 @@ def post(repo: str, number: str, body: str) -> None:
         print(f"could not post the review comment: {error}", file=sys.stderr)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, opener=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--diff", default="pr.diff", help="file holding the unified diff")
     parser.add_argument("--prompt", default=".github/prompts/review.md", help="versioned prompt file")
@@ -177,25 +246,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--print-prompt",
         action="store_true",
-        help="assemble and print the prompt, then exit; needs no credentials, network or gh",
+        help="assemble and print both axis prompts, then exit; needs no credentials, network or gh",
     )
     args = parser.parse_args(argv)
 
     diff_path = Path(args.diff)
     diff = diff_path.read_text(encoding="utf-8", errors="replace") if diff_path.exists() else ""
-    prompt = build_prompt(
-        Path(args.prompt).read_text(encoding="utf-8"),
-        diff,
-        {
-            "REPO": args.repo or "local/repo",
-            "PR_NUMBER": args.pr_number or "0",
-            "BASE_REF": args.base_ref or "master",
-            "PR_TITLE": args.title or "(no title available locally)",
-        },
-    )
+    axes = review_axes(os.environ)
+    context = {
+        "REPO": args.repo or "local/repo",
+        "PR_NUMBER": args.pr_number or "0",
+        "BASE_REF": args.base_ref or "master",
+        "PR_TITLE": args.title or "(no title available locally)",
+    }
+    template = Path(args.prompt).read_text(encoding="utf-8")
+    prompts = {axis.name: build_prompt(template, diff, {**context, "AXIS": axis.name}) for axis in axes}
 
     if args.print_prompt:
-        print(prompt)
+        for axis in axes:
+            print(f"===== {axis.name} (model: {axis.model}) =====")
+            print(prompts[axis.name])
         return 0
 
     if not diff.strip():
@@ -212,21 +282,30 @@ def main(argv: list[str] | None = None) -> int:
 
     backend = resolve_backend(os.environ)
     if backend is None:
-        post(args.repo, args.pr_number, note_body("skipped: no LLM_API_KEY secret and no GITHUB_TOKEN"))
+        post(
+            args.repo,
+            args.pr_number,
+            note_body(
+                "the review needs the `OLLAMA_API_KEY` repository secret to reach a model; "
+                f"set it with `gh secret set OLLAMA_API_KEY --repo {args.repo}`"
+            ),
+        )
         return 0
 
-    try:
-        review = chat(backend, prompt)
-    except Exception as error:  # Broad on purpose: a model outage must never gate a pull request.
-        print(f"review call failed: {error}", file=sys.stderr)
-        post(args.repo, args.pr_number, note_body(f"the model was unavailable ({type(error).__name__}: {error})"))
-        return 0
+    sections = []
+    for axis in axes:
+        try:
+            review = chat(backend, axis.model, prompts[axis.name], opener)
+        except Exception as error:  # Broad on purpose: one axis failing must not sink the other.
+            print(f"{axis.name} review call failed: {error}", file=sys.stderr)
+            sections.append(section_body(axis, f"_This axis did not run: {error}_"))
+            continue
+        if not review:
+            sections.append(section_body(axis, "_The model returned an empty review._"))
+            continue
+        sections.append(section_body(axis, review))
 
-    if not review:
-        post(args.repo, args.pr_number, note_body("the model returned an empty review"))
-        return 0
-
-    post(args.repo, args.pr_number, comment_body(f"## LLM review\n\n{review}"))
+    post(args.repo, args.pr_number, comment_body("## LLM review\n\n" + "\n".join(sections)))
     return 0
 
 
