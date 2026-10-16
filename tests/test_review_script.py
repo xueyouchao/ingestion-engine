@@ -96,6 +96,12 @@ def _diff_chunk(name: str, size: int) -> str:
     return head + "x" * (size - len(head) - 1) + "\n"
 
 
+def _quoted_chunk(name: str, size: int) -> str:
+    """One file whose ``diff --git`` line carries git's quoting, for a path that forces it."""
+    head = f'diff --git "a/{name}" "b/{name}"\n--- "a/{name}"\n+++ "b/{name}"\n@@ -1 +1 @@\n+'
+    return head + "x" * (size - len(head) - 1) + "\n"
+
+
 def test_a_truncated_diff_cuts_on_a_file_boundary_and_names_the_files_left_out() -> None:
     """The Spec axis saw 12 of 17 files; the cut must name the rest and never half-read a file."""
     diff = "".join(_diff_chunk(f"file{index}.py", 400) for index in range(5))
@@ -154,6 +160,31 @@ def test_headers_that_all_start_past_the_cut_are_named_yet_never_shown_whole() -
     assert sliced.files_total == 1
     assert sliced.omitted == ("later.py",)
     assert "1 of 1 files were not shown to any model" in review.truncation_note(sliced)
+
+
+def test_a_git_quoted_path_is_still_a_file_boundary() -> None:
+    """Git quotes a path with a space or a non-ASCII byte; unmatched, that file lands on the wrong side."""
+    diff = _diff_chunk("plain.py", 400) + _quoted_chunk("pa th.py", 400) + _quoted_chunk("päth.py", 400)
+
+    sliced = review.slice_diff(diff, limit=600)
+
+    assert sliced.text == diff[:400]
+    assert sliced.files_total == 3
+    assert sliced.omitted == ("pa th.py", "päth.py")
+    assert sliced.partial is None
+
+
+def test_a_git_quoted_octal_escaped_path_is_still_a_file_boundary() -> None:
+    """Default ``core.quotePath`` escapes a non-ASCII byte as ``\\303\\251``; that header is a boundary too."""
+    escaped = "p\\303\\251th.py"
+    diff = _quoted_chunk(escaped, 400) + _diff_chunk("second.py", 400)
+
+    sliced = review.slice_diff(diff, limit=600)
+
+    assert sliced.text == diff[:400]
+    assert sliced.files_total == 2
+    assert sliced.omitted == ("second.py",)
+    assert sliced.partial is None
 
 
 def test_a_truncated_diff_names_its_unseen_files_in_the_comment_and_in_the_prompt(monkeypatch, tmp_path) -> None:

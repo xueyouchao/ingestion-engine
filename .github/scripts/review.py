@@ -36,8 +36,10 @@ DEFAULT_BASE_URL = "https://ollama.com/v1"
 # themselves live only in the prompt, in its ``## If the axis is <name>`` headings.
 DEFAULT_MODELS = ("deepseek-v4.1-flash", "glm-5.3-flash")
 AXIS_HEADING = re.compile(r"^## If the axis is (?P<name>.+?)\s*$", re.MULTILINE)
-# git starts every file in a unified diff with this header; its b-side is the file's name after the change.
-DIFF_FILE_HEADER = re.compile(r"^diff --git .* (?P<path>b/.+?)\s*$", re.MULTILINE)
+# git starts every file in a unified diff with this header; its b-side is the file's name after the
+# change. git quotes a path with a space, a quote, a backslash or a non-ASCII byte under the default
+# ``core.quotePath`` (``diff --git "a/pa th" "b/pa th"``), so the quotes are optional here too.
+DIFF_FILE_HEADER = re.compile(r'^diff --git .* (?P<path>"?b/.+?"?)\s*$', re.MULTILINE)
 # One placeholder in the prompt; fill substitutes these in a single pass over the template.
 PLACEHOLDER = re.compile(r"\{\{(?P<key>[A-Z0-9_]+)\}\}")
 SYSTEM_PROMPT = (
