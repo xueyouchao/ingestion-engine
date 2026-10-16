@@ -110,6 +110,13 @@ adapter normalises the two-letter codes to ISO 639-3 (`eng`, `deu`), so the reco
 pieces vote, because lid.176 is trained on short text and a whole page dilutes it. There is still one
 global confidence floor; per-language thresholds are not implemented.
 
+The allow-list `FINEPDFS_LANGUAGES` is read in whichever code the selected adapter emits, so its
+vocabulary follows `FINEPDFS_LANGUAGE`: `Latn,Grek` matches under `script`, `eng,spa` under `fasttext`,
+never both. That is intended -- the list filters the recorded language field, and the adapter defines
+that field -- but it makes the pair mode-dependent: switching adapters means revisiting the list in the
+same change. A `script`-era list left in place under `fasttext` matches no page, so every document is
+dropped, nothing is published, and the run exits 1 with exclusions naming the languages that were allowed.
+
 ## Configuration
 
 Every run is configured by environment variables, because `cocoindex update main.py` takes no
@@ -139,7 +146,7 @@ nothing was published, so an operator or a CI can tell "engine is down" from "no
 | `FINEPDFS_LANGUAGE_MODEL` | -- | path to a downloaded fastText `lid.176` model, required by `fasttext` |
 | `FINEPDFS_LANGUAGE_CONFIDENCE` | `0.65` | per-page language floor |
 | `FINEPDFS_MIN_CHARACTERS` | `200` | publish minimum |
-| `FINEPDFS_LANGUAGES` | all | comma-separated allow-list in the codes the chosen adapter emits, for example `eng,spa` or `Latn,Grek` |
+| `FINEPDFS_LANGUAGES` | all | comma-separated allow-list in the codes the chosen adapter emits: `eng,spa` under `fasttext`, `Latn,Grek` under `script` |
 | `FINEPDFS_SIMILARITY_THRESHOLD` | `0.8` | fingerprint similarity above which one document is a near-duplicate of another |
 
 ## Output layout
