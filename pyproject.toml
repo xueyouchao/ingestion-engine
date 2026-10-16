@@ -40,5 +40,8 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "C4", "PYI"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-addopts = "-m 'not network'"
-markers = ["network: reaches the live Common Crawl index or data host, or needs a model file that is downloaded, not shipped"]
+addopts = "-m 'not network and not model'"
+markers = [
+    "network: reaches the live Common Crawl index or data host",
+    "model: needs a model file that is downloaded, not shipped",
+]

@@ -1,7 +1,7 @@
 """Naming the language, not the script: a model behind a small seam, and the fastText adapter.
 
 The unit tests inject a fake labeller, so they need neither the model nor the `fasttext` package. The
-one network test at the bottom uses the real model and skips cleanly when it is not on this machine.
+one model test at the bottom uses the real model and skips cleanly when it is not on this machine.
 """
 
 from __future__ import annotations
@@ -188,7 +188,7 @@ def test_the_map_covers_every_two_letter_label_lid_176_can_emit() -> None:
     assert set(ISO_639_3_BY_LID_LABEL) == LID_176_TWO_LETTER_LABELS
 
 
-@pytest.mark.network
+@pytest.mark.model
 def test_the_real_model_tells_english_from_german_where_the_script_adapter_cannot() -> None:
     identifier = build_language_identifier(LanguageConfig(mode="fasttext", model_path=_real_model()))
 

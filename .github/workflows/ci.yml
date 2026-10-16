@@ -3,8 +3,8 @@ name: CI
 # The blocking gates. Every job here must pass before a change can merge, and every check runs
 # offline on a CPU runner: no model, no GPU, no live Common Crawl. The install step is not offline --
 # `pip install -e '.[dev]'` reaches the package index from PyPI, so a network-isolated runner must
-# still provide one for the install. Live-Common-Crawl tests are marked `network` and deselected by
-# pytest.ini's addopts.
+# still provide one for the install. Live-Common-Crawl tests are marked `network` and the real-model
+# test `model`; both are deselected by the addopts in `pyproject.toml`.
 
 on:
   pull_request:

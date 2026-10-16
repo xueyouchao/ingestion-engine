@@ -175,7 +175,8 @@ the whole crawl.
 
 ~~~~bash
 .venv/bin/python -m pytest              # the default suite: offline, no model and no network
-.venv/bin/python -m pytest -m network   # the tests the default run deselects: they reach live hosts
+.venv/bin/python -m pytest -m network   # the live Common Crawl reads the default run deselects
+.venv/bin/python -m pytest -m model     # the real-model test the default run deselects too
 ~~~~
 
 ## What is verified, and how
