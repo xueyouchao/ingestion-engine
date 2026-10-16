@@ -49,8 +49,9 @@ SYSTEM_PROMPT = (
 MAX_DIFF_CHARS = 120_000
 MAX_BODY_CHARS = 8_000
 MAX_ERROR_BODY_CHARS = 200
-# A slow model on a large diff needs more than the three minutes that timed the Spec axis out twice
-# in three runs on a fourteen-file pull request. The two calls run concurrently, so this bounds the
+# A slow model on a large diff needs more than the three minutes that timed the Spec axis out in
+# three of the last four reviews: the review comments on PRs #2, #3 and #4 each report "The read
+# operation timed out", and only #5 answered. The two calls run concurrently, so this bounds the
 # stage rather than doubling it; the deadline sits just past it so a socket timeout, which names
 # itself, normally beats the deadline, which can only say the call never returned.
 REQUEST_TIMEOUT_SECONDS = 600
