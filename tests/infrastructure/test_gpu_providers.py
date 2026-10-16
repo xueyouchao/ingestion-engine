@@ -108,6 +108,19 @@ def test_a_command_provider_gives_the_worker_back_even_when_the_run_failed() -> 
     assert [call[0] for call in runner.calls] == [START, STOP]
 
 
+def test_the_endpoint_is_the_first_json_object_not_a_later_log_line() -> None:
+    """A start command that prints its endpoint and then logs JSON must yield the endpoint, not the log."""
+    stdout = (
+        '{"base_url": "https://rented.example/v1", "identity": "worker"}\n'
+        '{"base_url": "https://dashboard.example", "level": "info"}\n'
+    )
+
+    endpoint = endpoint_from_start_output(stdout, START)
+
+    assert endpoint.base_url == "https://rented.example/v1"
+    assert endpoint.identity == "worker"
+
+
 def test_a_command_that_only_prints_a_url_is_understood() -> None:
     endpoint = endpoint_from_start_output("booting...\nhttps://rented.example/v1\nready\n", START)
 

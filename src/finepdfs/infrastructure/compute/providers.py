@@ -119,8 +119,13 @@ def derive_identity(command: str, model: str = "") -> str:
 
 
 def _json_object(stdout: str) -> dict:
-    """The first JSON object in the output, whole or on one line, or an empty mapping."""
-    candidates = [stdout.strip(), *reversed([line.strip() for line in stdout.splitlines() if line.strip()])]
+    """The first JSON object in the output, whole or on one line, or an empty mapping.
+
+    First, not last: a start command may log JSON after it has named its endpoint, and a later log
+    line must not be mistaken for the endpoint. The whole output is tried first so a command that
+    prints its endpoint as one pretty-printed object is understood even though it spans lines.
+    """
+    candidates = [stdout.strip(), *[line.strip() for line in stdout.splitlines() if line.strip()]]
     for candidate in candidates:
         if not candidate.startswith("{"):
             continue
