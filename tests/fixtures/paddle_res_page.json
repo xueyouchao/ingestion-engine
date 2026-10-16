@@ -1,0 +1,16 @@
+{
+  "_provenance": "Shape taken from PaddleOCR-VL's documented result object (res.parsing_res_list with block_label, block_content and block_order), not captured from a live run.",
+  "res": {
+    "input_path": "page-0001.png",
+    "page_index": 0,
+    "page_count": 1,
+    "width": 1654,
+    "height": 2339,
+    "model_settings": {"use_layout_detection": true, "use_chart_recognition": false},
+    "parsing_res_list": [
+      {"block_label": "doc_title", "block_content": "WMO Resolution 16", "block_bbox": [100, 80, 900, 140], "block_id": 0, "block_order": 0},
+      {"block_label": "text", "block_content": "The Congress noted the damage.", "block_bbox": [100, 200, 900, 300], "block_id": 1, "block_order": 1},
+      {"block_label": "table", "block_content": "<table><tr><td>Station</td></tr></table>", "block_bbox": [100, 320, 900, 500], "block_id": 2, "block_order": 2}
+    ]
+  }
+}

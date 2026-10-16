@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Architecture review — finepdfs-cocoindex (bc0b602)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: "neutral",
+      themeVariables: { fontFamily: "ui-sans-serif, system-ui, sans-serif", fontSize: "14px" },
+      flowchart: { curve: "basis", nodeSpacing: 30, rankSpacing: 44 },
+    });
+  </script>
+  <style>
+    html { scroll-behavior: smooth; }
+    .mermaid { font-variant-ligatures: none; }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    @media print { .no-print { display: none; } body { background: #fff; } }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-800 antialiased">
+  <header class="bg-slate-900 text-slate-100">
+    <div class="mx-auto max-w-5xl px-6 py-10">
+      <p class="text-xs uppercase tracking-widest text-sky-300">Architecture review · read-only</p>
+      <h1 class="mt-2 text-3xl font-bold sm:text-4xl">finepdfs-cocoindex</h1>
+      <p class="mt-3 max-w-3xl text-sm leading-relaxed text-slate-300">
+        A FinePDFs-shaped PDF curation pipeline on CocoIndex v1: fetch real Common Crawl PDFs, route on the
+        embedded text layer, OCR only what needs it, then clean, language-tag, deduplicate and publish
+        Markdown + JSON records — incrementally.
+      </p>
+      <dl class="mt-6 grid grid-cols-2 gap-x-8 gap-y-2 text-xs text-slate-300 sm:grid-cols-4">
+        <div><dt class="text-slate-500">Repository</dt><dd class="mono">/home/ubuntu/cocoindex</dd></div>
+        <div><dt class="text-slate-500">Branch</dt><dd class="mono">feature/finepdfs-integration</dd></div>
+        <div><dt class="text-slate-500">Reviewed revision</dt><dd class="mono">bc0b602</dd></div>
+        <div><dt class="text-slate-500">Review date</dt><dd>2026-10-16</dd></div>
+      </dl>
+      <p class="mt-4 rounded-md bg-slate-800 px-3 py-2 text-xs text-slate-300">
+        <span class="font-semibold text-sky-300">Revision note.</span> The branch was described at kickoff as
+        four commits on <span class="mono">master</span>. It advanced during this review
+        (<span class="mono">580cc62 → 5955ebe → bc0b602</span>), and the working tree is still moving: at the
+        time of writing, uncommitted edits touch the <span class="mono">commoncrawl/</span>,
+        <span class="mono">corpus/</span>, CocoIndex flow, CLI, dedup and engine modules, and new tests are being
+        added. All line citations below are frozen at commit <span class="mono">bc0b602</span> — the revision this
+        review read. Re-check any finding against the working tree before acting on it.
+      </p>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-5xl px-6 py-10 space-y-12">
+
+    <section id="overview" aria-labelledby="overview-h">
+      <h2 id="overview-h" class="text-2xl font-bold text-slate-900">1 · Overview</h2>
+      <p class="mt-3 text-sm leading-relaxed">
+        At <span class="mono">bc0b602</span> the pipeline is a small, well-layered DDD codebase whose recent
+        redesign moved the whole duplicate decision into the CocoIndex flow: a concurrent first pass
+        (<code>read_document</code>) routes and reads each document and returns its finding as a value, then a
+        single deciding pass (<code>publish_corpus</code>) sees every cleaned text at once and declares either a
+        document’s Markdown + record, an exclusion, or the corpus-wide <code>dedupe/</code> report. That is a real
+        architectural win: the dedup result is now declared target state, so a re-run cannot resurrect a
+        near-duplicate or overwrite a record — the earlier separate-command design’s central flaw is gone, and
+        ADR-0006, the spec and the README were updated in lock-step. Layering still holds (no domain or application
+        module imports infrastructure or interfaces), the memo boundary is still exactly the engine call, and the
+        risky protocol mappings remain pure and fixture-tested. The findings that remain are narrower: the
+        <em>deciding pass is implemented twice</em> (once in the flow, once in <code>dry-run</code>), the exact-duplicate
+        policy is now spread across four sites (and <code>plan_deduplication</code>’s exact branch is unreachable from
+        the app), <code>Document.name</code> is still overloaded so an absolute host path becomes a MinerU upload
+        filename, and the engine-name list is still duplicated between the registry and the CLI.
+      </p>
+      <div class="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div class="rounded-lg border border-slate-200 bg-white p-3">
+          <div class="text-2xl font-bold text-slate-900">39</div>
+          <div class="text-xs text-slate-500">Python modules in src/ (domain 9 · app 2 · infra 25 · iface 2)</div>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-white p-3">
+          <div class="text-2xl font-bold text-slate-900">2,696</div>
+          <div class="text-xs text-slate-500">lines under src/ (+18 in main.py)</div>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-white p-3">
+          <div class="text-2xl font-bold text-slate-900">98</div>
+          <div class="text-xs text-slate-500">tests: 94 offline + 4 network (16 files, 1,653 lines)</div>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-white p-3">
+          <div class="text-2xl font-bold text-slate-900">4</div>
+          <div class="text-xs text-slate-500">layers, 4 ports: CrawlSource, TextLayerProbe, OcrEngine, LanguageIdentifier</div>
+        </div>
+      </div>
+      <p class="mt-3 text-xs text-slate-500">
+        Metrics line: 39 <code>.py</code> files / 2,696 lines under <code>src/</code>; 16 test files / 1,653 lines /
+        98 tests (94 offline, 4 network-marked) across 5 test packages; 18-line <code>main.py</code>; 4 layers and
+        4 ports. Counts are from <code>git show bc0b602:…</code>, so uncommitted work in the tree is excluded.
+      </p>
+    </section>
+
+    <section id="diagram" aria-labelledby="diagram-h">
+      <h2 id="diagram-h" class="text-2xl font-bold text-slate-900">2 · Dependency direction</h2>
+      <p class="mt-3 text-sm leading-relaxed">
+        Every solid arrow points inward: <code>interfaces → infrastructure → application → domain</code>, with
+        <code>infrastructure → domain</code> and <code>application → domain</code> as the short paths. Ports live in
+        the domain; infrastructure adapters satisfy them (dashed). The one structural wrinkle, developed in finding 1,
+        is that the corpus decision lives in the infrastructure flow (<code>publish_corpus</code>/<code>_declare</code>)
+        rather than in <code>application/</code>, so <code>interfaces/cli.py</code> has to re-implement it.
+      </p>
+      <div class="mt-5 rounded-xl border border-slate-200 bg-white p-4">
+        <pre class="mermaid">
+flowchart TD
+    CLI["interfaces/ — cli.py, main.py<br/>argparse → runtime / use case / dry-run deciding pass"]
+    INFRA["infrastructure/ — adapters + CocoIndex flow<br/>commoncrawl · engines · language · publishing · corpus · cocoindex"]
+    APP["application/ — use cases over ports<br/>CurateDocument · ExtractionStep · CurationStep"]
+    subgraph DOMAIN["domain/ — value objects + pure policies, no I/O"]
+        PORTS["ports.py — CrawlSource · TextLayerProbe · OcrEngine · LanguageIdentifier"]
+    end
+
+    CLI --> INFRA
+    CLI --> DOMAIN
+    INFRA --> APP
+    INFRA --> DOMAIN
+    APP --> DOMAIN
+    INFRA -. implements .-> PORTS
+    APP -. calls through .-> PORTS
+
+    classDef iface fill:#e2e8f0,stroke:#64748b,color:#0f172a;
+    classDef infra fill:#e0f2fe,stroke:#0284c7,color:#0f172a;
+    classDef app fill:#dcfce7,stroke:#16a34a,color:#0f172a;
+    classDef domain fill:#fef9c3,stroke:#ca8a04,color:#0f172a;
+    classDef ports fill:#fce7f3,stroke:#db2777,color:#0f172a;
+    class CLI iface; class INFRA infra; class APP app; class PORTS ports;
+        </pre>
+        <p class="mt-2 text-xs text-slate-500">Solid = compile-time dependency (points inward). Dashed = adapter satisfies the port / application calls through it.</p>
+      </div>
+    </section>
+
+    <section id="modules" aria-labelledby="modules-h">
+      <h2 id="modules-h" class="text-2xl font-bold text-slate-900">3 · Modules and depth</h2>
+      <p class="mt-3 text-sm leading-relaxed">
+        “Deep” = a lot of behaviour behind a small interface; “shallow” = the interface is about as large as the
+        implementation or exists to be reached through; “leaking” = an outer layer can see and depend on internals;
+        “data” = a neutral value object (shallow by nature, and correct).
+      </p>
+      <div class="mt-5 overflow-x-auto rounded-xl border border-slate-200">
+        <table class="min-w-full divide-y divide-slate-200 bg-white text-sm">
+          <thead class="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+            <tr>
+              <th class="px-4 py-3">Layer</th>
+              <th class="px-4 py-3">Module</th>
+              <th class="px-4 py-3">Interface (what a caller learns)</th>
+              <th class="px-4 py-3">Depth</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr><td class="px-4 py-3 text-slate-500">domain</td><td class="px-4 py-3 mono">crawl.py</td><td class="px-4 py-3">CrawlRecord / CrawlQuery + byte_range</td><td class="px-4 py-3"><span class="rounded bg-slate-100 px-2 py-0.5 text-xs">data</span></td></tr>
+            <tr><td class="px-4 py-3 text-slate-500">domain</td><td class="px-4 py-3 mono">document.py</td><td class="px-4 py-3">Document, PageText, ExtractedDocument, TextLayerQuality</td><td class="px-4 py-3"><span class="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">deep</span> <span class="text-xs text-slate-400">(name is ambiguous — finding 2)</span></td></tr>
+            <tr><td class="px-4 py-3 text-slate-500">domain</td><td class="px-4 py-3 mono">text.py</td><td class="px-4 py-3"><code>CleaningRules.clean(pages)</code> hides normalise + ordered passes + running titles</td><td class="px-4 py-3"><span class="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">deep</span></td></tr>
+            <tr><td class="px-4 py-3 text-slate-500">domain</td><td class="px-4 py-3 mono">ocr.py</td><td class="px-4 py-3"><code>OcrRoutingPolicy.decide(quality)</code> → decision + features + reason</td><td class="px-4 py-3"><span class="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">deep</span></td></tr>
+            <tr><td class="px-4 py-3 text-slate-500">domain</td><td class="px-4 py-3 mono">language.py</td><td class="px-4 py-3"><code>LanguagePolicy.apply(tags, page_count)</code></td><td class="px-4 py-3"><span class="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">deep</span></td></tr>
+            <tr><td class="px-4 py-3 text-slate-500">domain</td><td class="px-4 py-3 mono">publishing.py</td><td class="px-4 py-3"><code>PublishPolicy.judge</code> + DocumentRecord + CurationOutcome</td><td class="px-4 py-3"><span class="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">deep</span></td></tr>
+            <tr><td class="px-4 py-3 text-slate-500">domain</td><td class="px-4 py-3 mono">dedup.py</td><td class="px-4 py-3"><code>exact_duplicate_keepers</code> + <code>plan_deduplication</code> hide MinHash + grouping</td><td class="px-4 py-3"><span class="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">deep</span> <span class="text-xs text-slate-400">(exact branch unreachable — finding 3)</span></td></tr>
+            <tr><td class="px-4 py-3 text-slate-500">domain</td><td class="px-4 py-3 mono">ports.py</td><td class="px-4 py-3">Four <code>Protocol</code> seams</td><td class="px-4 py-3"><span class="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-800">shallow, intentional</span></td></tr>
+            <tr class="bg-slate-50/60"><td class="px-4 py-3 text-slate-500">application</td><td class="px-4 py-3 mono">curate.py</td><td class="px-4 py-3"><code>CurateDocument.run</code>, <code>ExtractionStep.route/extract_with</code>, <code>CurationStep.curate</code></td><td class="px-4 py-3"><span class="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">deep</span> <span class="rounded bg-rose-100 px-2 py-0.5 text-xs text-rose-800">partly leaking</span></td></tr>
+            <tr class="bg-slate-50/60"><td class="px-4 py-3 text-slate-500">infrastructure</td><td class="px-4 py-3 mono">cocoindex/flow.py</td><td class="px-4 py-3"><code>read_document</code> (memoised engine call inside) + <code>publish_corpus</code>/<code>_declare</code> (the corpus decision)</td><td class="px-4 py-3"><span class="rounded bg-rose-100 px-2 py-0.5 text-xs text-rose-800">leaking</span> <span class="text-xs text-slate-400">(holds an application concern)</span></td></tr>
+            <tr class="bg-slate-50/60"><td class="px-4 py-3 text-slate-500">infrastructure</td><td class="px-4 py-3 mono">cocoindex/runtime.py</td><td class="px-4 py-3"><code>runtime_from_environment()</code> + <code>Runtime</code> assembly, dead <code>engines</code>, rebuilding <code>curator()</code></td><td class="px-4 py-3"><span class="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-800">shallow</span></td></tr>
+            <tr class="bg-slate-50/60"><td class="px-4 py-3 text-slate-500">infrastructure</td><td class="px-4 py-3 mono">engines/registry.py</td><td class="px-4 py-3"><code>build_engines</code> factory — plus <code>PageRenderer</code> and duplicated engine names</td><td class="px-4 py-3"><span class="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-800">mixed</span></td></tr>
+            <tr class="bg-slate-50/60"><td class="px-4 py-3 text-slate-500">infrastructure</td><td class="px-4 py-3 mono">engines/pdf_document.py</td><td class="px-4 py-3"><code>PdfDocument</code> context manager hides open / measure / render</td><td class="px-4 py-3"><span class="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">deep</span></td></tr>
+            <tr class="bg-slate-50/60"><td class="px-4 py-3 text-slate-500">infrastructure</td><td class="px-4 py-3 mono">engines/subprocess_support.py</td><td class="px-4 py-3"><code>SubprocessRunner.run</code>: PATH check, timeout, no shell, clear failure</td><td class="px-4 py-3"><span class="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">deep</span></td></tr>
+            <tr class="bg-slate-50/60"><td class="px-4 py-3 text-slate-500">infrastructure</td><td class="px-4 py-3 mono">engines/vlm_chat.py</td><td class="px-4 py-3"><code>complete_with_page_image</code> hides HTTP, base64 and response shapes</td><td class="px-4 py-3"><span class="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">deep</span></td></tr>
+            <tr class="bg-slate-50/60"><td class="px-4 py-3 text-slate-500">infrastructure</td><td class="px-4 py-3 mono">engines/{docling,paddleocr_vl,mineru}.py</td><td class="px-4 py-3">Each protocol → <code>PageText</code> mapping, with its own error type</td><td class="px-4 py-3"><span class="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">deep</span></td></tr>
+            <tr class="bg-slate-50/60"><td class="px-4 py-3 text-slate-500">infrastructure</td><td class="px-4 py-3 mono">commoncrawl/{cdx,source,warc}.py</td><td class="px-4 py-3">Index query, ranged fetch with retries, one-record WARC parse</td><td class="px-4 py-3"><span class="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">deep</span></td></tr>
+            <tr class="bg-slate-50/60"><td class="px-4 py-3 text-slate-500">infrastructure</td><td class="px-4 py-3 mono">corpus/{manifest,index,fetch}.py</td><td class="px-4 py-3">Manifest I/O, stable document keys, resumable per-record fetch</td><td class="px-4 py-3"><span class="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">deep</span></td></tr>
+            <tr class="bg-slate-50/60"><td class="px-4 py-3 text-slate-500">infrastructure</td><td class="px-4 py-3 mono">language/script.py</td><td class="px-4 py-3"><code>ScriptLanguageIdentifier.identify</code> hides the range tables and threshold</td><td class="px-4 py-3"><span class="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">deep</span></td></tr>
+            <tr class="bg-slate-50/60"><td class="px-4 py-3 text-slate-500">infrastructure</td><td class="px-4 py-3 mono">publishing/disk.py</td><td class="px-4 py-3">Pure paths, payloads and reads for the output layout (no mutation since the redesign)</td><td class="px-4 py-3"><span class="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">deep</span></td></tr>
+            <tr><td class="px-4 py-3 text-slate-500">interfaces</td><td class="px-4 py-3 mono">cli.py</td><td class="px-4 py-3">argparse commands; <code>dry-run</code> contains a second deciding pass</td><td class="px-4 py-3"><span class="rounded bg-rose-100 px-2 py-0.5 text-xs text-rose-800">leaking</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="candidates" aria-labelledby="candidates-h">
+      <h2 id="candidates-h" class="text-2xl font-bold text-slate-900">4 · Ranked candidates</h2>
+      <p class="mt-3 text-sm leading-relaxed">
+        Ranked by architectural impact per unit of effort. Effort: <strong>S</strong> ≈ hours,
+        <strong>M</strong> ≈ a day or two, <strong>L</strong> ≈ a week. Every claim cites code at
+        <span class="mono">bc0b602</span>.
+      </p>
+
+      <ol class="mt-6 space-y-6">
+
+        <li class="rounded-xl border border-slate-200 bg-white p-5">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="rounded-full bg-slate-900 px-2.5 py-0.5 text-xs font-semibold text-white">1</span>
+            <h3 class="text-lg font-semibold text-slate-900">The deciding pass is implemented twice: <code>publish_corpus</code> and <code>dry-run</code></h3>
+            <span class="rounded bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">Effort M</span>
+          </div>
+          <p class="mt-3 text-sm leading-relaxed">
+            <strong>Change.</strong> Extract the corpus decision into one application-level pure function —
+            <code>decide_corpus(readings, threshold) -&gt; outcomes/exclusions</code> — that returns values and writes
+            nothing. <code>publish_corpus</code> becomes a thin declarer over that result, and <code>_dry_run</code>
+            prints it. The branch order (exact → failed → dropped → near → published) then exists once.
+          </p>
+          <div class="mt-3 rounded-lg bg-slate-50 p-3 text-xs">
+            <p class="font-semibold text-slate-600">Evidence</p>
+            <ul class="mt-1 list-disc space-y-1 pl-5 mono text-slate-600">
+              <li>flow.py:116–143 — curates every non-exact reading, calls <code>plan_deduplication</code>, maps near-duplicates, then declares.</li>
+              <li>flow.py:151–190 — <code>_declare</code> encodes the exclusion precedence: exact (159–163), failed (164–166), dropped (168–171), near (173–177), published (179–182).</li>
+              <li>cli.py:157–198 — <code>_dry_run</code> independently curates keepers, calls <code>plan_deduplication</code> (164), maps near-duplicates (172) and re-encodes the same precedence in its print loop.</li>
+              <li>docs/adr/0006-decide-duplicates-in-the-flow.md:56 — “<code>dry-run</code> prints what the deciding pass would decide.” The guarantee is by hand-discipline, not construction.</li>
+              <li>Failure paths also diverge: the flow records a failure string in <code>read_document</code> (flow.py:100–102) while the dry-run relies on <code>CurateDocument.run</code> returning <code>status="failed"</code> (curate.py:165–171).</li>
+            </ul>
+          </div>
+          <p class="mt-3 text-sm leading-relaxed">
+            <strong>Why it matters.</strong> This is duplicate domain logic across two layers, and the two copies
+            must agree on a subtle ordering (a document can be both drop-eligible and a near-duplicate; which reason
+            wins is a policy). Today a change to the precedence in <code>_declare</code> silently makes
+            <code>dry-run</code> a lie — the one tool an operator uses to size a GPU job before running. A caller
+            (the CLI) must know the flow’s internal branch order to reproduce it, which is the “caller must know
+            internal ordering” smell at corpus scale.
+          </p>
+          <p class="mt-2 text-sm leading-relaxed"><strong>Benefit.</strong> One corpus decision, testable in memory without CocoIndex; <code>dry-run</code> and <code>run</code> cannot drift; the flow shrinks to “read values, declare results.”</p>
+        </li>
+
+        <li class="rounded-xl border border-slate-200 bg-white p-5">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="rounded-full bg-slate-900 px-2.5 py-0.5 text-xs font-semibold text-white">2</span>
+            <h3 class="text-lg font-semibold text-slate-900"><code>Document.name</code> is overloaded between a filesystem path and a URL, and a host path leaks as the MinerU upload filename</h3>
+            <span class="rounded bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">Effort S</span>
+          </div>
+          <p class="mt-3 text-sm leading-relaxed">
+            <strong>Change.</strong> Give the document an explicit identity: either rename the field to <code>url</code>
+            and pass the PDF path separately where rendering/upload needs a name, or keep <code>name</code> as a plain
+            display filename (e.g. the content digest) and have <code>CurateDocument.run(document, url)</code> take the
+            URL as a parameter.
+          </p>
+          <div class="mt-3 rounded-lg bg-slate-50 p-3 text-xs">
+            <p class="font-semibold text-slate-600">Evidence</p>
+            <ul class="mt-1 list-disc space-y-1 pl-5 mono text-slate-600">
+              <li>domain/document.py:10–18 — <code>Document(name, content)</code>; nothing says what <code>name</code> is.</li>
+              <li>infrastructure/cocoindex/flow.py:62 — <code>Document(name=str(pdf_path), …)</code>, an absolute corpus path.</li>
+              <li>interfaces/cli.py:161 — <code>Document(name=document.url, …)</code>, a URL. Same type, different meaning.</li>
+              <li>application/curate.py:168 — <code>url=document.name</code>: the record’s URL is whatever the caller put in <code>name</code>.</li>
+              <li>infrastructure/engines/mineru.py:168–170 — <code>filename = document.name or "document.pdf"</code> becomes the multipart <code>filename=</code>, so the flow uploads <code>/home/…/corpus/pdfs/&lt;digest&gt;.pdf</code>.</li>
+            </ul>
+          </div>
+          <p class="mt-3 text-sm leading-relaxed">
+            <strong>Why it matters.</strong> The seam’s contract is ambiguous, and two callers already fill it with
+            different things; the dry-run works only because it happens to pass the URL while the flow bypasses
+            <code>CurateDocument.run</code> and passes the URL explicitly (flow.py:121). The MinerU leak is concrete:
+            it exposes the pipeline host’s directory layout to the model service and makes the request depend on a
+            mount point.
+          </p>
+          <p class="mt-2 text-sm leading-relaxed"><strong>Benefit.</strong> An unambiguous identity at the seam and no host path in outbound HTTP.</p>
+        </li>
+
+        <li class="rounded-xl border border-slate-200 bg-white p-5">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="rounded-full bg-slate-900 px-2.5 py-0.5 text-xs font-semibold text-white">3</span>
+            <h3 class="text-lg font-semibold text-slate-900">The exact-duplicate policy lives in four places, and <code>plan_deduplication</code>’s exact branch is unreachable from the app</h3>
+            <span class="rounded bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">Effort S</span>
+          </div>
+          <p class="mt-3 text-sm leading-relaxed">
+            <strong>Change.</strong> Have one domain function return each URL’s exact-duplicate view (keeper or
+            <code>None</code>, plus a reason). Use it for the pre-read skip in the flow and for the exclusion, and
+            delete the exact branch from <code>plan_deduplication</code> (or feed it the manifest-level keeper map
+            explicitly) so there is one definition of “this document is an exact duplicate of that one”.
+          </p>
+          <div class="mt-3 rounded-lg bg-slate-50 p-3 text-xs">
+            <p class="font-semibold text-slate-600">Evidence</p>
+            <ul class="mt-1 list-disc space-y-1 pl-5 mono text-slate-600">
+              <li>flow.py:198 — <code>exact_duplicate_keepers</code> computed in <code>app_main</code>; flow.py:89–90 skips a non-keeper before reading; flow.py:159–163 emits the exclusion.</li>
+              <li>cli.py:154, 159–160, 177–179 — the dry-run recomputes and re-branches the same decision.</li>
+              <li>domain/dedup.py:110–117 — <code>plan_deduplication</code> builds exact <code>DuplicateDecision</code>s from digests.</li>
+              <li>flow.py:123–130 and cli.py:164–171 feed <code>plan_deduplication</code> only <em>published keepers</em>, so its input never contains an exact duplicate — the branch at dedup.py:113–117 is dead in both callers, and flow.py:131 discards every non-<code>near</code> decision anyway.</li>
+            </ul>
+          </div>
+          <p class="mt-3 text-sm leading-relaxed">
+            <strong>Why it matters.</strong> ADR-0006 makes exact duplicates “knowable from the manifest alone”, but
+            the policy is now scattered across flow, CLI and domain, while the domain branch is only exercised by a
+            unit test (tests/domain/test_dedup.py:40–53) that no production caller can reach. That is an abstraction
+            kept alive by its test rather than by a caller — YAGNI in reverse.
+          </p>
+          <p class="mt-2 text-sm leading-relaxed"><strong>Benefit.</strong> One exact-dedup definition; less code on the deciding path; the test suite stops certifying dead code.</p>
+        </li>
+
+        <li class="rounded-xl border border-slate-200 bg-white p-5">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="rounded-full bg-slate-900 px-2.5 py-0.5 text-xs font-semibold text-white">4</span>
+            <h3 class="text-lg font-semibold text-slate-900">The engine registry is not the single source of truth: adding an engine still touches four files</h3>
+            <span class="rounded bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">Effort S</span>
+          </div>
+          <p class="mt-3 text-sm leading-relaxed">
+            <strong>Change.</strong> Drive the CLI’s engine list/default and the runtime’s native-engine special case
+            from <code>registry.KNOWN_ENGINES</code>/<code>NATIVE_ENGINE</code>, and collapse the duplicate
+            <code>"pymupdf"</code> constants into one. The CLI and runtime are already outer layers, so importing the
+            registry is allowed.
+          </p>
+          <div class="mt-3 rounded-lg bg-slate-50 p-3 text-xs">
+            <p class="font-semibold text-slate-600">Evidence</p>
+            <ul class="mt-1 list-disc space-y-1 pl-5 mono text-slate-600">
+              <li>infrastructure/engines/registry.py:12–16 — <code>NATIVE_ENGINE</code> and <code>KNOWN_ENGINES</code>.</li>
+              <li>interfaces/cli.py:68–69 — hardcoded <code>default="pymupdf"</code> and <code>choices=["pymupdf","docling","paddleocr-vl","mineru"]</code>.</li>
+              <li>application/curate.py:23 — a second constant <code>NATIVE_TEXT_ENGINE = "pymupdf"</code>.</li>
+              <li>infrastructure/cocoindex/runtime.py:62, 73 — literal <code>"pymupdf"</code> and <code>build_engines([] if engine_name == "pymupdf" else …)</code>.</li>
+              <li>Identity strings are separate again: pymupdf_engine.py:21, docling_engine.py:35, paddleocr_vl.py:34, mineru.py:47. Unknown-engine errors are also raised twice (curate.py:57–62, registry.py:85).</li>
+            </ul>
+          </div>
+          <p class="mt-3 text-sm leading-relaxed">
+            <strong>Why it matters.</strong> ADR-0001 and spec story 13 promise “one adapter module plus one registry
+            entry”. In practice a new engine also needs a CLI <code>choices</code> edit (or it is unreachable by flag)
+            and a runtime default edit, and the CLI list cannot be validated against the registry as written — a typo
+            there surfaces only when the flow is built.
+          </p>
+          <p class="mt-2 text-sm leading-relaxed"><strong>Benefit.</strong> The stated extension point actually holds: one list governs flag parsing, defaults and error messages.</p>
+        </li>
+
+        <li class="rounded-xl border border-slate-200 bg-white p-5">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="rounded-full bg-slate-900 px-2.5 py-0.5 text-xs font-semibold text-white">5</span>
+            <h3 class="text-lg font-semibold text-slate-900">Two shallow seams: <code>Runtime</code> rebuilds the use case from step internals, and <code>PageRenderer.render</code> has no caller</h3>
+            <span class="rounded bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">Effort S</span>
+          </div>
+          <p class="mt-3 text-sm leading-relaxed">
+            <strong>Change.</strong> Build <code>CurateDocument</code> once in the runtime and derive the flow’s steps
+            from it (or drop <code>CurateDocument</code> and make the steps the only entry point), removing the
+            pass-through properties. Either use <code>PageRenderer.render</code> inside the PaddleOCR-VL engine or
+            collapse the class to the <code>dpi</code> it is actually used as.
+          </p>
+          <div class="mt-3 rounded-lg bg-slate-50 p-3 text-xs">
+            <p class="font-semibold text-slate-600">Evidence</p>
+            <ul class="mt-1 list-disc space-y-1 pl-5 mono text-slate-600">
+              <li>runtime.py:50–54 — <code>curator()</code> re-assembles <code>CurateDocument</code> from <code>self.extraction.probe</code>, <code>self.extraction.engines</code> and <code>self.curation.languages</code>.</li>
+              <li>curate.py:78–88, 111–117 — those accessors exist to make that reconstruction possible; runtime.py:40–42 — <code>Runtime.engines</code> has no caller at all.</li>
+              <li>registry.py:37–49 — <code>PageRenderer.render</code>; paddleocr_vl.py:44 reads only <code>self._renderer.dpi</code> and renders inline (<code>pdf.render_page_png</code>). No <code>.render(</code> call site exists.</li>
+              <li>paddleocr_vl.py:15 — an engine module imports the engine factory to get the helper.</li>
+            </ul>
+          </div>
+          <p class="mt-3 text-sm leading-relaxed">
+            <strong>Why it matters.</strong> The accessors are interface surface that exists only so <code>Runtime</code>
+            can reach through <code>ExtractionStep</code>; adding a collaborator to a step forces a matching edit in
+            <code>Runtime.curator()</code>. <code>PageRenderer</code> is a textbook shallow module — one method is dead
+            and the other is an int — living in the wrong file.
+          </p>
+          <p class="mt-2 text-sm leading-relaxed"><strong>Benefit.</strong> One assembly path for the use case; fewer hypothetical seams, and an engine no longer depends on the engine factory for a helper.</p>
+        </li>
+      </ol>
+    </section>
+
+    <section id="top" aria-labelledby="top-h">
+      <h2 id="top-h" class="text-2xl font-bold text-slate-900">5 · Top recommendation</h2>
+      <div class="mt-4 rounded-xl border-2 border-sky-500 bg-sky-50 p-5 shadow-sm">
+        <p class="text-base font-semibold text-sky-900">
+          Extract the corpus decision into one application-level pure function that both <code>publish_corpus</code>
+          and <code>dry-run</code> consume, so ADR-0006’s promise that “<code>dry-run</code> prints what the deciding
+          pass would decide” becomes structural rather than hand-maintained.
+        </p>
+        <p class="mt-2 text-sm leading-relaxed text-sky-900/90">
+          Right now the deciding precedence lives twice — <code>_declare</code> (flow.py:151–190) and the
+          <code>dry-run</code> print loop (cli.py:175–198) — and the two only stay in step by discipline. A single
+          value-returning <code>decide_corpus</code> removes the duplication, keeps the flow as a thin declarer, and
+          makes the decision unit-testable without CocoIndex. It also gives findings 3 and 5 a natural home: the
+          exact-duplicate view and the per-step values move into the same application seam.
+        </p>
+      </div>
+    </section>
+
+    <section id="good" aria-labelledby="good-h">
+      <h2 id="good-h" class="text-2xl font-bold text-slate-900">6 · Already good — leave alone</h2>
+      <ul class="mt-4 grid gap-3 sm:grid-cols-2">
+        <li class="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm">
+          <strong>Duplicates are now declared target state.</strong> The deciding pass declares exclusions and the
+          <code>dedupe/{kept,duplicates}.jsonl</code> report (flow.py:136–143, 159–177); nothing is written by side
+          effect, so a re-run cannot resurrect a near-duplicate. Proven end to end
+          (tests/infrastructure/test_flow_end_to_end.py:290–331). This is the branch’s strongest property.
+        </li>
+        <li class="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm">
+          <strong>Exact duplicates are skipped before the expensive read.</strong> <code>read_document</code> returns
+          early for a non-keeper (flow.py:89–90) — a genuinely subtle fix for the fact that concurrency defeats the
+          memo and two identical documents would otherwise both call the engine. Documented in the new ADR-0006.
+        </li>
+        <li class="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm">
+          <strong>Layering holds.</strong> No domain or application module imports infrastructure or interfaces
+          (verified by grep over <code>src/finepdfs/domain</code> and <code>src/finepdfs/application</code>); the
+          outer layers depend inward.
+        </li>
+        <li class="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm">
+          <strong>The memo boundary is right and proven.</strong> Only the engine call is memoised
+          (flow.py:58–63); thresholds and cleaning sit outside it. Counting-engine tests prove a second run does no
+          extraction and a publish-rule change does not re-extract
+          (tests/infrastructure/test_flow_end_to_end.py:147–186).
+        </li>
+        <li class="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm">
+          <strong>Pure domain policies and pure protocol mappings.</strong> <code>text.py</code>, <code>ocr.py</code>,
+          <code>language.py</code>, <code>publishing.py</code>, <code>dedup.py</code> are data + functions, driven
+          with hand-written fakes (tests/application/test_curate_document.py:15–50); WARC → PDF and the VLM/MinerU
+          responses → pages are pure and fixture-tested.
+        </li>
+        <li class="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm">
+          <strong>Deep infrastructure adapters.</strong> <code>SubprocessRunner</code> (no shell, PATH check, timeout,
+          clear error) and <code>PdfDocument</code> (context-managed PyMuPDF) hide real work behind small interfaces;
+          the CLI engines share one runner instead of re-implementing it.
+        </li>
+        <li class="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm">
+          <strong>Failure isolation.</strong> A bad file or a down engine becomes a returned value in
+          <code>read_document</code> (flow.py:100–102) and an exclusion in <code>_declare</code> (164–166); the run
+          continues and nothing disappears silently.
+        </li>
+        <li class="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm">
+          <strong>Deterministic dedup.</strong> The keeper is the smallest URL per digest (dedup.py:35–46) and the
+          near-duplicate plan is a pure function compared in URL order (dedup.py:105–137), tested at
+          tests/domain/test_dedup.py:17–38.
+        </li>
+        <li class="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm">
+          <strong>Corpus-wide cost is accepted, not hidden.</strong> ADR-0006:49–51 and README name the in-memory
+          deciding pass as the price of a corpus-wide decision and scope the pipeline to thousands of documents. That
+          is an honest trade-off, not an accident.
+        </li>
+        <li class="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm">
+          <strong>Restraint on speculative ports.</strong> No quality-classifier port until a model exists;
+          <code>MineruBackend</code> is a real seam with two adapters (HTTP + subprocess). Keep that discipline.
+        </li>
+      </ul>
+    </section>
+
+    <footer class="border-t border-slate-200 pt-6 text-xs text-slate-500">
+      <p>Read-only architecture review of <span class="mono">/home/ubuntu/cocoindex</span> at commit <span class="mono">bc0b602</span> on branch <span class="mono">feature/finepdfs-integration</span>. No source file was modified by this review; this HTML is the only artifact.</p>
+      <p class="mt-1">Evidence citations are <span class="mono">path:line</span> from <span class="mono">bc0b602</span>. Effort labels are relative (S/M/L), not calendar estimates.</p>
+    </footer>
+  </main>
+</body>
+</html>

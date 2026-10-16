@@ -1,0 +1,30 @@
+[
+  {
+    "_provenance": "Shape taken from MinerU's documented content_list output (text/table/equation/image blocks with page_idx), not captured from a live run.",
+    "type": "text",
+    "page_idx": 0,
+    "bbox": [100, 120, 900, 200],
+    "text": "WMO Resolution 16 on the vandalism of instruments"
+  },
+  {
+    "type": "table",
+    "page_idx": 0,
+    "table_body": "<table><tr><td>Station</td><td>Status</td></tr></table>"
+  },
+  {
+    "type": "equation",
+    "page_idx": 1,
+    "text": "E = mc^2"
+  },
+  {
+    "type": "image",
+    "page_idx": 1,
+    "img_path": "images/1a2b.jpg",
+    "img_caption": ["Figure 1: a damaged anemometer"]
+  },
+  {
+    "type": "text",
+    "page_idx": 1,
+    "text": "The Congress resolved to repair the station."
+  }
+]

@@ -1,0 +1,92 @@
+"""Building the engines a run was asked for, from a plain configuration."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from finepdfs.domain.ports import OcrEngine
+from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextEngine
+from finepdfs.infrastructure.engines.subprocess_support import SubprocessRunner
+
+NATIVE_ENGINE = "pymupdf"
+DOCLING_ENGINE = "docling"
+PADDLEOCR_VL_ENGINE = "paddleocr-vl"
+MINERU_ENGINE = "mineru"
+KNOWN_ENGINES = (NATIVE_ENGINE, DOCLING_ENGINE, PADDLEOCR_VL_ENGINE, MINERU_ENGINE)
+
+
+class UnknownEngine(ValueError):
+    """Raised when a run names an engine that does not exist."""
+
+
+@dataclass(frozen=True, slots=True)
+class EngineConfig:
+    """How to reach one engine: a local command, or an HTTP endpoint of a model server."""
+
+    name: str = NATIVE_ENGINE
+    command: str = ""
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""
+    page_dpi: int = 200
+    timeout_seconds: float = 300.0
+    work_dir: Path | None = None
+
+
+def build_engine(config: EngineConfig) -> OcrEngine:
+    """One engine, whichever kind it is. Imported lazily so unused engines cost nothing."""
+    if config.name == NATIVE_ENGINE:
+        return PymupdfTextEngine()
+    if config.name == DOCLING_ENGINE:
+        from finepdfs.infrastructure.engines.docling_engine import DoclingEngine
+
+        return DoclingEngine(
+            command=config.command or "docling",
+            work_dir=config.work_dir,
+            runner=SubprocessRunner(config.timeout_seconds),
+        )
+    if config.name == PADDLEOCR_VL_ENGINE:
+        from finepdfs.infrastructure.engines.paddleocr_vl import PaddleOcrVlCliEngine, PaddleOcrVlEngine
+
+        if config.command:
+            return PaddleOcrVlCliEngine(
+                command=config.command,
+                work_dir=config.work_dir,
+                dpi=config.page_dpi,
+                runner=SubprocessRunner(config.timeout_seconds),
+            )
+        from finepdfs.infrastructure.engines.vlm_chat import ChatEndpoint, VlmChatTransport
+
+        endpoint = ChatEndpoint(
+            base_url=config.base_url,
+            model=config.model,
+            api_key=config.api_key,
+            timeout_seconds=config.timeout_seconds,
+        )
+        return PaddleOcrVlEngine(transport=VlmChatTransport(endpoint), dpi=config.page_dpi)
+    if config.name == MINERU_ENGINE:
+        from finepdfs.infrastructure.engines.mineru import MineruEngine, MineruHttpBackend, MineruSubprocessBackend
+
+        if config.base_url:
+            backend = MineruHttpBackend(
+                base_url=config.base_url, api_key=config.api_key, timeout_seconds=config.timeout_seconds
+            )
+        else:
+            backend = MineruSubprocessBackend(
+                command=config.command or "mineru",
+                work_dir=config.work_dir,
+                runner=SubprocessRunner(config.timeout_seconds),
+            )
+        return MineruEngine(backend=backend)
+    raise UnknownEngine(f"unknown engine {config.name!r}; known engines are {', '.join(KNOWN_ENGINES)}")
+
+
+def build_engines(configs: list[EngineConfig]) -> dict[str, OcrEngine]:
+    """Every configured engine, keyed by the name a run refers to it by, plus the native one."""
+    engines = {NATIVE_ENGINE: PymupdfTextEngine()}
+    for config in configs:
+        if config.name in engines:
+            continue
+        engines[config.name] = build_engine(config)
+    return engines
