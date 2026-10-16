@@ -42,8 +42,9 @@ class OcrEngine(Protocol):
 class LanguageIdentifier(Protocol):
     """Names the language or script of one page's text.
 
-    The tag is in the vocabulary of whichever adapter is wired -- `FINEPDFS_LANGUAGE` selects it -- so a
-    caller treats it as an opaque string and compares it against an allow-list in that same vocabulary.
+    The tag is in the vocabulary of the adapter that produced it -- a language code for one adapter, a
+    script code for another -- so a caller treats it as an opaque string and compares it against an
+    allow-list in that same vocabulary.
     """
 
     def identify(self, text: str, page_number: int) -> PageLanguage: ...
