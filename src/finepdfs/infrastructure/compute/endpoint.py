@@ -57,8 +57,8 @@ def export_endpoint(endpoint: GpuEndpoint, environ: MutableMapping[str, str]) ->
 
     Precedence is deliberate. A leased address overwrites whatever the environment held, because the
     user asked for a rented worker and that worker is where the bytes have to go. The detail is
-    different: a value already set is kept, so a user who knows which worker version is running can pin
-    the memo name and have it outlive the provider's derived default.
+    different: a non-empty value already set is kept, so a user who knows which worker version is
+    running can pin the memo name and have it outlive the provider's derived default.
     """
     for variable, value in (
         (ENGINE_BASE_URL, endpoint.base_url),
@@ -67,5 +67,9 @@ def export_endpoint(endpoint: GpuEndpoint, environ: MutableMapping[str, str]) ->
     ):
         if value:
             environ[variable] = value
-    if endpoint.detail:
-        environ.setdefault(ENGINE_DETAIL, endpoint.detail)
+    # An empty value is not a pin. Every other reader of FINEPDFS_ENGINE_DETAIL treats empty as unset,
+    # and so does the provider that derived this one, so a present-but-empty key has to be overwritten
+    # rather than kept: `setdefault` would leave "" here, `build_engine` would skip `StableIdentity`,
+    # and the memo key would fall back to the address-bearing default ADR-0007 removes.
+    if endpoint.detail and not environ.get(ENGINE_DETAIL, "").strip():
+        environ[ENGINE_DETAIL] = endpoint.detail

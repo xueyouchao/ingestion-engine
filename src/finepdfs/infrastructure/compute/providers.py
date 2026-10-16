@@ -371,12 +371,14 @@ def leased_environment(environ: MutableMapping[str, str] | None = None) -> Itera
 def _static_endpoint(values: Mapping[str, str]) -> GpuEndpoint:
     """A fixed endpoint named by its model, never by its address.
 
-    A pinned ``FINEPDFS_ENGINE_DETAIL`` wins the name the static provider derives, exactly as it wins
-    the command provider's derived one: ADR-0007 keeps a detail already set, so ``--engine-detail``
-    outlives the provider's default. ``FINEPDFS_GPU_DETAIL`` names the deployment when nothing is
-    pinned; otherwise the model names it, which is what keeps the memo key still when the address moves.
-    This is the one place the two names meet, so this is where the precedence is decided;
-    ``export_endpoint`` publishes the answer rather than deciding it a second time.
+    A non-empty pinned ``FINEPDFS_ENGINE_DETAIL`` wins the name the static provider derives, exactly as
+    it wins the command provider's derived one: ADR-0007 keeps a detail already set, so
+    ``--engine-detail`` outlives the provider's default. ``FINEPDFS_GPU_DETAIL`` names the deployment when
+    nothing is pinned; otherwise the model names it, which is what keeps the memo key still when the
+    address moves. An empty ``FINEPDFS_ENGINE_DETAIL`` is not a pin -- it is the unset value every reader
+    here reads as absent -- so it falls through like the key is not there. This is the one place the two
+    names meet, so this is where the precedence is decided; ``export_endpoint`` publishes the answer
+    rather than deciding it a second time.
     """
     base_url = values.get(GPU_BASE_URL, "").strip() or values.get(ENGINE_BASE_URL, "").strip()
     model = values.get(GPU_MODEL, "").strip() or values.get(ENGINE_MODEL, "").strip()

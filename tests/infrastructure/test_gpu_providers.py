@@ -154,6 +154,48 @@ def test_the_gpu_detail_names_the_static_deployment_when_nothing_is_pinned() -> 
         assert environ["FINEPDFS_ENGINE_DETAIL"] == "gpu:v1"
 
 
+def test_an_empty_pinned_detail_does_not_drop_the_providers_own_name() -> None:
+    """An empty FINEPDFS_ENGINE_DETAIL is the unset value, not a pin, so the provider's name still wins.
+
+    The static provider decided the detail and then ``export_endpoint``'s ``setdefault`` kept the
+    present-but-empty key, so ``build_engine`` saw ``detail=""``, skipped ``StableIdentity``, and the
+    memo key fell back to the address ADR-0007 keeps out of it. Both readers now agree that empty is
+    unset.
+    """
+    environ = {
+        "FINEPDFS_GPU_PROVIDER": "static",
+        "FINEPDFS_GPU_BASE_URL": "http://host:8000/v1",
+        "FINEPDFS_GPU_MODEL": "m",
+        "FINEPDFS_GPU_DETAIL": "gpu:v1",
+        "FINEPDFS_ENGINE_DETAIL": "",
+    }
+
+    with leased_environment(environ) as endpoint:
+        assert endpoint.detail == "gpu:v1"
+        assert environ["FINEPDFS_ENGINE_DETAIL"] == "gpu:v1"
+
+
+def test_an_empty_pinned_detail_still_lets_the_provider_name_the_memo_key() -> None:
+    """The hazard at its sharpest: a rented address must not reach the memo key because a key was empty."""
+    runner = RecordingRunner(stdout="https://rented.example/v1")
+    environ = {
+        "FINEPDFS_GPU_PROVIDER": "command",
+        "FINEPDFS_GPU_START_COMMAND": START,
+        "FINEPDFS_GPU_STOP_COMMAND": STOP,
+        "FINEPDFS_ENGINE": "paddleocr-vl",
+        "FINEPDFS_ENGINE_MODEL": "m",
+        "FINEPDFS_ENGINE_DETAIL": "",
+    }
+
+    with gpu_provider_from_environment(environ, runner=runner).lease() as endpoint:
+        export_endpoint(endpoint, environ)
+        key = str(runtime_from_environment(environ).engines["paddleocr-vl"].identity)
+
+    assert endpoint.detail.startswith("command:")
+    assert environ["FINEPDFS_ENGINE_DETAIL"] == endpoint.detail
+    assert key == f"paddleocr-vl@{endpoint.detail}@dpi200"
+
+
 def test_moving_a_static_address_does_not_move_the_memo_key() -> None:
     """The provider's detail rule, checked where it becomes the memo key (ADR-0005, ADR-0007)."""
 
