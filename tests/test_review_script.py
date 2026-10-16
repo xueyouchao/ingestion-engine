@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -161,6 +162,41 @@ def test_a_truncated_diff_names_its_unseen_files_in_the_comment_and_in_the_promp
     for prompt in prompts_seen:
         assert "7 of 20 files were not shown" in prompt
         assert "`file13.py`" in prompt
+
+
+def test_the_workflow_does_not_spell_an_axis_name() -> None:
+    """A renamed axis must not silently orphan a workflow key: the prompt headings are the spelling."""
+    workflow = (REPO_ROOT / ".github" / "workflows" / "review.yml").read_text(encoding="utf-8")
+
+    assert re.search(r"REVIEW_MODEL_(?!<AXIS>)[A-Z0-9_]", workflow) is None
+    assert "toJSON(vars)" in workflow
+
+
+def test_a_repository_variable_passed_as_json_overrides_an_axis_model(monkeypatch, tmp_path) -> None:
+    """The workflow hands every variable over at once, so the override still reaches its axis."""
+    models_seen: list[str] = []
+
+    def open_(request, timeout=None):
+        models_seen.append(json.loads(request.data)["model"])
+        answer = {"choices": [{"message": {"content": "findings"}}]}
+        return _Response(json.dumps(answer).encode("utf-8"), content_type="application/json")
+
+    code, _ = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key", "REVIEW_VARIABLES": '{"REVIEW_MODEL_SPEC": "spec-y"}'},
+        opener=open_,
+    )
+
+    assert code == 0
+    assert sorted(models_seen) == ["deepseek-v4.1-flash", "spec-y"]
+
+
+def test_a_malformed_variable_blob_keeps_the_default_models() -> None:
+    """A bad blob must not take the loop down with it: no variables means the default models."""
+    assert review.review_variables({"REVIEW_VARIABLES": "not json"}) == {}
+    assert review.review_variables({"REVIEW_VARIABLES": "[1, 2]"}) == {}
+    assert review.review_variables({}) == {}
 
 
 def test_a_body_that_looks_like_a_placeholder_is_not_substituted_a_second_time() -> None:

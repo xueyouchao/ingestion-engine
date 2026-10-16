@@ -248,6 +248,27 @@ def review_axes(template: str, env: dict[str, str]) -> tuple[Axis, ...]:
     )
 
 
+def review_variables(env: dict[str, str]) -> dict[str, str]:
+    """The repository variables the workflow hands over as one JSON blob, or ``{}``.
+
+    The workflow passes ``toJSON(vars)`` instead of one ``REVIEW_MODEL_<AXIS>`` key per axis, so its
+    YAML names no axis: the prompt's headings stay the only spelling, and a renamed axis cannot leave
+    a key pointing at a name the prompt no longer carries. A blob that is missing, malformed or not
+    an object of strings yields no variables rather than an error, because the review is a comment
+    and must not fail on its own configuration.
+    """
+    raw = env.get("REVIEW_VARIABLES", "").strip()
+    if not raw:
+        return {}
+    try:
+        variables = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(variables, dict):
+        return {}
+    return {name: value for name, value in variables.items() if isinstance(value, str)}
+
+
 def _snippet(text: str, limit: int = MAX_ERROR_BODY_CHARS) -> str:
     """A bounded, single-line excerpt of a response body fit for a public comment."""
     collapsed = " ".join(text.split())
@@ -447,7 +468,7 @@ def main(argv: list[str] | None = None, opener=None) -> int:
     if len(body) > MAX_BODY_CHARS:
         body = body[:MAX_BODY_CHARS] + f"\n\n[body truncated at {MAX_BODY_CHARS} characters]"
     template = Path(args.prompt).read_text(encoding="utf-8")
-    axes = review_axes(template, os.environ)
+    axes = review_axes(template, review_variables(os.environ))
     context = {
         "REPO": args.repo or "local/repo",
         "PR_NUMBER": args.pr_number or "0",
