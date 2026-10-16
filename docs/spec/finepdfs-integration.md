@@ -211,6 +211,14 @@ to put behind it (YAGNI). Recorded in ADR-0004.
 says so. A fastText/GlotLID adapter replaces it behind the same port; none is shipped, because shipping
 a model download that this environment cannot run would be a claim, not a feature.
 
+*Amended during implementation (ticket 08).* Both are now shipped. `ScriptLanguageIdentifier` stays the
+default and the model-free fallback; `FINEPDFS_LANGUAGE=fasttext` selects a fastText `lid.176` adapter,
+whose model is downloaded rather than vendored (`FINEPDFS_LANGUAGE_MODEL`), whose library is an optional
+extra, and whose two-letter labels are normalised to ISO 639-3 so `eng` means the same thing here as it
+does in GlotLID. The per-language threshold table stays out: with one global confidence floor the
+decision is still readable, and a per-language table is only worth its weight once there are enough
+languages in the corpus to tune it.
+
 ## Testing Decisions
 
 **What makes a good test here.** A test asserts observable behaviour through a port or through the

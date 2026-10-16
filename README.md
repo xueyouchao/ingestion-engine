@@ -65,7 +65,7 @@ Seams you can replace without touching the pipeline:
 | `CrawlSource` | `CommonCrawlSource` (index API + ranged WARC reads) | a hand-written fake |
 | `TextLayerProbe` | `PymupdfTextLayerProbe` | a fake quality |
 | `OcrEngine` | PyMuPDF, Docling, PaddleOCR-VL, MinerU | counting engines |
-| `LanguageIdentifier` | `ScriptLanguageIdentifier` | a fixed tag |
+| `LanguageIdentifier` | `ScriptLanguageIdentifier` (script tags, nothing installed) or `FastTextLanguageIdentifier` (language tags, needs a model) | a fixed tag |
 
 ## Engines
 
@@ -85,6 +85,30 @@ vllm serve PaddlePaddle/PaddleOCR-VL-1.6 --trust-remote-code
 vllm serve opendatalab/MinerU2.5-Pro-2605-1.2B --logits-processors mineru_vl_utils:MinerULogitsProcessor
 .venv/bin/finepdfs run --engine mineru --base-url http://127.0.0.1:8000
 ~~~~
+
+## Language identification
+
+Which language a page is in is decided behind `LanguageIdentifier`, and the two adapters answer
+different questions.
+
+`script` (the default) names the *script* and needs nothing installed. Latn covers English and German
+alike, so it cannot tell them apart; it says so rather than guessing.
+
+`fasttext` names the *language*, which is what a language-tagged corpus needs. Install the optional
+extra, download the model once, and point the pipeline at it:
+
+~~~~bash
+.venv/bin/pip install -e ".[language]"
+curl -LO https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz
+FINEPDFS_LANGUAGE=fasttext FINEPDFS_LANGUAGE_MODEL=$PWD/lid.176.ftz .venv/bin/finepdfs dry-run
+~~~~
+
+The model is downloaded, never vendored: the library (`fasttext-numpy2-wheel`) is MIT, the `lid.176`
+model is CC-BY-SA-3.0. It answers in whatever code its training data used -- `en`, `de` -- and the
+adapter normalises the two-letter codes to ISO 639-3 (`eng`, `deu`), so the recorded field,
+`FINEPDFS_LANGUAGES` and GlotLID's codes all agree. A page is labelled in paragraph-sized pieces and the
+pieces vote, because lid.176 is trained on short text and a whole page dilutes it. There is still one
+global confidence floor; per-language thresholds are not implemented.
 
 ## Configuration
 
@@ -111,9 +135,11 @@ nothing was published, so an operator or a CI can tell "engine is down" from "no
 | `FINEPDFS_MIN_CHARACTERS_PER_PAGE` | `200` | routing floor |
 | `FINEPDFS_MIN_TEXT_COVERAGE` | `0.5` | routing floor |
 | `FINEPDFS_MAX_GARBLED_RATIO` | `0.05` | routing ceiling |
+| `FINEPDFS_LANGUAGE` | `script` | `script` names the script (`Latn`), `fasttext` names the language (`eng`) |
+| `FINEPDFS_LANGUAGE_MODEL` | -- | path to a downloaded fastText `lid.176` model, required by `fasttext` |
 | `FINEPDFS_LANGUAGE_CONFIDENCE` | `0.65` | per-page language floor |
 | `FINEPDFS_MIN_CHARACTERS` | `200` | publish minimum |
-| `FINEPDFS_LANGUAGES` | all | comma-separated allow-list, for example `Latn,Grek` |
+| `FINEPDFS_LANGUAGES` | all | comma-separated allow-list in the codes the chosen adapter emits, for example `eng,spa` or `Latn,Grek` |
 | `FINEPDFS_SIMILARITY_THRESHOLD` | `0.8` | fingerprint similarity above which one document is a near-duplicate of another |
 
 ## Output layout
@@ -170,9 +196,12 @@ the whole crawl.
 * **Not executed here**: real Docling, PaddleOCR-VL and MinerU weights. This machine has no GPU and none
   of those tools installed, so their adapters are written to the tools' documented interfaces and tested
   against recorded shapes rather than live runs.
-* **Language**: the default adapter names the *script* (Latn, Grek, Cyrl), not the language. It cannot
-  tell English from German. Swapping in a fastText or GlotLID adapter behind `LanguageIdentifier` is
-  the intended upgrade.
+* **Language**: `ScriptLanguageIdentifier` names the script with no dependency at all, and reports
+  `Latn` for English and German alike. `FINEPDFS_LANGUAGE=fasttext` against a downloaded `lid.176.ftz`
+  tagged the 12 real NOAA PDFs here as 11 `eng` and one `spa` -- the Spanish edition of the Caribbean
+  newsletter, which the script adapter calls `Latn` like everything else. The real model is also
+  exercised by a marked test that skips cleanly when it is not on the machine, and the rest of the
+  adapter is tested against a hand-written labeller, so the everyday suite needs no model and no extra.
 
 ## Documents
 
