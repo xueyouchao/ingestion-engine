@@ -21,6 +21,8 @@ packages = ["src/finepdfs"]
 [tool.ruff]
 line-length = 120
 target-version = "py311"
+# bench/ is the superseded throwaway prototype (ADR-0002); excluded so `ruff check .` covers the shipped pipeline.
+exclude = ["bench"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "C4", "PYI"]
