@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shlex
 from collections.abc import Callable, Iterator, Mapping, MutableMapping
@@ -45,6 +46,8 @@ NONE = "none"
 STATIC = "static"
 COMMAND = "command"
 
+logger = logging.getLogger(__name__)
+
 
 class UnknownGpuProvider(ValueError):
     """Raised when a run names a GPU provider that does not exist."""
@@ -67,6 +70,16 @@ class GpuStartFailed(RuntimeError):
     A class of its own, not ``CommandFailed``: an engine raises that too when its own command fails, and
     a run that cannot start is an operator problem the CLI reports, while an engine that started and
     then failed keeps its traceback (ADR-0007).
+    """
+
+
+class GpuStopFailed(RuntimeError):
+    """Raised when a provider cannot give its worker back, so the worker may still be running.
+
+    A class of its own, not ``GpuStartFailed``: "the worker never started" and "the worker is still out
+    there, billing" are different faults with different fixes, and an error names the failure that
+    occurred (CODING_STANDARDS). A leased GPU bills by the hour, which is why ADR-0007 exists; a stop
+    that fails after an otherwise good run is a provider failure the CLI reports and exits 2 on.
     """
 
 
@@ -120,6 +133,9 @@ class CommandGpuProvider:
     ephemeral address, because the memo key is the identity (ADR-0005). When the command does not
     supply one it is derived from the command line and the model, which is stable across runs and
     changes when either does.
+
+    The stop command's result is checked rather than discarded: a worker it could not give back is
+    still billing, which is the cost ADR-0007 exists to remove.
     """
 
     start_command: str
@@ -134,15 +150,42 @@ class CommandGpuProvider:
         try:
             started = self.runner.run(_argv(self.start_command))
             require_success(started)
-            endpoint = endpoint_from_start_output(started.stdout, self.start_command, self.model)
         except CommandFailed as error:
             raise GpuStartFailed(f"the GPU start command failed: {error}") from error
+        endpoint = endpoint_from_start_output(started.stdout, self.start_command, self.model)
         try:
             yield endpoint
-        finally:
-            # The worker is given back even when the run failed: a leaked GPU bills by the hour.
-            if self.stop_command:
-                self.runner.run(_argv(self.stop_command))
+        except BaseException as error:
+            # The worker is given back even when the run failed: a leaked GPU bills by the hour. A stop
+            # that fails here must not take the place of the error that ended the run, because that
+            # error is what the operator has to act on: report the leak beside it and re-raise it.
+            try:
+                self._release()
+            except (GpuStopFailed, MisconfiguredGpuProvider) as leak:
+                logger.error(
+                    "the GPU stop command failed after the run had already failed, so the worker may "
+                    "still be billing: %s",
+                    leak,
+                )
+                error.add_note(f"the GPU stop command also failed: {leak}")
+            raise
+        # A worker that could not be given back keeps costing money, so a stop that fails after a run
+        # that otherwise finished is not swallowed either: the provider failed, and the CLI says so.
+        self._release()
+
+    def _release(self) -> None:
+        """Run the stop command, and refuse to pass a failure over in silence.
+
+        The command is the provider's own, so a failure here is the provider's fault and not an engine's,
+        and it means the worker is still up: the one thing ADR-0007 exists to prevent.
+        """
+        if not self.stop_command:
+            return
+        stopped = self.runner.run(_argv(self.stop_command))
+        try:
+            require_success(stopped)
+        except CommandFailed as error:
+            raise GpuStopFailed(f"the GPU stop command failed: {error}") from error
 
 
 def endpoint_from_start_output(stdout: str, command: str, model: str = "") -> GpuEndpoint:

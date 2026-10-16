@@ -7,6 +7,7 @@ the whole corpus again -- which is the cost the memo exists to remove.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,6 +21,7 @@ from finepdfs.infrastructure.compute.endpoint import GpuEndpoint, export_endpoin
 from finepdfs.infrastructure.compute.providers import (
     CommandGpuProvider,
     GpuStartFailed,
+    GpuStopFailed,
     MisconfiguredGpuProvider,
     NoGpuProvider,
     StaticGpuProvider,
@@ -38,17 +40,26 @@ STOP = "stop-worker"
 
 
 class RecordingRunner:
-    """A runner that records what it was asked to run, and answers with a scripted stdout."""
+    """A runner that records what it was asked to run, and answers with a scripted result.
 
-    def __init__(self, stdout: str = "", returncode: int = 0) -> None:
+    The start and stop commands fail separately, because the two failures are not the same failure: a
+    start that fails means no run, a stop that fails means a worker somebody is still paying for.
+    """
+
+    def __init__(self, stdout: str = "", returncode: int = 0, stop_returncode: int = 0) -> None:
         self.stdout = stdout
         self.returncode = returncode
+        self.stop_returncode = stop_returncode
         self.calls: list[tuple[str, ...]] = []
 
     def run(self, argv: Sequence[str], cwd: Path | None = None) -> CommandResult:
         self.calls.append(tuple(argv))
-        stdout = self.stdout if argv[0] == START else ""
-        return CommandResult(argv=tuple(argv), returncode=self.returncode, stdout=stdout)
+        starting = argv[0] == START
+        return CommandResult(
+            argv=tuple(argv),
+            returncode=self.returncode if starting else self.stop_returncode,
+            stdout=self.stdout if starting else "",
+        )
 
 
 class CountingEngine:
@@ -136,6 +147,30 @@ def test_a_command_provider_gives_the_worker_back_even_when_the_run_failed() -> 
         raise RuntimeError("the run blew up")
 
     assert [call[0] for call in runner.calls] == [START, STOP]
+
+
+def test_a_stop_command_that_fails_is_not_discarded() -> None:
+    """A stop that exits nonzero leaves the worker up and billing: that is not a result to throw away."""
+    runner = RecordingRunner(stdout="https://rented.example/v1", stop_returncode=1)
+    provider = CommandGpuProvider(start_command=START, stop_command=STOP, runner=runner)
+
+    with pytest.raises(GpuStopFailed, match=STOP), provider.lease():
+        pass
+
+    assert [call[0] for call in runner.calls] == [START, STOP], "the stop was attempted before it failed"
+    assert not issubclass(GpuStopFailed, GpuStartFailed), "the two faults send a reader to different places"
+
+
+def test_a_failing_stop_does_not_mask_the_error_that_ended_the_run(caplog) -> None:
+    """The run's own error is what the operator acts on; the leak is reported beside it, not in place."""
+    runner = RecordingRunner(stdout="https://rented.example/v1", stop_returncode=1)
+    provider = CommandGpuProvider(start_command=START, stop_command=STOP, runner=runner)
+
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError, match="the run blew up"), provider.lease():
+        raise RuntimeError("the run blew up")
+
+    assert [call[0] for call in runner.calls] == [START, STOP]
+    assert "billing" in caplog.text, "the leak is reported even though it must not replace the run's error"
 
 
 def test_the_endpoint_is_the_first_json_object_not_a_later_log_line() -> None:
@@ -368,3 +403,15 @@ def test_a_malformed_stop_command_fails_the_cli_cleanly(monkeypatch, tmp_path, c
 
     assert code == 2
     assert "malformed" in capsys.readouterr().err
+
+
+def test_a_stop_command_that_fails_fails_the_cli_cleanly(monkeypatch, tmp_path, capsys) -> None:
+    """A worker the stop command could not give back is a provider failure, the same as a start one."""
+    monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
+    monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", "/bin/echo https://rented.example/v1")
+    monkeypatch.setenv("FINEPDFS_GPU_STOP_COMMAND", "/bin/false")
+
+    code = main(["dry-run", "--corpus", str(tmp_path / "nothing"), "--engine", "paddleocr-vl"])
+
+    assert code == 2
+    assert "GPU stop command failed" in capsys.readouterr().err

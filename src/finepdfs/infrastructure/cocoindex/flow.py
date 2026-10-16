@@ -55,8 +55,9 @@ def coco_lifespan(builder: coco.EnvironmentBuilder):
     The lease wraps the whole update, so a rented worker lives exactly as long as the run and is given
     back even when the run fails. Its endpoint is exported because the flow is configured by the
     environment alone: `cocoindex update main.py` takes no arguments of its own. Both the worker and
-    the environment the lease published are restored on the way out, so a failed run leaves neither
-    a billable worker nor a process still pointing at one.
+    the environment the lease published are restored on the way out, so a failed run leaves no process
+    still pointing at a worker it has given back. A stop command that itself fails cannot be undone,
+    and is not passed over either: the provider reports the leak beside the run's own error (ADR-0007).
     """
     builder.settings.db_path = pathlib.Path(os.environ.get("FINEPDFS_DB", "cocoindex.db"))
     with leased_environment(os.environ):

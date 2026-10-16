@@ -54,9 +54,16 @@ A GPU is *leased*, and its address is kept out of the memo key.
   line does not is, to the memo, the same worker.
 * Two concurrent runs each lease their own worker; they cannot share one. That matches the state
   database, which already refuses a second writer.
-* The lease releases in a `finally` because a leaked GPU bills by the hour.
-* A provider that cannot start the run is an operator problem, so the CLI reports it and exits 2 rather
-  than printing a traceback -- the same way an empty corpus is refused.
+* The lease releases on the way out -- on the success path and on the failure path alike -- because a
+  leaked GPU bills by the hour.
+* The stop command's result is checked, not discarded. A stop that fails while the run is already
+  failing is reported beside the run's own exception -- logged, and attached to its traceback -- and
+  that exception is then re-raised untouched, because the error that ended the run is the one the
+  operator has to act on. A stop that fails after a run that otherwise finished is a provider failure
+  the CLI reports and exits 2 on, exactly as a start that cannot run is.
+* A provider that cannot start the run -- or whose command cannot even be parsed -- is an operator
+  problem, so the CLI reports it and exits 2 rather than printing a traceback -- the same way an empty
+  corpus is refused.
 
 ## Alternatives considered
 

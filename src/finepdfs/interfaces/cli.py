@@ -16,6 +16,7 @@ from finepdfs.infrastructure.commoncrawl.source import CommonCrawlSource
 from finepdfs.infrastructure.compute.providers import (
     PROVIDERS,
     GpuStartFailed,
+    GpuStopFailed,
     MisconfiguredGpuProvider,
     UnknownGpuProvider,
     leased_environment,
@@ -140,11 +141,12 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(message)s")
     try:
         return _dispatch(args)
-    except (UnknownGpuProvider, MisconfiguredGpuProvider, GpuStartFailed) as error:
+    except (UnknownGpuProvider, MisconfiguredGpuProvider, GpuStartFailed, GpuStopFailed) as error:
         # A run that cannot lease its GPU is an operator problem, not a crash: say so and exit 2, the
-        # same way an empty corpus is refused rather than run. Deliberately not CommandFailed: an engine
-        # whose own command fails is a run that started, and its traceback names the engine, not the
-        # provider (ADR-0007).
+        # same way an empty corpus is refused rather than run. A worker the stop command could not give
+        # back is the same kind of message for the same reason -- it is still billing (ADR-0007).
+        # Deliberately not CommandFailed: an engine whose own command fails is a run that started, and
+        # its traceback names the engine, not the provider.
         print(error, file=sys.stderr)
         return 2
 
