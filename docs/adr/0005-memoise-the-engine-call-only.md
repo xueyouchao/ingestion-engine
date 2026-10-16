@@ -4,9 +4,9 @@ Date: 2026-10-16
 
 ## Status
 
-Accepted. Amended by ADR-0007: when a worker's address is not stable, the identity is a name the
-provider reports, so the base URL among the identity's inputs below no longer has to move the memo key.
-The key itself is unchanged.
+Accepted. Amended by ADR-0007: when a worker's address is not stable, the detail the provider reports
+names the deployment, so the base URL among the identity's inputs below no longer has to move the memo
+key. The key itself is unchanged.
 
 ## Context
 

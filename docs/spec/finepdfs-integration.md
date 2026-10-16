@@ -201,7 +201,7 @@ on real documents. The CocoIndex application is also runnable directly through `
 operator supplied by hand. A rented GPU answers on a new host every run, and the memo key is the engine
 identity (ADR-0005), so an address in that key would re-read the whole corpus every time. There is now a
 GPU provider seam (`infrastructure/compute/`) that leases an endpoint for the length of a run and reports
-a stable identity, with `none`, `static` and `command` providers; Modal and RunPod are a command line
+a stable detail, with `none`, `static` and `command` providers; Modal and RunPod are a command line
 today and an adapter behind the same seam later. Recorded in ADR-0007.
 
 **Not reproduced: the trained OCR router and the neural quality classifier.** FinePDFs routes with an
