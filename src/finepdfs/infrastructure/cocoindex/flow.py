@@ -26,8 +26,7 @@ from finepdfs.domain.dedup import (
 )
 from finepdfs.domain.document import Document, ExtractedDocument, content_digest
 from finepdfs.infrastructure.cocoindex.runtime import Runtime, runtime_from_environment
-from finepdfs.infrastructure.compute.endpoint import export_endpoint
-from finepdfs.infrastructure.compute.providers import gpu_provider_from_environment
+from finepdfs.infrastructure.compute.providers import leased_environment
 from finepdfs.infrastructure.corpus.index import CorpusDocument
 from finepdfs.infrastructure.corpus.manifest import pdf_path
 from finepdfs.infrastructure.publishing.disk import DUPLICATES_REPORT, KEPT_REPORT, PublishedCorpus
@@ -55,16 +54,19 @@ def coco_lifespan(builder: coco.EnvironmentBuilder):
 
     The lease wraps the whole update, so a rented worker lives exactly as long as the run and is given
     back even when the run fails. Its endpoint is exported because the flow is configured by the
-    environment alone: `cocoindex update main.py` takes no arguments of its own.
+    environment alone: `cocoindex update main.py` takes no arguments of its own. Both the worker and
+    the environment the lease published are restored on the way out, so a failed run leaves neither
+    a billable worker nor a process still pointing at one.
     """
     builder.settings.db_path = pathlib.Path(os.environ.get("FINEPDFS_DB", "cocoindex.db"))
-    with gpu_provider_from_environment().lease() as endpoint:
-        export_endpoint(endpoint, os.environ)
+    with leased_environment(os.environ):
         if _app_runtime is None:
             # A caller that configured a runtime itself (a dry run, a test) keeps it.
             configure_runtime(runtime_from_environment())
-        yield
-        configure_runtime(None)
+        try:
+            yield
+        finally:
+            configure_runtime(None)
 
 
 @coco.fn(memo=True)

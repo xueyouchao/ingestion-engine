@@ -13,11 +13,10 @@ from finepdfs.domain.dedup import PublishedDocumentView, exact_duplicate_keepers
 from finepdfs.domain.document import Document
 from finepdfs.infrastructure.cocoindex.runtime import Runtime, runtime_from_environment
 from finepdfs.infrastructure.commoncrawl.source import CommonCrawlSource
-from finepdfs.infrastructure.compute.endpoint import export_endpoint
 from finepdfs.infrastructure.compute.providers import (
     PROVIDERS,
     UnknownGpuProvider,
-    gpu_provider_from_environment,
+    leased_environment,
 )
 from finepdfs.infrastructure.corpus.fetch import fetch_corpus
 from finepdfs.infrastructure.corpus.index import CorpusIndex
@@ -214,8 +213,7 @@ def _dry_run(args: argparse.Namespace) -> int:
     leases here, exports the endpoint, and only then builds the runtime that holds the engine.
     """
     _export_flags(args)
-    with gpu_provider_from_environment().lease() as endpoint:
-        export_endpoint(endpoint, os.environ)
+    with leased_environment(os.environ):
         return _dry_run_in_process(runtime_from_environment())
 
 
