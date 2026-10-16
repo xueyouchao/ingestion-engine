@@ -36,8 +36,10 @@ DEFAULT_BASE_URL = "https://ollama.com/v1"
 # themselves live only in the prompt, in its ``## If the axis is <name>`` headings.
 DEFAULT_MODELS = ("deepseek-v4.1-flash", "glm-5.3-flash")
 AXIS_HEADING = re.compile(r"^## If the axis is (?P<name>.+?)\s*$", re.MULTILINE)
-# git starts every file in a unified diff with this header; its b-side is the file's name after the change.
-DIFF_FILE_HEADER = re.compile(r"^diff --git .* (?P<path>b/.+?)\s*$", re.MULTILINE)
+# git starts every file in a unified diff with this header; its b-side is the file's name after the
+# change. git quotes a path with a space, a quote, a backslash or a non-ASCII byte under the default
+# ``core.quotePath`` (``diff --git "a/pa th" "b/pa th"``), so the quotes are optional here too.
+DIFF_FILE_HEADER = re.compile(r'^diff --git .* (?P<path>"?b/.+?"?)\s*$', re.MULTILINE)
 # One placeholder in the prompt; fill substitutes these in a single pass over the template.
 PLACEHOLDER = re.compile(r"\{\{(?P<key>[A-Z0-9_]+)\}\}")
 SYSTEM_PROMPT = (
@@ -47,8 +49,9 @@ SYSTEM_PROMPT = (
 MAX_DIFF_CHARS = 120_000
 MAX_BODY_CHARS = 8_000
 MAX_ERROR_BODY_CHARS = 200
-# A slow model on a large diff needs more than the three minutes that timed the Spec axis out twice
-# in three runs on a fourteen-file pull request. The two calls run concurrently, so this bounds the
+# A slow model on a large diff needs more than the three minutes that timed the Spec axis out in
+# three of the last four reviews: the review comments on PRs #2, #3 and #4 each report "The read
+# operation timed out", and only #5 answered. The two calls run concurrently, so this bounds the
 # stage rather than doubling it; the deadline sits just past it so a socket timeout, which names
 # itself, normally beats the deadline, which can only say the call never returned.
 REQUEST_TIMEOUT_SECONDS = 600
@@ -77,7 +80,9 @@ class DiffSlice:
 
     Both axes see the same slice, so the files below the cut were not shown to any model. The
     numbers travel with the text because both the comment and the prompt have to say what was left
-    out: a partial review that does not name its omissions reads like a whole one.
+    out: a partial review that does not name its omissions reads like a whole one. ``boundary``
+    records whether the cut landed on a file header, so the note may promise no file is half-read
+    only when one did.
     """
 
     text: str
@@ -86,6 +91,7 @@ class DiffSlice:
     files_total: int = 0
     omitted: tuple[str, ...] = ()
     partial: str | None = None
+    boundary: bool = False
 
     @property
     def truncated(self) -> bool:
@@ -128,16 +134,28 @@ def slice_diff(diff: str, limit: int = MAX_DIFF_CHARS) -> DiffSlice:
             limit=limit,
             files_total=len(starts),
             omitted=tuple(path for _, path in starts[index:]),
+            boundary=True,
         )
-    # Not even the first file fits whole: show its head and admit the rest was never in view.
-    index = max(index for index, (start, _) in enumerate(starts) if start <= limit)
+    first_files = [index for index, (start, _) in enumerate(starts) if start <= limit]
+    if first_files:
+        # Not even the first file fits whole: show its head and admit the rest was never in view.
+        index = first_files[-1]
+        return DiffSlice(
+            diff[:limit],
+            characters=characters,
+            limit=limit,
+            files_total=len(starts),
+            omitted=tuple(path for _, path in starts[index + 1 :]),
+            partial=starts[index][1],
+        )
+    # No header at or before the cut, so there is no boundary to stop on and every file lies below
+    # it. The old max() over that empty choice raised before anything could be posted at all.
     return DiffSlice(
         diff[:limit],
         characters=characters,
         limit=limit,
         files_total=len(starts),
-        omitted=tuple(path for _, path in starts[index + 1 :]),
-        partial=starts[index][1],
+        omitted=tuple(path for _, path in starts),
     )
 
 
@@ -155,7 +173,7 @@ def truncation_note(slice_: DiffSlice) -> str:
             f"The first file alone is larger than that, so `{slice_.partial}` is shown only in part "
             "and its tail was not read."
         )
-    elif slice_.files_total:
+    elif slice_.boundary:
         head = (
             f"The diff is {slice_.characters} characters and the review reads at most {slice_.limit}, "
             "stopping at a file boundary so no file is shown half-read."
@@ -163,7 +181,8 @@ def truncation_note(slice_: DiffSlice) -> str:
     else:
         head = (
             f"The diff is {slice_.characters} characters and the review reads at most {slice_.limit}. "
-            "It carries no `diff --git` headers to cut on, so the files below the cut cannot be named."
+            "No `diff --git` file boundary was found at or before the cut, so nothing below it is "
+            "shown whole."
         )
     if not slice_.omitted:
         return head
