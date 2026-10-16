@@ -443,7 +443,7 @@ def test_a_malformed_start_command_fails_the_cli_cleanly(monkeypatch, capsys) ->
 
 
 def test_a_malformed_stop_command_fails_the_cli_cleanly(monkeypatch, tmp_path, capsys) -> None:
-    """The stop command is split on the way out too, so it fails the same clean way, not in a finally."""
+    """The stop command is split on the way out too, so a typo there fails the same clean way."""
     monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
     monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", "/bin/echo https://rented.example/v1")
     monkeypatch.setenv("FINEPDFS_GPU_STOP_COMMAND", "stop-worker 'unclosed")
@@ -469,8 +469,8 @@ def test_a_stop_command_that_fails_fails_the_cli_cleanly(monkeypatch, tmp_path, 
 def test_a_stop_command_that_is_not_installed_fails_the_cli_cleanly(monkeypatch, tmp_path, capsys) -> None:
     """A missing stop binary fails before require_success: SubprocessRunner raises CommandFailed itself.
 
-    That is the runner's failure, not an engine's, so the stop path has to name it the provider's way --
-    and on the failure path it must not escape in place of the error that ended the run.
+    That is the runner's failure, not an engine's, so the stop path has to name it the provider's way
+    rather than let it out as a bare CommandFailed and a traceback.
     """
     monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
     monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", "/bin/echo https://rented.example/v1")
