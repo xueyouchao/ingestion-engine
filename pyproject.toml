@@ -6,7 +6,9 @@ requires-python = ">=3.11"
 dependencies = ["cocoindex>=1.0.25", "pymupdf>=1.24"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+# The dev extra installs the tools the CI lint gate runs, so `pip install -e '.[dev]'` is enough to
+# reproduce every check locally.
+dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
 finepdfs = "finepdfs.interfaces.cli:main"
