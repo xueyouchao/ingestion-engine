@@ -276,11 +276,26 @@ def _static_provider(values: Mapping[str, str], _runner: CommandRunner | None) -
     return StaticGpuProvider(_static_endpoint(values))
 
 
+def _timeout_seconds(values: Mapping[str, str]) -> float:
+    """The timeout the runner gets, named as a provider fault when it is not a number.
+
+    A typo in ``FINEPDFS_GPU_TIMEOUT`` is a provider that cannot run, so it has to reach the CLI as
+    ``MisconfiguredGpuProvider`` and exit 2 rather than escape as a bare ``ValueError`` traceback: no
+    CLI except clause names that, and ADR-0007 promises the operator a message. The variable and the
+    value come with it so the message points at the typo.
+    """
+    raw = values.get(GPU_TIMEOUT, "1800")
+    try:
+        return float(raw)
+    except ValueError as error:
+        raise MisconfiguredGpuProvider(f"{GPU_TIMEOUT} is not a number of seconds: {raw!r}") from error
+
+
 def _command_provider(values: Mapping[str, str], runner: CommandRunner | None) -> GpuProvider:
     start_command = values.get(GPU_START_COMMAND, "").strip()
     if not start_command:
         raise MisconfiguredGpuProvider(f"{GPU_PROVIDER}={COMMAND} needs {GPU_START_COMMAND}")
-    timeout = float(values.get(GPU_TIMEOUT, "1800"))
+    timeout = _timeout_seconds(values)
     return CommandGpuProvider(
         start_command=start_command,
         stop_command=values.get(GPU_STOP_COMMAND, "").strip(),

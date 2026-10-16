@@ -491,6 +491,23 @@ def test_a_malformed_start_command_fails_the_cli_cleanly(monkeypatch, capsys) ->
     assert "malformed" in capsys.readouterr().err
 
 
+def test_a_non_numeric_gpu_timeout_fails_the_cli_cleanly(monkeypatch, tmp_path, capsys) -> None:
+    """``float("soon")`` raises a bare ValueError, which no CLI except clause names.
+
+    A timeout an operator typed wrong is a provider that cannot run, so it must reach the same exit-2
+    message as a malformed command -- not a ValueError traceback (ADR-0007). ``MisconfiguredGpuProvider``
+    already claims "what it was given is unusable" as its own failure.
+    """
+    monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
+    monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", "/bin/echo https://rented.example/v1")
+    monkeypatch.setenv("FINEPDFS_GPU_TIMEOUT", "soon")
+
+    code = main(["dry-run", "--corpus", str(tmp_path / "nothing"), "--engine", "paddleocr-vl"])
+
+    assert code == 2
+    assert "FINEPDFS_GPU_TIMEOUT" in capsys.readouterr().err
+
+
 def test_a_malformed_stop_command_fails_the_cli_cleanly(monkeypatch, tmp_path, capsys) -> None:
     """The stop command is split on the way out too, so a typo there fails the same clean way."""
     monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
