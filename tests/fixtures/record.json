@@ -1,0 +1,15 @@
+{
+  "urlkey": "gov,noaa)/sites/default/files/2025-08/wmo_16_vandalism_final_res_xxvi_2011.pdf",
+  "timestamp": "20260912103548",
+  "url": "https://www.noaa.gov/sites/default/files/2025-08/wmo_16_Vandalism_final_res_XXVI_2011.pdf",
+  "mime": "application/pdf",
+  "mime-detected": "application/pdf",
+  "status": "200",
+  "digest": "DA7RWOIU24Y3LB2UM5I4TNPOSOWZ6XLZ",
+  "length": "15217",
+  "offset": "727081219",
+  "filename": "crawl-data/CC-MAIN-2026-39/segments/1788492700124.88/warc/CC-MAIN-20260912100909-20260912130909-00669.warc.gz",
+  "recordid": "01a09530-080d-7e9a-b9dd-09146cf6da6d",
+  "payload_bytes": 19355,
+  "declared_content_length": 19355
+}
