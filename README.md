@@ -115,7 +115,8 @@ vocabulary follows `FINEPDFS_LANGUAGE`: `Latn,Grek` matches under `script`, `eng
 never both. That is intended -- the list filters the recorded language field, and the adapter defines
 that field -- but it makes the pair mode-dependent: switching adapters means revisiting the list in the
 same change. A `script`-era list left in place under `fasttext` matches no page, so every document is
-dropped, nothing is published, and the run exits 1 with exclusions naming the languages that were allowed.
+dropped, nothing is published, and the run exits 1 with one exclusion per document, naming the tag it
+carried and the required list it did not match.
 
 ## Configuration
 
