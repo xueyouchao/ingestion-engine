@@ -12,6 +12,12 @@ the code holds no second spelling that could drift.
 
 The review is a comment, never a gate. Every failure below ends in a short comment (or a quiet
 exit) with status 0, because a model outage must not hold up a merge.
+
+Each axis's call leaves an :class:`AxisOutcome`: its failure class, its wall-clock seconds and its
+findings. The classes stay apart -- a read timeout, a connection the server closed without answering,
+and an HTTP status are three different things with three different fixes -- because collapsing them
+into one "did not run" told the reader nothing about which was owed. A dropped connection is retried
+with backoff; a read timeout is not, because the call already sat out the socket's own deadline.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ import argparse
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -56,6 +63,25 @@ MAX_ERROR_BODY_CHARS = 200
 # itself, normally beats the deadline, which can only say the call never returned.
 REQUEST_TIMEOUT_SECONDS = 600
 AXIS_RUN_DEADLINE_SECONDS = REQUEST_TIMEOUT_SECONDS + 30
+
+# The failure classes the comment keeps apart. The first is not a failure; the rest are named for the
+# thing that failed, not for the branch that noticed it.
+OUTCOME_FINDINGS = "findings posted"
+OUTCOME_EMPTY = "empty review"
+OUTCOME_READ_TIMEOUT = "read timed out"
+OUTCOME_CONNECTION_CLOSED = "connection closed without response"
+OUTCOME_HTTP_STATUS = "HTTP status"
+OUTCOME_UNUSABLE = "unusable response"
+OUTCOME_UNREACHABLE = "endpoint unreachable"
+OUTCOME_UNEXPECTED = "unexpected failure"
+OUTCOME_ABANDONED = "abandoned at the stage deadline"
+
+# A dropped connection is not a bad request: the server never read it, so sending it again can work.
+# A read timeout is the opposite -- the call sat out the socket's whole deadline -- and a second
+# attempt cannot fit inside AXIS_RUN_DEADLINE_SECONDS, so only the closed connection is retried.
+RETRY_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = 2.0
+RETRYABLE_FAILURES = frozenset({OUTCOME_CONNECTION_CLOSED})
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +131,66 @@ class ReviewCallError(RuntimeError):
     comment shows what the endpoint actually answered instead of a bare ``JSONDecodeError`` -- which
     reads as a credential problem even when the endpoint is a tombstone.
     """
+
+
+class HttpStatusError(ReviewCallError):
+    """The endpoint answered a status outside 2xx; its own words are the evidence to post."""
+
+
+class UnusableResponseError(ReviewCallError):
+    """A 2xx body this call cannot read: not JSON, or JSON of a shape without an assistant message."""
+
+
+@dataclass(frozen=True, slots=True)
+class AxisOutcome:
+    """One axis's call: how it ended, how long it took, and what it found.
+
+    ``status`` is one of the ``OUTCOME_*`` classes and ``detail`` the endpoint's own words where it
+    had any. ``attempts`` is above one only when a dropped connection was retried. The comment
+    renders :attr:`label` for every axis of every run, so a failure is never silent: the reader can
+    tell a slow model from a dropped socket from a refused request.
+    """
+
+    axis: Axis
+    status: str
+    detail: str
+    seconds: float
+    findings: str | None
+    attempts: int = 1
+
+    @property
+    def label(self) -> str:
+        """The per-axis line: class, wall-clock seconds, the endpoint's words, and retry count."""
+        line = f"{self.status} after {self.seconds:.1f}s"
+        if self.detail:
+            line += f" — {self.detail}"
+        if self.attempts > 1:
+            line += f" ({self.attempts} attempts)"
+        return line
+
+
+def classify_failure(error: BaseException) -> tuple[str, str]:
+    """The class of a failed call and the one-line detail a reader can act on.
+
+    The transport failures stay apart because the fix differs: a read timeout means the model was
+    still thinking when our socket gave up, a closed connection means the server dropped us without
+    answering, an HTTP status is the endpoint refusing the request in its own words, and a DNS or
+    refused connection never reached it at all.
+    """
+    if isinstance(error, HttpStatusError):
+        return OUTCOME_HTTP_STATUS, _snippet(str(error))
+    if isinstance(error, ReviewCallError):
+        return OUTCOME_UNUSABLE, _snippet(str(error))
+    if isinstance(error, TimeoutError):
+        return OUTCOME_READ_TIMEOUT, ""
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, TimeoutError):
+        return OUTCOME_READ_TIMEOUT, ""
+    if isinstance(reason, (ConnectionRefusedError, socket.gaierror)):
+        return OUTCOME_UNREACHABLE, _snippet(str(error))
+    if isinstance(reason, OSError):
+        return OUTCOME_CONNECTION_CLOSED, _snippet(str(reason) or str(error))
+    return OUTCOME_UNEXPECTED, _snippet(f"{type(error).__name__}: {error}")
 
 
 def _diff_path(path: str) -> str:
@@ -339,12 +425,12 @@ def chat(backend: Backend, model: str, prompt: str, opener=None) -> str:
     except urllib.error.HTTPError as error:
         # A rejected model id or a wrong endpoint answers 4xx; its body is the useful part.
         body = error.read().decode("utf-8", errors="replace")
-        raise ReviewCallError(f"the endpoint answered {_where(error)}: {_snippet(body)}") from None
+        raise HttpStatusError(f"the endpoint answered {_where(error)}: {_snippet(body)}") from None
 
     try:
         answer = json.loads(body)
     except json.JSONDecodeError:
-        raise ReviewCallError(
+        raise UnusableResponseError(
             f"the endpoint answered {where} but the body is not JSON: {_snippet(body)}"
         ) from None
 
@@ -353,7 +439,7 @@ def chat(backend: Backend, model: str, prompt: str, opener=None) -> str:
     except (KeyError, IndexError, TypeError):
         content = None
     if not isinstance(content, str):
-        raise ReviewCallError(
+        raise UnusableResponseError(
             f"the endpoint answered {where} but the JSON carries no assistant message: {_snippet(body)}"
         )
     return content.strip()
@@ -364,28 +450,50 @@ def run_axes(
     prompts: dict[str, str],
     backend: Backend,
     opener=None,
-) -> list[tuple[Axis, str, str | None]]:
-    """Every axis's call, made concurrently, as ``(axis, review, error)`` in the prompt's order.
+) -> list[AxisOutcome]:
+    """Every axis's call, made concurrently, as one :class:`AxisOutcome` per axis in prompt order.
 
     The two models are independent, so running them in sequence makes the slower one pay for the
     faster one's latency -- and time out for reasons that have nothing to do with its own answer.
     A call that is still running at :data:`AXIS_RUN_DEADLINE_SECONDS` is abandoned rather than
     awaited, so a hung socket cannot hold the job open: the surviving axis posts regardless.
-    Exactly one of ``review`` and ``error`` is set: an empty ``review`` with ``error`` ``None`` means
-    the model answered with nothing.
+
+    A connection the server closed without answering is retried, with backoff, up to
+    :data:`RETRY_ATTEMPTS`; the retry stops early rather than start a call that would run past the
+    stage deadline. Every other class is reported as it happened.
     """
-    outcomes: dict[str, tuple[str, str | None]] = {}
+    outcomes: dict[str, AxisOutcome] = {}
     lock = threading.Lock()
+    deadline = time.monotonic() + AXIS_RUN_DEADLINE_SECONDS
 
     def run(axis: Axis) -> None:
-        try:
-            review = chat(backend, axis.model, prompts[axis.name], opener)
-        except Exception as error:  # Broad on purpose: one axis failing must not sink the other.
-            outcome: tuple[str, str | None] = ("", str(error))
-        else:
-            outcome = (review, None)
-        with lock:
-            outcomes[axis.name] = outcome
+        started = time.monotonic()
+        backoff = RETRY_BACKOFF_SECONDS
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                review = chat(backend, axis.model, prompts[axis.name], opener)
+            except Exception as error:  # Broad on purpose: one axis failing must not sink the other.
+                status, detail = classify_failure(error)
+                retry = (
+                    status in RETRYABLE_FAILURES
+                    and attempts < RETRY_ATTEMPTS
+                    and time.monotonic() + backoff < deadline
+                )
+                if retry:
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+                outcome = AxisOutcome(axis, status, detail, time.monotonic() - started, None, attempts)
+            else:
+                status = OUTCOME_FINDINGS if review else OUTCOME_EMPTY
+                outcome = AxisOutcome(
+                    axis, status, "", time.monotonic() - started, review or None, attempts
+                )
+            with lock:
+                outcomes[axis.name] = outcome
+            return
 
     threads = [
         threading.Thread(target=run, args=(axis,), name=f"review-{axis.name}", daemon=True)
@@ -393,21 +501,21 @@ def run_axes(
     ]
     for thread in threads:
         thread.start()
-    deadline = time.monotonic() + AXIS_RUN_DEADLINE_SECONDS
     for thread in threads:
         thread.join(max(0.0, deadline - time.monotonic()))
 
-    abandoned = f"the call timed out after {AXIS_RUN_DEADLINE_SECONDS:g} seconds and was abandoned"
     results = []
     for axis in axes:
-        review, error = outcomes.get(axis.name, ("", abandoned))
-        results.append((axis, review, error))
+        outcome = outcomes.get(axis.name)
+        if outcome is None:
+            outcome = AxisOutcome(axis, OUTCOME_ABANDONED, "", AXIS_RUN_DEADLINE_SECONDS, None, 0)
+        results.append(outcome)
     return results
 
 
-def section_body(axis: Axis, outcome: str) -> str:
-    """One axis's section, headed by the axis and the model that produced it; never a merged verdict."""
-    return f"### {axis.name} — `{axis.model}`\n\n{outcome.strip()}\n"
+def section_body(axis: Axis, findings: str) -> str:
+    """One axis's findings, headed by the axis and the model that produced them; never a merged verdict."""
+    return f"### {axis.name} — `{axis.model}`\n\n{findings.strip()}\n"
 
 
 def comment_body(markdown: str) -> str:
@@ -415,12 +523,29 @@ def comment_body(markdown: str) -> str:
     return f"{MARKER}\n\n{markdown.strip()}\n"
 
 
-def note_body(reason: str) -> str:
-    """The comment posted when no review happened. It still carries the marker, so a later run updates it."""
-    return comment_body(
-        "## LLM review\n\n"
-        f"{reason}. This is a comment, not a gate: the pull request can merge on the CI checks alone."
-    )
+def render_comment(
+    outcomes: list[AxisOutcome],
+    preamble: str = "",
+    note: str = "",
+) -> str:
+    """The one comment: every axis's outcome for this run, then the findings it produced.
+
+    The per-axis record is always present, so a run in which no axis answered still says which class
+    each call ended in and how long it took, rather than posting a bare failure note.
+    """
+    current = [outcome for outcome in outcomes if outcome.findings]
+    parts = [MARKER, "", "## LLM review", ""]
+
+    record = [f"- {preamble}"] if preamble else []
+    record += [f"- **{o.axis.name}** — `{o.axis.model}` — {o.label}" for o in outcomes]
+    if record:
+        parts += ["### This run", "", *record, ""]
+    if note:
+        parts += ["#### What the model did not see", "", note, ""]
+    if current:
+        parts += ["## Findings", ""]
+        parts.append("\n\n".join(section_body(outcome.axis, outcome.findings or "") for outcome in current))
+    return "\n".join(parts).strip() + "\n"
 
 
 def _gh(arguments: list[str]) -> subprocess.CompletedProcess[str]:
@@ -524,29 +649,23 @@ def main(argv: list[str] | None = None, opener=None) -> int:
         post(
             args.repo,
             args.pr_number,
-            note_body(
-                "the review needs the `OLLAMA_API_KEY` repository secret to reach a model; "
-                f"set it with `gh secret set OLLAMA_API_KEY --repo {args.repo}`"
+            render_comment(
+                [],
+                preamble=(
+                    "no model was called: the review needs the `OLLAMA_API_KEY` repository secret; "
+                    f"set it with `gh secret set OLLAMA_API_KEY --repo {args.repo}`. This comment is not "
+                    "a gate: the pull request can merge on the CI checks alone."
+                ),
             ),
         )
         return 0
 
-    sections = []
-    for axis, review, error in run_axes(axes, prompts, backend, opener):
-        if error:
-            print(f"{axis.name} review call failed: {error}", file=sys.stderr)
-            sections.append(section_body(axis, f"_This axis did not run: {error}_"))
-            continue
-        if not review:
-            sections.append(section_body(axis, "_The model returned an empty review._"))
-            continue
-        sections.append(section_body(axis, review))
+    outcomes = run_axes(axes, prompts, backend, opener)
+    for outcome in outcomes:
+        if not outcome.findings:
+            print(f"{outcome.axis.name} review call: {outcome.label}", file=sys.stderr)
 
-    heading = "## LLM review\n\n"
-    if note:
-        # Above the axes, not buried after them: a reader must see the gap before the findings.
-        heading += f"### What the model did not see\n\n{note}\n\n"
-    post(args.repo, args.pr_number, comment_body(heading + "\n".join(sections)))
+    post(args.repo, args.pr_number, render_comment(outcomes, note=note))
     return 0
 
 

@@ -7,6 +7,7 @@ self-evident from the status, the content type and a bounded body snippet -- nev
 
 from __future__ import annotations
 
+import http.client
 import importlib.util
 import io
 import json
@@ -64,10 +65,19 @@ def _opener(body: bytes, status: int = 200, content_type: str = "text/plain"):
     return open_
 
 
-def _run(monkeypatch, tmp_path, *, env: dict[str, str], opener=None, diff_text: str | None = None):
+def _run(
+    monkeypatch,
+    tmp_path,
+    *,
+    env: dict[str, str],
+    opener=None,
+    diff_text: str | None = None,
+):
     """Drive ``main`` end to end with the comment posting captured instead of reaching GitHub."""
     posted: list[str] = []
     monkeypatch.setattr(review, "post", lambda repo, number, body: posted.append(body))
+    # The retry backoff is real seconds; a test that stubs a dropped socket must not sleep through it.
+    monkeypatch.setattr(review, "RETRY_BACKOFF_SECONDS", 0.0, raising=False)
     for name in (
         "OLLAMA_API_KEY",
         "LLM_BASE_URL",
@@ -528,9 +538,9 @@ def test_a_hung_axis_is_abandoned_at_the_deadline_and_the_other_axis_still_posts
     assert elapsed < 2
     assert len(posted) == 1
     assert "standards findings" in posted[0]
-    assert "### Spec — `glm-5.3-flash`" in posted[0]
-    assert "did not run" in posted[0]
-    assert "timed out" in posted[0]
+    # The ticket keeps the classes apart, so this axis is not "did not run": it was abandoned here.
+    assert "**Spec** — `glm-5.3-flash`" in posted[0]
+    assert "abandoned at the stage deadline" in posted[0]
 
 
 def test_an_axis_that_fails_still_leaves_the_other_axis_in_the_one_comment(monkeypatch, tmp_path) -> None:
@@ -584,3 +594,90 @@ def test_the_first_run_creates_the_comment(monkeypatch) -> None:
     assert calls[1][0] == "pr"
     assert calls[1][1] == "comment"
     assert not any(call[:2] == ["api", "-X"] for call in calls)
+
+
+# --- Ticket 24: the failure classes stay apart, and a dropped connection is retried ---------------
+
+
+def test_the_workflow_never_lets_two_reviews_overlap() -> None:
+    """The probe measured four concurrent calls against one key degrading and two behaving; cap at two."""
+    workflow = (REPO_ROOT / ".github" / "workflows" / "review.yml").read_text(encoding="utf-8")
+
+    assert "group: ${{ github.workflow }}\n" in workflow
+    assert "cancel-in-progress: false" in workflow
+
+
+def test_every_transport_failure_keeps_its_own_name() -> None:
+    """A read timeout, a closed connection, an HTTP status and an unusable body are four things."""
+    closed = urllib.error.URLError(
+        http.client.RemoteDisconnected("Remote end closed connection without response")
+    )
+    kind, detail = review.classify_failure(closed)
+
+    assert kind == review.OUTCOME_CONNECTION_CLOSED
+    assert "Remote end closed connection without response" in detail
+    assert review.classify_failure(TimeoutError("timed out"))[0] == review.OUTCOME_READ_TIMEOUT
+    assert (
+        review.classify_failure(review.HttpStatusError("the endpoint answered HTTP 404"))[0]
+        == review.OUTCOME_HTTP_STATUS
+    )
+    assert (
+        review.classify_failure(review.UnusableResponseError("no assistant message"))[0]
+        == review.OUTCOME_UNUSABLE
+    )
+
+
+def test_the_comment_does_not_call_a_timeout_and_a_dropped_socket_the_same_thing(monkeypatch, tmp_path) -> None:
+    """Both axes used to read "did not run": a slow model and a dropped socket looked identical."""
+
+    def open_(request, timeout=None):
+        if json.loads(request.data)["model"] == "glm-5.3-flash":
+            raise TimeoutError("timed out")
+        raise urllib.error.URLError(
+            http.client.RemoteDisconnected("Remote end closed connection without response")
+        )
+
+    code, posted = _run(monkeypatch, tmp_path, env={"OLLAMA_API_KEY": "test-key"}, opener=open_)
+
+    assert code == 0
+    assert len(posted) == 1
+    assert "read timed out" in posted[0]
+    assert "connection closed without response" in posted[0]
+    assert "did not run" not in posted[0]
+
+
+def test_a_dropped_connection_is_retried_before_the_axis_is_given_up(monkeypatch, tmp_path) -> None:
+    """A closed connection is not a bad request: the same call gets further attempts and can succeed."""
+    calls: list[str] = []
+
+    def open_(request, timeout=None):
+        model = json.loads(request.data)["model"]
+        calls.append(model)
+        if model == "glm-5.3-flash" and calls.count(model) < 3:
+            raise urllib.error.URLError(
+                http.client.RemoteDisconnected("Remote end closed connection without response")
+            )
+        answer = {"choices": [{"message": {"content": f"findings from {model}"}}]}
+        return _Response(json.dumps(answer).encode("utf-8"), content_type="application/json")
+
+    code, posted = _run(monkeypatch, tmp_path, env={"OLLAMA_API_KEY": "test-key"}, opener=open_)
+
+    assert code == 0
+    assert calls.count("glm-5.3-flash") == 3
+    assert "findings from glm-5.3-flash" in posted[0]
+
+
+def test_a_read_timeout_is_not_retried(monkeypatch, tmp_path) -> None:
+    """The call already sat out the read timeout; another attempt cannot fit the stage deadline."""
+    calls: list[str] = []
+
+    def open_(request, timeout=None):
+        calls.append(json.loads(request.data)["model"])
+        raise TimeoutError("timed out")
+
+    code, posted = _run(monkeypatch, tmp_path, env={"OLLAMA_API_KEY": "test-key"}, opener=open_)
+
+    assert code == 0
+    assert calls.count("deepseek-v4.1-flash") == 1
+    assert calls.count("glm-5.3-flash") == 1
+    assert "read timed out" in posted[0]
