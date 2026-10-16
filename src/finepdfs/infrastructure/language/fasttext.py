@@ -23,8 +23,8 @@ LANGUAGE_PREFIX = "__label__"
 # two-letter labels are normalised here. Taken from the ISO 639-3 code table (iso639-3.sil.org); labels
 # that are already three letters pass through untouched.
 ISO_639_3_BY_LID_LABEL: dict[str, str] = {"af": "afr", "am": "amh", "an": "arg", "ar": "ara", "as": "asm",
-    "av": "ava", "az": "aze", "ba": "bak", "be": "bel", "bg": "bul", "bn": "ben", "bo": "bod", "br": "bre",
-    "bs": "bos", "ca": "cat", "ce": "che", "co": "cos", "cs": "ces", "cv": "chv", "cy": "cym", "da": "dan",
+    "av": "ava", "az": "aze", "ba": "bak", "be": "bel", "bg": "bul", "bh": "bih", "bn": "ben", "bo": "bod",
+    "br": "bre", "bs": "bos", "ca": "cat", "ce": "che", "co": "cos", "cs": "ces", "cv": "chv", "cy": "cym", "da": "dan",
     "de": "deu", "dv": "div", "el": "ell", "en": "eng", "eo": "epo", "es": "spa", "et": "est", "eu": "eus",
     "fa": "fas", "fi": "fin", "fr": "fra", "fy": "fry", "ga": "gle", "gd": "gla", "gl": "glg", "gn": "grn",
     "gu": "guj", "gv": "glv", "he": "heb", "hi": "hin", "hr": "hrv", "ht": "hat", "hu": "hun", "hy": "hye",

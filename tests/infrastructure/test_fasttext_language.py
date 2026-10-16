@@ -14,6 +14,7 @@ import pytest
 
 from finepdfs.domain.language import UNKNOWN_LANGUAGE
 from finepdfs.infrastructure.language.fasttext import (
+    ISO_639_3_BY_LID_LABEL,
     FastTextLanguageIdentifier,
     FastTextModel,
     LanguageModelUnavailable,
@@ -26,6 +27,20 @@ GERMAN = (
     "Diese Entschließung betrifft die Beschädigung von Wetterinstrumenten an abgelegenen Stationen "
     "und die daraus entstehenden Reparaturkosten für die betroffenen Behörden. " * 2
 )
+
+# The two-letter labels lid.176 actually emits, read from the model's own label set (123 of its 176
+# labels; the other 53 are already three letters). It is fixed for this model, so it is the durable,
+# model-free guard on the map below: a missing translation fails here with no model and no network.
+LID_176_TWO_LETTER_LABELS = frozenset({
+    "af", "am", "an", "ar", "as", "av", "az", "ba", "be", "bg", "bh", "bn", "bo", "br", "bs", "ca",
+    "ce", "co", "cs", "cv", "cy", "da", "de", "dv", "el", "en", "eo", "es", "et", "eu", "fa", "fi",
+    "fr", "fy", "ga", "gd", "gl", "gn", "gu", "gv", "he", "hi", "hr", "ht", "hu", "hy", "ia", "id",
+    "ie", "io", "is", "it", "ja", "jv", "ka", "kk", "km", "kn", "ko", "ku", "kv", "kw", "ky", "la",
+    "lb", "li", "lo", "lt", "lv", "mg", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne", "nl", "nn",
+    "no", "oc", "or", "os", "pa", "pl", "ps", "pt", "qu", "rm", "ro", "ru", "sa", "sc", "sd", "sh",
+    "si", "sk", "sl", "so", "sq", "sr", "su", "sv", "sw", "ta", "te", "tg", "th", "tk", "tl", "tr",
+    "tt", "ug", "uk", "ur", "uz", "vi", "vo", "wa", "yi", "yo", "zh",
+})
 
 
 class FixedLabeller:
@@ -132,6 +147,11 @@ def test_a_page_no_piece_of_which_can_be_named_is_unknown() -> None:
 def test_a_model_file_that_is_not_there_is_an_error_that_says_where_to_put_it() -> None:
     with pytest.raises(LanguageModelUnavailable, match="FINEPDFS_LANGUAGE_MODEL"):
         FastTextModel("/nonexistent/models/lid.176.ftz")
+
+
+def test_the_map_covers_every_two_letter_label_lid_176_can_emit() -> None:
+    # Equality, not just coverage: an entry that is not a real label is as wrong as a missing one.
+    assert set(ISO_639_3_BY_LID_LABEL) == LID_176_TWO_LETTER_LABELS
 
 
 @pytest.mark.network
