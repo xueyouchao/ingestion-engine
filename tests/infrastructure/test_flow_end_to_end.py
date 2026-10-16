@@ -14,6 +14,7 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import cocoindex as coco
 import pytest
@@ -293,6 +294,43 @@ def test_a_missing_stop_binary_does_not_mask_the_error_that_ended_the_run(monkey
     notes = " ".join(getattr(raised.value, "__notes__", []))
     assert "GPU stop command" in notes, "the leak is reported on the run's traceback, not in its place"
     assert "not installed" in notes, "the note says what the stop attempt actually did"
+
+
+def test_the_flow_builds_its_runtime_inside_the_lease(monkeypatch, tmp_path) -> None:
+    """The run path must not build an engine at the address it had before the lease.
+
+    `_run` reads a runtime from the flags before `update_blocking`, but it never hands that runtime to
+    the flow: with none configured, `coco_lifespan` leases, exports the endpoint, and only then builds
+    the runtime the flow uses. Had it built one first, the engine would be reached at the pre-lease
+    address while the leased worker sat unused. The detail the start command printed can only appear in
+    the engine's identity if the runtime was built after the lease exported it, so this pins the
+    ordering without a full update. (The address itself never shows up: `StableIdentity` replaces the
+    detail precisely so the memo key does not move with it.)
+    """
+    start_script = tmp_path / "start_worker.py"
+    start_script.write_text(
+        "import json\n"
+        "print(json.dumps({'base_url': 'http://leased.example:1/v1', 'model': 'm', 'detail': 'flow:test'}))\n"
+    )
+    monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
+    monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", f"{sys.executable} {start_script}")
+    monkeypatch.setenv("FINEPDFS_ENGINE", "paddleocr-vl")
+    monkeypatch.setenv("FINEPDFS_ENGINE_MODEL", "m")
+    monkeypatch.delenv("FINEPDFS_ENGINE_BASE_URL", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_DETAIL", raising=False)
+    flow.configure_runtime(None)
+
+    builder = SimpleNamespace(settings=SimpleNamespace(db_path=None))
+    lifespan = flow.coco_lifespan(builder)
+    next(lifespan)
+    try:
+        identity = str(flow.active_runtime().engines["paddleocr-vl"].identity)
+    finally:
+        lifespan.close()
+
+    assert "flow:test" in identity, "the runtime was built after the lease exported the worker's detail"
+    with pytest.raises(RuntimeError):
+        flow.active_runtime()
 
 
 def test_a_run_publishes_real_text_records_and_exclusions(monkeypatch, tmp_path, corpus) -> None:
