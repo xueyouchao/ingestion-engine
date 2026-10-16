@@ -439,7 +439,11 @@ def upsert_comment(repo: str, number: str, body: str) -> None:
 
 
 def post(repo: str, number: str, body: str) -> None:
-    """Post without letting a comment failure fail the job; on a fork the token cannot write at all."""
+    """Post without letting a comment failure fail the job; on a fork the token cannot write at all.
+
+    A fork pull request carries no secrets and a read-only token, so a branch of its own would have
+    nothing it could post -- the failure belongs here, printed, with the run still exiting 0.
+    """
     try:
         upsert_comment(repo, number, body)
     except Exception as error:  # Broad on purpose: the review is non-blocking by design.
@@ -494,10 +498,6 @@ def main(argv: list[str] | None = None, opener=None) -> int:
 
     if not args.repo or not args.pr_number:
         print("GITHUB_REPOSITORY or PR_NUMBER missing; cannot comment", file=sys.stderr)
-        return 0
-
-    if os.environ.get("PR_IS_FORK", "").strip().lower() == "true":
-        post(args.repo, args.pr_number, note_body("skipped: a fork pull request carries no secrets to reach a model"))
         return 0
 
     backend = resolve_backend(os.environ)

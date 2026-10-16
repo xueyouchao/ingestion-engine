@@ -48,5 +48,4 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PR_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
         run: python3 .github/scripts/review.py --diff pr.diff --prompt .github/prompts/review.md

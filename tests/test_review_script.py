@@ -76,7 +76,6 @@ def _run(monkeypatch, tmp_path, *, env: dict[str, str], opener=None, diff_text: 
         "REVIEW_MODEL_SPEC",
         "LLM_API_KEY",
         "GITHUB_TOKEN",
-        "PR_IS_FORK",
     ):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
@@ -197,6 +196,26 @@ def test_a_malformed_variable_blob_keeps_the_default_models() -> None:
     assert review.review_variables({"REVIEW_VARIABLES": "not json"}) == {}
     assert review.review_variables({"REVIEW_VARIABLES": "[1, 2]"}) == {}
     assert review.review_variables({}) == {}
+
+
+def test_a_fork_flag_in_the_environment_no_longer_skips_the_review(monkeypatch, tmp_path) -> None:
+    """The old branch posted where a fork's token cannot write, so it produced nothing: it is gone."""
+
+    def open_(request, timeout=None):
+        answer = {"choices": [{"message": {"content": "the review ran"}}]}
+        return _Response(json.dumps(answer).encode("utf-8"), content_type="application/json")
+
+    code, posted = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key", "PR_IS_FORK": "true"},
+        opener=open_,
+    )
+
+    assert code == 0
+    assert len(posted) == 1
+    assert "the review ran" in posted[0]
+    assert "skipped" not in posted[0]
 
 
 def test_a_body_that_looks_like_a_placeholder_is_not_substituted_a_second_time() -> None:
