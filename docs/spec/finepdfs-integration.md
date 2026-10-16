@@ -2,9 +2,9 @@
 
 - **Slug:** finepdfs-cocoindex
 - **Tracker:** local files, deliberately outside the repository. No issue tracker is configured for
-  this workspace, though the GitHub CLI is authenticated, so the spec lives here and the ticket slices
-  stay on the author's machine in `.scratch/finepdfs-cocoindex/issues/` (gitignored, never committed).
-  If a tracker is configured later, publish these as issues.
+  this workspace, so the spec lives here and the ticket slices stay on the author's machine in
+  `.scratch/finepdfs-cocoindex/issues/` (gitignored, never committed). If a tracker is configured
+  later, publish these as issues.
 - **Vocabulary:** docs/GLOSSARY.md. **Decisions of record:** docs/adr/.
 
 ## Problem Statement
@@ -208,16 +208,17 @@ to put behind it (YAGNI). Recorded in ADR-0004.
 **Language identification.** A port with a dependency-free adapter that always works. It names the
 *script* (Latn, Grek, Cyrl) with a confidence equal to the winning script's share of letters, and reports
 `unknown` rather than guessing below forty letters. It cannot tell English from German, and the README
-says so. A fastText/GlotLID adapter replaces it behind the same port; none is shipped, because shipping
-a model download that this environment cannot run would be a claim, not a feature.
+says so. A fastText/GlotLID adapter replaces it behind the same port; the fastText one ships (see the
+amendment below) and GlotLID does not, because shipping a model download that this environment cannot
+run would be a claim, not a feature.
 
-*Amended during implementation (ticket 08).* Both are now shipped. `ScriptLanguageIdentifier` stays the
-default and the model-free fallback; `FINEPDFS_LANGUAGE=fasttext` selects a fastText `lid.176` adapter,
-whose model is downloaded rather than vendored (`FINEPDFS_LANGUAGE_MODEL`), whose library is an optional
-extra, and whose two-letter labels are normalised to ISO 639-3 so `eng` means the same thing here as it
-does in GlotLID. The per-language threshold table stays out: with one global confidence floor the
-decision is still readable, and a per-language table is only worth its weight once there are enough
-languages in the corpus to tune it.
+*Amended during implementation (ticket 08).* Both the script adapter and the fastText adapter are now
+shipped. `ScriptLanguageIdentifier` stays the default and the model-free fallback;
+`FINEPDFS_LANGUAGE=fasttext` selects a fastText `lid.176` adapter, whose model is downloaded rather than
+vendored (`FINEPDFS_LANGUAGE_MODEL`), whose library is an optional extra, and whose two-letter labels are
+normalised to ISO 639-3 so `eng` means the same thing here as it does in GlotLID. The per-language
+threshold table stays out: with one global confidence floor the decision is still readable, and a
+per-language table is only worth its weight once there are enough languages in the corpus to tune it.
 
 ## Testing Decisions
 
@@ -264,8 +265,8 @@ network-marked end-to-end test.
 
 ## Further Notes
 
-- This environment has no GPU, but its GitHub CLI is authenticated (as `xueyouchao`), so a branch and
-  PR body prepared here can be pushed and opened as a PR directly.
+- This environment has no GPU. A branch and PR body can be prepared here, ready to be pushed and opened
+  as a PR.
 - Common Crawl PDFs are fetched live; the corpus directory is not committed.
 - Engine licences differ (Docling MIT, PaddleOCR Apache-2.0, MinerU AGPL-3.0, pymupdf AGPL-3.0): the
   engine adapters are documented with their licence, and using an AGPL engine is the operator's choice.
