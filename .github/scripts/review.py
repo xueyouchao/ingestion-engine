@@ -93,6 +93,10 @@ RETRYABLE_FAILURES = frozenset({OUTCOME_CONNECTION_CLOSED})
 # is available still round-trips instead of silently making the findings unkeepable.
 FINDINGS_OPEN = re.compile(r"<!-- finepdfs-findings revision=(?P<revision>[^\s>]{1,64}) -->")
 FINDINGS_CLOSE = "<!-- /finepdfs-findings -->"
+# A comment the old code posted: findings under `### <axis> -- model` headings, no markers. Read back
+# once, at the upgrade, so the first findings-free run afterwards does not erase them.
+LEGACY_SECTION = re.compile(r"^### ", re.MULTILINE)
+LEGACY_REVISION = "pre-marker"
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,7 +194,7 @@ def classify_failure(error: BaseException) -> tuple[str, str]:
     """
     if isinstance(error, HttpStatusError):
         return OUTCOME_HTTP_STATUS, _snippet(str(error))
-    if isinstance(error, ReviewCallError):
+    if isinstance(error, UnusableResponseError):
         return OUTCOME_UNUSABLE, _snippet(str(error))
     if isinstance(error, TimeoutError):
         return OUTCOME_READ_TIMEOUT, ""
@@ -561,17 +565,25 @@ def extract_findings(body: str) -> RetainedFindings | None:
 
     The region is delimited by its own markers rather than re-derived from the headings, so a run
     keeps exactly what the last run found and nothing it said about how the run went.
+
+    A comment posted before this branch exists has no markers: it carries its findings as plain
+    ``### <axis> -- model`` sections, the way the old code wrote them. Those are still findings, and
+    the first findings-free run after the upgrade is exactly when a reader would miss them, so they
+    are read back and stamped as ``pre-marker`` rather than dropped.
     """
     opening = FINDINGS_OPEN.search(body)
-    if opening is None:
+    if opening is not None:
+        end = body.find(FINDINGS_CLOSE, opening.end())
+        if end == -1:
+            return None
+        markdown = body[opening.end() : end].strip()
+        return RetainedFindings(opening.group("revision"), markdown) if markdown else None
+
+    legacy = LEGACY_SECTION.search(body)
+    if legacy is None:
         return None
-    end = body.find(FINDINGS_CLOSE, opening.end())
-    if end == -1:
-        return None
-    markdown = body[opening.end() : end].strip()
-    if not markdown:
-        return None
-    return RetainedFindings(opening.group("revision"), markdown)
+    markdown = body[legacy.start() :].split(FINDINGS_CLOSE)[0].strip()
+    return RetainedFindings(LEGACY_REVISION, markdown) if markdown else None
 
 
 def reviewed_revision(env: dict[str, str]) -> str:
@@ -767,11 +779,26 @@ def main(argv: list[str] | None = None, opener=None) -> int:
     run_url = (env.get("RUN_URL") or "").strip()
     previous, read_ok = read_comment(args.repo, args.pr_number)
 
+    def deliver(body: str) -> None:
+        """One rule for every path out of ``main``, so no path can be the one that erases findings.
+
+        A body this run could not read the comment for may only be replaced by one that carries
+        findings of its own; a body with no findings region would take whatever the old comment held
+        with it, which is the erasure this module exists to prevent. The rule is here rather than at
+        each call site because the missing-secret path posts too, and it is findings-free.
+        """
+        if not read_ok and FINDINGS_OPEN.search(body) is None:
+            print(
+                "not posting: this run found nothing and the existing comment could not be read, "
+                "so replacing it could erase findings",
+                file=sys.stderr,
+            )
+            return
+        post(args.repo, args.pr_number, body, previous.id if previous else None)
+
     backend = resolve_backend(env)
     if backend is None:
-        post(
-            args.repo,
-            args.pr_number,
+        deliver(
             render_comment(
                 revision,
                 run_url,
@@ -782,8 +809,7 @@ def main(argv: list[str] | None = None, opener=None) -> int:
                     f"set it with `gh secret set OLLAMA_API_KEY --repo {args.repo}`. This comment is not "
                     "a gate: the pull request can merge on the CI checks alone."
                 ),
-            ),
-            previous.id if previous else None,
+            )
         )
         return 0
 
@@ -792,29 +818,14 @@ def main(argv: list[str] | None = None, opener=None) -> int:
         if not outcome.findings:
             print(f"{outcome.axis.name} review call: {outcome.label}", file=sys.stderr)
 
-    if not read_ok and not any(outcome.findings for outcome in outcomes):
-        # Composing now would replace a body this run could not read with one that has no findings in
-        # it, and whatever findings it held would be gone. Not posting keeps the record; a run with
-        # findings of its own may still replace it, because those findings are worth more than the
-        # stale ones and the read failure cannot change that.
-        print(
-            "not posting: this run found nothing and the existing comment could not be read, "
-            "so replacing it could erase findings",
-            file=sys.stderr,
-        )
-        return 0
-
-    post(
-        args.repo,
-        args.pr_number,
+    deliver(
         render_comment(
             revision,
             run_url,
             outcomes,
             previous.body if previous else None,
             note=note,
-        ),
-        previous.id if previous else None,
+        )
     )
     return 0
 

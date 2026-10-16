@@ -836,7 +836,11 @@ def test_a_findings_free_run_posts_nothing_when_the_comment_cannot_be_read(monke
 
 
 def test_a_run_with_findings_still_posts_when_the_old_comment_cannot_be_read(monkeypatch, tmp_path) -> None:
-    """The read failure cannot make fresh findings worth less than the stale ones it could not see."""
+    """Fresh findings are worth more than the stale ones a failed read could not show, so they are posted.
+
+    This pins the rule at the seam this file owns -- what ``main`` hands to ``post``. Whether the second
+    read inside ``upsert_comment`` then finds the comment is a separate call, tested there.
+    """
     code, posted = _run(
         monkeypatch,
         tmp_path,
@@ -876,3 +880,55 @@ def test_an_axis_abandoned_mid_retry_still_names_the_class_it_reached(monkeypatc
     assert "abandoned at the stage deadline" in posted[0]
     assert "the last attempt ended with: connection closed without response" in posted[0]
     assert "standards findings" in posted[0]
+
+
+def test_the_missing_secret_notice_does_not_erase_findings_it_could_not_read(monkeypatch, tmp_path) -> None:
+    """The no-model path posts too and is findings-free, so the retention rule has to cover it as well."""
+    code, posted = _run(monkeypatch, tmp_path, env={}, opener=None, read_raises=True)
+
+    assert code == 0
+    assert posted == []
+
+
+def test_findings_the_old_code_posted_are_read_back_once(monkeypatch, tmp_path) -> None:
+    """A comment from before the markers carries findings as plain sections; the upgrade must keep them."""
+    legacy = (
+        f"{review.MARKER}\n\n## LLM review\n\n"
+        "### Standards — `deepseek-v4.1-flash`\n\n"
+        "- `src/finepdfs/domain/ports.py:14` promises an ISO 639-3 code.\n\n"
+        "### Spec — `glm-5.3-flash`\n\n"
+        "- `docs/GLOSSARY.md` still spells the retired term.\n"
+    )
+
+    code, posted = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key"},
+        opener=_dropped_opener,
+        previous_body=legacy,
+    )
+
+    assert code == 0
+    assert len(posted) == 1
+    assert "promises an ISO 639-3 code" in posted[0]
+    assert "from `pre-marker`" in posted[0]
+    assert "they are kept rather than erased" in posted[0]
+
+
+def test_an_old_comment_that_only_says_it_did_not_run_yields_no_findings() -> None:
+    """The legacy reader must not invent findings out of a run note, or it would keep a failure forever."""
+    note = (
+        f"{review.MARKER}\n\n## LLM review\n\n"
+        "the model did not answer. This is a comment, not a gate: the pull request can merge on the "
+        "CI checks alone.\n"
+    )
+
+    assert review.extract_findings(note) is None
+
+
+def test_an_unknown_review_call_error_is_not_reported_as_an_unusable_body() -> None:
+    """Only the two subclasses know their class; a bare base-class error is not a 2xx body we could not read."""
+    status, detail = review.classify_failure(review.ReviewCallError("something else went wrong"))
+
+    assert status == review.OUTCOME_UNEXPECTED
+    assert "something else went wrong" in detail
