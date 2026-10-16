@@ -218,6 +218,83 @@ def test_a_stop_command_that_fails_after_a_good_run_reaches_the_flow(monkeypatch
     assert "FINEPDFS_ENGINE_API_KEY" not in os.environ
 
 
+def test_a_missing_stop_binary_after_a_good_run_reaches_the_flow(monkeypatch, tmp_path, corpus) -> None:
+    """A stop binary that is not installed fails before there is any exit code to read.
+
+    ``SubprocessRunner`` raises ``CommandFailed`` itself for a binary ``shutil.which`` cannot find,
+    which is not the same shape as ``require_success`` reading a nonzero exit. At the flow's own
+    lifespan that still has to be the provider's failure -- ``GpuStopFailed``, which the CLI reports
+    -- rather than a bare ``CommandFailed`` escaping as the run ends.
+    """
+    start_script = tmp_path / "start_worker.py"
+    start_script.write_text(
+        "import json\n"
+        "print(json.dumps({'base_url': 'http://127.0.0.1:9/v1', 'model': 'm', 'identity': 'flow:test'}))\n"
+    )
+
+    monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
+    monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", f"{sys.executable} {start_script}")
+    monkeypatch.setenv("FINEPDFS_GPU_STOP_COMMAND", "/no/such/stop-worker")
+    monkeypatch.setenv("FINEPDFS_DB", str(tmp_path / "flow.db"))
+    monkeypatch.setenv("FINEPDFS_CORPUS", str(corpus))
+    monkeypatch.setenv("FINEPDFS_OUT", str(tmp_path / "out"))
+    monkeypatch.setenv("FINEPDFS_ENGINE", "pymupdf")
+    monkeypatch.delenv("FINEPDFS_ENGINE_BASE_URL", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_API_KEY", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_IDENTITY", raising=False)
+    flow.configure_runtime(None)
+
+    async def good_run() -> None:
+        async with coco.runtime():
+            await flow.build_app().update()
+
+    with pytest.raises(GpuStopFailed, match="not installed"):
+        asyncio.run(good_run())
+
+    assert (tmp_path / "out" / "records" / f"{document_key(ONE)}.json").exists(), "the run did its work"
+
+
+def test_a_missing_stop_binary_does_not_mask_the_error_that_ended_the_run(monkeypatch, tmp_path) -> None:
+    """CocoIndex resumes the lifespan generator, so the run's error is never thrown into the lease.
+
+    The provider tests deliver the run's failure to ``lease`` by raising inside its ``with``; under
+    ``cocoindex update`` that never happens, because the environment closes the generator with
+    ``next()``. The stop leak must still be reported beside the error that ended the run rather than
+    in its place, because that error is the one the operator has to act on (ADR-0007).
+    """
+    start_script = tmp_path / "start_worker.py"
+    start_script.write_text(
+        "import json\n"
+        "print(json.dumps({'base_url': 'http://127.0.0.1:9/v1', 'model': 'm', 'identity': 'flow:test'}))\n"
+    )
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    (corpus_dir / "manifest.json").write_text("{ this manifest is not JSON")
+
+    monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
+    monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", f"{sys.executable} {start_script}")
+    monkeypatch.setenv("FINEPDFS_GPU_STOP_COMMAND", "/no/such/stop-worker")
+    monkeypatch.setenv("FINEPDFS_DB", str(tmp_path / "flow.db"))
+    monkeypatch.setenv("FINEPDFS_CORPUS", str(corpus_dir))
+    monkeypatch.setenv("FINEPDFS_ENGINE", "paddleocr-vl")
+    monkeypatch.setenv("FINEPDFS_ENGINE_MODEL", "operator-pinned")
+    monkeypatch.delenv("FINEPDFS_ENGINE_BASE_URL", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_API_KEY", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_IDENTITY", raising=False)
+    flow.configure_runtime(None)
+
+    async def failing_run() -> None:
+        async with coco.runtime():
+            await flow.build_app().update()
+
+    with pytest.raises(ValueError) as raised:
+        asyncio.run(failing_run())
+
+    notes = " ".join(getattr(raised.value, "__notes__", []))
+    assert "GPU stop command" in notes, "the leak is reported on the run's traceback, not in its place"
+    assert "not installed" in notes, "the note says what the stop attempt actually did"
+
+
 def test_a_run_publishes_real_text_records_and_exclusions(monkeypatch, tmp_path, corpus) -> None:
     out_dir = tmp_path / "out"
     _run(monkeypatch, tmp_path, _runtime(corpus, out_dir), "first")

@@ -278,6 +278,19 @@ def test_a_failing_start_command_is_a_provider_failure_of_its_own() -> None:
     assert not issubclass(GpuStartFailed, CommandFailed)
 
 
+def test_a_start_command_that_is_not_installed_is_the_providers_own_failure() -> None:
+    """The same shape as a nonzero exit: the runner raises CommandFailed before require_success runs.
+
+    A binary that is not installed must not reach the caller as the engine's ``CommandFailed``, because
+    "this run cannot start" is the provider's own ``GpuStartFailed`` -- the type the CLI reports and
+    exits 2 on, whatever made the start command fail (ADR-0007).
+    """
+    provider = CommandGpuProvider(start_command="/no/such/start-worker", stop_command=STOP)
+
+    with pytest.raises(GpuStartFailed, match="not installed"), provider.lease():
+        pass
+
+
 def test_a_known_provider_missing_its_start_command_is_misconfigured_not_unknown() -> None:
     """'No such provider' and 'this provider is incomplete' send a reader to different places."""
     with pytest.raises(MisconfiguredGpuProvider, match="FINEPDFS_GPU_START_COMMAND"):
