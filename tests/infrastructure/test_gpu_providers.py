@@ -17,8 +17,16 @@ import pytest
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument
 from finepdfs.infrastructure.cocoindex.runtime import runtime_from_environment
 from finepdfs.infrastructure.compute import providers
-from finepdfs.infrastructure.compute.endpoint import GpuEndpoint, export_endpoint
+from finepdfs.infrastructure.compute.endpoint import (
+    ENGINE_BASE_URL,
+    ENGINE_IDENTITY,
+    GpuEndpoint,
+    export_endpoint,
+)
 from finepdfs.infrastructure.compute.providers import (
+    GPU_PROVIDER,
+    GPU_START_COMMAND,
+    GPU_STOP_COMMAND,
     CommandGpuProvider,
     GpuStartFailed,
     GpuStopFailed,
@@ -33,7 +41,7 @@ from finepdfs.infrastructure.compute.providers import (
 from finepdfs.infrastructure.engines.registry import EngineConfig, build_engine
 from finepdfs.infrastructure.engines.stable_identity import StableIdentity
 from finepdfs.infrastructure.engines.subprocess_support import CommandFailed, CommandResult
-from finepdfs.interfaces.cli import build_parser, main
+from finepdfs.interfaces.cli import ENVIRONMENT_FOR_ENGINE, build_parser, main
 
 START = "start-worker"
 STOP = "stop-worker"
@@ -350,6 +358,30 @@ def test_the_runtime_builds_the_engine_from_the_exported_identity() -> None:
             "FINEPDFS_ENGINE_BASE_URL": "https://rented.example/v1",
             "FINEPDFS_ENGINE_MODEL": "m",
             "FINEPDFS_ENGINE_IDENTITY": "modal:ocr:1.6",
+        }
+    )
+
+    assert str(runtime.engines["paddleocr-vl"].identity) == "paddleocr-vl@modal:ocr:1.6"
+
+
+def test_the_seam_variables_have_one_owner_and_every_reader_reads_it() -> None:
+    """A constant is only a single source of truth if the readers read it.
+
+    Renaming a seam variable used to mean three edits -- the constant, the literal runtime.py read and
+    the literal cli.py's flag map held -- and a missed one silently ignored the variable. The map
+    assertions below pin the CLI to the constants, and the runtime assertion passes only against the
+    name the constant holds, so a rename that forgets either reader fails here.
+    """
+    assert ENVIRONMENT_FOR_ENGINE["engine_identity"] == ENGINE_IDENTITY
+    assert ENVIRONMENT_FOR_ENGINE["gpu_provider"] == GPU_PROVIDER
+    assert ENVIRONMENT_FOR_ENGINE["gpu_start_command"] == GPU_START_COMMAND
+    assert ENVIRONMENT_FOR_ENGINE["gpu_stop_command"] == GPU_STOP_COMMAND
+
+    runtime = runtime_from_environment(
+        {
+            ENGINE_IDENTITY: "modal:ocr:1.6",
+            ENGINE_BASE_URL: "https://rented.example/v1",
+            "FINEPDFS_ENGINE": "paddleocr-vl",
         }
     )
 

@@ -15,6 +15,12 @@ from finepdfs.application.curate import CurateDocument, CurationPolicy, Curation
 from finepdfs.domain.language import LanguagePolicy
 from finepdfs.domain.ports import OcrEngine
 from finepdfs.domain.publishing import PublishPolicy
+from finepdfs.infrastructure.compute.endpoint import (
+    ENGINE_API_KEY,
+    ENGINE_BASE_URL,
+    ENGINE_IDENTITY,
+    ENGINE_MODEL,
+)
 from finepdfs.infrastructure.corpus.index import CorpusIndex
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextLayerProbe
 from finepdfs.infrastructure.engines.registry import EngineConfig, build_engines
@@ -72,13 +78,15 @@ def runtime_from_environment(environ: Mapping[str, str] | None = None) -> Runtim
     engine_config = EngineConfig(
         name=engine_name,
         command=values.get("FINEPDFS_ENGINE_COMMAND", ""),
-        base_url=values.get("FINEPDFS_ENGINE_BASE_URL", ""),
-        model=values.get("FINEPDFS_ENGINE_MODEL", ""),
-        api_key=values.get("FINEPDFS_ENGINE_API_KEY", ""),
+        # The seam's four names come from where they are written (compute.endpoint), not from a literal
+        # spelled again here: one owner, so a rename does not have to be found in this file too.
+        base_url=values.get(ENGINE_BASE_URL, ""),
+        model=values.get(ENGINE_MODEL, ""),
+        api_key=values.get(ENGINE_API_KEY, ""),
         page_dpi=int(values.get("FINEPDFS_ENGINE_DPI", "200")),
         work_dir=pathlib.Path(values["FINEPDFS_ENGINE_WORK_DIR"]) if values.get("FINEPDFS_ENGINE_WORK_DIR") else None,
         timeout_seconds=float(values.get("FINEPDFS_ENGINE_TIMEOUT", "300")),
-        detail=values.get("FINEPDFS_ENGINE_IDENTITY", ""),
+        detail=values.get(ENGINE_IDENTITY, ""),
     )
     engines = build_engines([] if engine_name == "pymupdf" else [engine_config])
 

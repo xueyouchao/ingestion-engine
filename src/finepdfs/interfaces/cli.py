@@ -13,7 +13,16 @@ from finepdfs.domain.dedup import PublishedDocumentView, exact_duplicate_keepers
 from finepdfs.domain.document import Document
 from finepdfs.infrastructure.cocoindex.runtime import Runtime, runtime_from_environment
 from finepdfs.infrastructure.commoncrawl.source import CommonCrawlSource
+from finepdfs.infrastructure.compute.endpoint import (
+    ENGINE_API_KEY,
+    ENGINE_BASE_URL,
+    ENGINE_IDENTITY,
+    ENGINE_MODEL,
+)
 from finepdfs.infrastructure.compute.providers import (
+    GPU_PROVIDER,
+    GPU_START_COMMAND,
+    GPU_STOP_COMMAND,
     PROVIDERS,
     GpuStartFailed,
     GpuStopFailed,
@@ -31,21 +40,24 @@ DEFAULT_CORPUS = Path("corpus")
 DEFAULT_OUT = Path("out")
 
 # Flag name to environment variable. "engine_command" is deliberately not called "command": a
-# subparser argument with that name would overwrite the name of the chosen subcommand.
+# subparser argument with that name would overwrite the name of the chosen subcommand. The names the GPU
+# seam introduced are read from their owners -- compute.endpoint writes the FINEPDFS_ENGINE_* four and
+# compute.providers owns the GPU_* -- so a rename is one edit there, not one here as well. The older
+# names below have no constant yet and are spelled where they are read.
 ENVIRONMENT_FOR_ENGINE = {
     "corpus": "FINEPDFS_CORPUS",
     "out": "FINEPDFS_OUT",
     "engine": "FINEPDFS_ENGINE",
-    "base_url": "FINEPDFS_ENGINE_BASE_URL",
-    "model": "FINEPDFS_ENGINE_MODEL",
-    "api_key": "FINEPDFS_ENGINE_API_KEY",
+    "base_url": ENGINE_BASE_URL,
+    "model": ENGINE_MODEL,
+    "api_key": ENGINE_API_KEY,
     "engine_command": "FINEPDFS_ENGINE_COMMAND",
-    "engine_identity": "FINEPDFS_ENGINE_IDENTITY",
+    "engine_identity": ENGINE_IDENTITY,
     "dpi": "FINEPDFS_ENGINE_DPI",
     "similarity_threshold": "FINEPDFS_SIMILARITY_THRESHOLD",
-    "gpu_provider": "FINEPDFS_GPU_PROVIDER",
-    "gpu_start_command": "FINEPDFS_GPU_START_COMMAND",
-    "gpu_stop_command": "FINEPDFS_GPU_STOP_COMMAND",
+    "gpu_provider": GPU_PROVIDER,
+    "gpu_start_command": GPU_START_COMMAND,
+    "gpu_stop_command": GPU_STOP_COMMAND,
 }
 
 
