@@ -8,7 +8,9 @@ the model is actually used: a run that stayed on the script adapter needs nothin
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol
 
 from finepdfs.domain.language import UNKNOWN_LANGUAGE, PageLanguage
 from finepdfs.infrastructure.language.model import TextLabeller
@@ -44,35 +46,55 @@ class LanguageModelUnavailable(RuntimeError):
     """Raised when the optional model library, or the model file it needs, is not installed."""
 
 
+class LoadedModel(Protocol):
+    """The slice of a loaded `fasttext` model this adapter uses, so a fake can stand in for it."""
+
+    def predict(self, text: str, k: int = 1) -> tuple[list[str], list[float]]:
+        """The model's `__label__`-prefixed labels and their scores, best first."""
+        ...
+
+
+def _load_model(path: str) -> LoadedModel:
+    """The real `fasttext` model, imported only when one is actually asked for."""
+    try:
+        import fasttext  # the third-party package: this module's own name costs it nothing
+    except ImportError as error:
+        raise LanguageModelUnavailable(
+            'the fasttext package is not installed: pip install "finepdfs[language]"'
+        ) from error
+    return fasttext.load_model(path)
+
+
 class FastTextModel:
-    """fastText's lid.176 model, loaded once for a run.
+    """fastText's lid.176 model, loaded once for a run, answering in ISO 639-3.
 
     `fasttext` is imported here rather than at module import time, because it is an optional extra
     (`pip install "finepdfs[language]"`) and the model file is downloaded, not vendored. The model is
     loaded when the run is assembled, so a wrong path or a missing extra says so at startup instead of
-    halfway through a corpus. The model is CC-BY-SA-3.0 licensed; lid.176.bin and lid.176.ftz are
-    published by Meta at dl.fbaipublicfiles.com/fasttext/supervised-models/.
+    halfway through a corpus.
+
+    lid.176 answers in whatever code its training data used -- `en`, `de`, `fr` -- but the seam it
+    implements promises ISO 639-3, so the two-letter labels are translated here, beside the model that
+    emits them, and every implementer of `TextLabeller` really does return `eng`/`deu`/`fra`. The model
+    is CC-BY-SA-3.0 licensed; lid.176.bin and lid.176.ftz are published by Meta at
+    dl.fbaipublicfiles.com/fasttext/supervised-models/. The loader is injectable so the translation is
+    tested with a fake model object, no `fasttext` package and no network.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, loader: Callable[[str], LoadedModel] = _load_model) -> None:
         self._path = Path(path)
         if not self._path.is_file():
             raise LanguageModelUnavailable(
                 f"no fastText model at {self._path}: download lid.176.ftz and point FINEPDFS_LANGUAGE_MODEL at it"
             )
-        try:
-            import fasttext  # the third-party package: this module's own name costs it nothing
-        except ImportError as error:
-            raise LanguageModelUnavailable(
-                'the fasttext package is not installed: pip install "finepdfs[language]"'
-            ) from error
-        self._model = fasttext.load_model(str(self._path))
+        self._model = loader(str(self._path))
 
     def label(self, text: str) -> tuple[str, float]:
         labels, scores = self._model.predict(text, k=1)
         if not labels:
             return UNKNOWN_LANGUAGE, 0.0
-        return labels[0].removeprefix(LANGUAGE_PREFIX), float(scores[0])
+        label = labels[0].removeprefix(LANGUAGE_PREFIX)
+        return ISO_639_3_BY_LID_LABEL.get(label, label), float(scores[0])
 
 
 class FastTextLanguageIdentifier:
@@ -110,7 +132,6 @@ class FastTextLanguageIdentifier:
             language, confidence = self._model.label(chunk)
             if language in ("", UNKNOWN_LANGUAGE):
                 continue
-            language = ISO_639_3_BY_LID_LABEL.get(language, language)
             scores[language] = scores.get(language, 0.0) + confidence
 
         if not scores:

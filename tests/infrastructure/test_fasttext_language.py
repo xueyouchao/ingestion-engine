@@ -15,6 +15,7 @@ import pytest
 from finepdfs.domain.language import UNKNOWN_LANGUAGE
 from finepdfs.infrastructure.language.fasttext import (
     ISO_639_3_BY_LID_LABEL,
+    LANGUAGE_PREFIX,
     FastTextLanguageIdentifier,
     FastTextModel,
     LanguageModelUnavailable,
@@ -71,9 +72,27 @@ class KeywordLabeller:
         return UNKNOWN_LANGUAGE, 0.0
 
 
-def test_a_page_is_named_in_the_corpus_language_codes_not_the_models_own() -> None:
-    # lid.176 answers "en"; the corpus, the allow-list and GlotLID all use ISO 639-3, so "eng".
-    tag = FastTextLanguageIdentifier(FixedLabeller("en", 0.98)).identify(ENGLISH, page_number=1)
+class RawModel:
+    """The shape `fasttext.load_model` returns: `predict` answers with `__label__`-prefixed labels."""
+
+    def __init__(self, label: str, score: float) -> None:
+        self._label = label
+        self._score = score
+
+    def predict(self, text: str, k: int = 1) -> tuple[list[str], list[float]]:
+        return ([f"{LANGUAGE_PREFIX}{self._label}"], [self._score])
+
+
+def test_the_model_answers_in_iso_639_3_not_lid_176s_own_code() -> None:
+    # lid.176 answers "en"; the seam promises ISO 639-3, so the translation belongs to the model that
+    # speaks lid.176 -- otherwise the identifier above it would have to know which model it wraps.
+    model = FastTextModel(__file__, loader=lambda _path: RawModel("en", 0.97))
+
+    assert model.label("anything") == ("eng", 0.97)
+
+
+def test_the_identifier_records_the_labellers_iso_639_3_code_untouched() -> None:
+    tag = FastTextLanguageIdentifier(FixedLabeller("eng", 0.98)).identify(ENGLISH, page_number=1)
 
     assert tag.language == "eng"
     assert tag.confidence == 0.98
@@ -97,7 +116,7 @@ def test_a_label_that_is_already_iso_639_3_is_left_alone() -> None:
 
 
 def test_a_low_confidence_is_reported_as_it_is_for_the_policy_to_drop() -> None:
-    tag = FastTextLanguageIdentifier(FixedLabeller("en", 0.4)).identify(ENGLISH, page_number=1)
+    tag = FastTextLanguageIdentifier(FixedLabeller("eng", 0.4)).identify(ENGLISH, page_number=1)
 
     assert tag.language == "eng"
     assert tag.confidence == 0.4
@@ -115,7 +134,7 @@ def test_a_page_that_fits_is_shown_to_the_model_whole() -> None:
 def test_a_long_page_is_labelled_in_pieces_and_the_winning_language_is_the_strongest_vote() -> None:
     # A chunk size of four characters makes every word of this page its own chunk, which is what makes
     # the arithmetic below a hand-written expectation rather than a restatement of the splitter.
-    labeller = KeywordLabeller({"english": ("en", 0.9), "german": ("de", 0.6)})
+    labeller = KeywordLabeller({"english": ("eng", 0.9), "german": ("deu", 0.6)})
     page = " ".join(["english"] * 10 + ["german"] * 10)
 
     tag = FastTextLanguageIdentifier(labeller, chunk_characters=4).identify(page, page_number=1)
@@ -126,7 +145,7 @@ def test_a_long_page_is_labelled_in_pieces_and_the_winning_language_is_the_stron
 
 
 def test_a_piece_the_model_cannot_name_is_a_vote_for_nobody() -> None:
-    labeller = KeywordLabeller({"english": ("en", 0.9)})
+    labeller = KeywordLabeller({"english": ("eng", 0.9)})
     page = " ".join(["english"] * 5 + ["gibberish"] * 5)
 
     tag = FastTextLanguageIdentifier(labeller, chunk_characters=4).identify(page, page_number=1)
