@@ -78,6 +78,7 @@ def runtime_from_environment(environ: Mapping[str, str] | None = None) -> Runtim
         page_dpi=int(values.get("FINEPDFS_ENGINE_DPI", "200")),
         work_dir=pathlib.Path(values["FINEPDFS_ENGINE_WORK_DIR"]) if values.get("FINEPDFS_ENGINE_WORK_DIR") else None,
         timeout_seconds=float(values.get("FINEPDFS_ENGINE_TIMEOUT", "300")),
+        identity=values.get("FINEPDFS_ENGINE_IDENTITY", ""),
     )
     engines = build_engines([] if engine_name == "pymupdf" else [engine_config])
 

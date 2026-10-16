@@ -7,6 +7,7 @@ from pathlib import Path
 
 from finepdfs.domain.ports import OcrEngine
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextEngine
+from finepdfs.infrastructure.engines.stable_identity import StableIdentity
 from finepdfs.infrastructure.engines.subprocess_support import SubprocessRunner
 
 NATIVE_ENGINE = "pymupdf"
@@ -32,10 +33,24 @@ class EngineConfig:
     page_dpi: int = 200
     timeout_seconds: float = 300.0
     work_dir: Path | None = None
+    identity: str = ""
+    """A stable name for the deployment, when the address the engine is reached at is not stable.
+
+    A rented GPU answers on a new host every run, so its address cannot be the memo key without
+    re-reading the whole corpus each time (ADR-0005). Empty means the engine names itself, which is
+    right for anything reached at an address that does not move.
+    """
 
 
 def build_engine(config: EngineConfig) -> OcrEngine:
     """One engine, whichever kind it is. Imported lazily so unused engines cost nothing."""
+    engine = _build_engine(config)
+    if config.identity:
+        return StableIdentity(engine, config.identity)
+    return engine
+
+
+def _build_engine(config: EngineConfig) -> OcrEngine:
     if config.name == NATIVE_ENGINE:
         return PymupdfTextEngine()
     if config.name == DOCLING_ENGINE:

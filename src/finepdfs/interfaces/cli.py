@@ -13,10 +13,13 @@ from finepdfs.domain.dedup import PublishedDocumentView, exact_duplicate_keepers
 from finepdfs.domain.document import Document
 from finepdfs.infrastructure.cocoindex.runtime import Runtime, runtime_from_environment
 from finepdfs.infrastructure.commoncrawl.source import CommonCrawlSource
+from finepdfs.infrastructure.compute.endpoint import export_endpoint
+from finepdfs.infrastructure.compute.providers import KNOWN_PROVIDERS, UnknownGpuProvider, gpu_provider_from_environment
 from finepdfs.infrastructure.corpus.fetch import fetch_corpus
 from finepdfs.infrastructure.corpus.index import CorpusIndex
 from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifest
 from finepdfs.infrastructure.engines.registry import KNOWN_ENGINES
+from finepdfs.infrastructure.engines.subprocess_support import CommandFailed
 from finepdfs.infrastructure.publishing.disk import PublishedCorpus
 
 DEFAULT_CORPUS = Path("corpus")
@@ -32,8 +35,12 @@ ENVIRONMENT_FOR_ENGINE = {
     "model": "FINEPDFS_ENGINE_MODEL",
     "api_key": "FINEPDFS_ENGINE_API_KEY",
     "engine_command": "FINEPDFS_ENGINE_COMMAND",
+    "engine_identity": "FINEPDFS_ENGINE_IDENTITY",
     "dpi": "FINEPDFS_ENGINE_DPI",
     "similarity_threshold": "FINEPDFS_SIMILARITY_THRESHOLD",
+    "gpu_provider": "FINEPDFS_GPU_PROVIDER",
+    "gpu_start_command": "FINEPDFS_GPU_START_COMMAND",
+    "gpu_stop_command": "FINEPDFS_GPU_STOP_COMMAND",
 }
 
 
@@ -97,11 +104,46 @@ def _add_engine_arguments(parser: argparse.ArgumentParser, *, out: bool) -> None
         default=argparse.SUPPRESS,
         help="fingerprint similarity above which one document is a near-duplicate of another",
     )
+    parser.add_argument(
+        "--engine-identity",
+        dest="engine_identity",
+        default=argparse.SUPPRESS,
+        help="a stable memo name for the engine, for a worker whose address changes every run",
+    )
+    parser.add_argument(
+        "--gpu-provider",
+        dest="gpu_provider",
+        default=argparse.SUPPRESS,
+        choices=list(KNOWN_PROVIDERS),
+        help="where a GPU engine runs: none, a static server, or a command that rents one",
+    )
+    parser.add_argument(
+        "--gpu-start-command",
+        dest="gpu_start_command",
+        default=argparse.SUPPRESS,
+        help="with --gpu-provider command: starts a worker and prints its endpoint",
+    )
+    parser.add_argument(
+        "--gpu-stop-command",
+        dest="gpu_stop_command",
+        default=argparse.SUPPRESS,
+        help="with --gpu-provider command: gives the worker back",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(message)s")
+    try:
+        return _dispatch(args)
+    except (UnknownGpuProvider, CommandFailed) as error:
+        # A run that cannot start is an operator problem, not a crash: say so and exit 2, the same way
+        # an empty corpus is refused rather than run.
+        print(error, file=sys.stderr)
+        return 2
+
+
+def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "fetch-corpus":
         return _fetch_corpus(args)
     if args.command == "inspect":
@@ -148,17 +190,32 @@ def _inspect(args: argparse.Namespace) -> int:
     return 0
 
 
-def _runtime_from_args(args: argparse.Namespace) -> Runtime:
+def _export_flags(args: argparse.Namespace) -> None:
     """The flags a run was given, expressed as the environment the flow reads."""
     for attribute, variable in ENVIRONMENT_FOR_ENGINE.items():
         value = getattr(args, attribute, None)
         if value is not None:
             os.environ[variable] = str(value)
+
+
+def _runtime_from_args(args: argparse.Namespace) -> Runtime:
+    _export_flags(args)
     return runtime_from_environment()
 
 
 def _dry_run(args: argparse.Namespace) -> int:
-    runtime = _runtime_from_args(args)
+    """Curate in process, on whatever GPU this run was told to rent.
+
+    A dry run does not go through the CocoIndex flow, so the flow's lifespan cannot lease for it: it
+    leases here, exports the endpoint, and only then builds the runtime that holds the engine.
+    """
+    _export_flags(args)
+    with gpu_provider_from_environment().lease() as endpoint:
+        export_endpoint(endpoint, os.environ)
+        return _dry_run_in_process(runtime_from_environment())
+
+
+def _dry_run_in_process(runtime: Runtime) -> int:
     index = CorpusIndex(runtime.corpus_dir)
     documents = index.documents()
     if not documents:

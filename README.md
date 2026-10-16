@@ -55,7 +55,7 @@ Dependencies point inward. The domain knows nothing about HTTP, files or CocoInd
 |---|---|---|
 | `domain/` | value objects and pure policies | `CrawlRecord`, `TextLayerQuality`, `OcrRoutingPolicy`, `CleaningRules`, `LanguagePolicy`, `PublishPolicy`, `plan_deduplication` |
 | `application/` | the use cases, expressed against ports | `ExtractionStep` (route + read), `CurationStep` (clean + judge), `CurateDocument` |
-| `infrastructure/` | adapters | `commoncrawl/`, `engines/`, `language/`, `publishing/`, `corpus/`, `cocoindex/` |
+| `infrastructure/` | adapters | `commoncrawl/`, `engines/`, `language/`, `publishing/`, `corpus/`, `cocoindex/`, `compute/` |
 | `interfaces/` | how it is driven | `interfaces/cli.py`, `main.py` |
 
 Seams you can replace without touching the pipeline:
@@ -119,6 +119,30 @@ dropped, nothing is published, and the run exits 1 with one exclusion per docume
 carried and the required list it did not match. A mode switch does not re-extract: language
 identification is not part of the extraction memo, so the next run re-runs the deciding pass and rewrites
 each record and exclusion against the new tag.
+## GPU workers
+
+A GPU engine can be pointed at a server you run, or at one rented for the length of a run:
+
+~~~~bash
+# a server that already exists
+.venv/bin/finepdfs run --engine paddleocr-vl --gpu-provider static \
+  --base-url http://gpu-box:8000/v1 --model PaddleOCR-VL-1.6
+
+# a worker a command rents, and gives back when the run ends
+.venv/bin/finepdfs run --engine paddleocr-vl --gpu-provider command \
+  --gpu-start-command "modal run serve_paddleocr.py" \
+  --gpu-stop-command "modal app stop finepdfs-ocr"
+~~~~
+
+The start command prints one JSON object (`{"base_url": ..., "model": ..., "api_key": ..., "identity": ...}`)
+or a bare URL line. Modal and RunPod are a command line today and an adapter behind the same seam later:
+no engine knows about either, and neither SDK is a dependency.
+
+Why the identity is separate from the address: the memo key is `(content digest, engine name, engine
+identity)` (ADR-0005), and a rented worker answers on a new hostname every run. The address is where the
+bytes go; the identity is what is remembered. So a lease reports a stable identity, and
+`--engine-identity` pins one by hand. Without that, a moving address would re-read the whole corpus on
+every run -- the one thing this pipeline is built not to do. See ADR-0007.
 
 ## Configuration
 
@@ -142,6 +166,7 @@ nothing was published, so an operator or a CI can tell "engine is down" from "no
 | `FINEPDFS_ENGINE_WORK_DIR` | a fresh temporary directory | where a command-line engine may keep scratch files |
 | `FINEPDFS_ENGINE_DPI` | `200` | page render resolution for vision models |
 | `FINEPDFS_ENGINE_TIMEOUT` | `300` | seconds per model request, and per command-line engine run |
+| `FINEPDFS_ENGINE_IDENTITY` | -- | the engine's stable memo name, for a worker whose address changes every run (ADR-0007) |
 | `FINEPDFS_MIN_CHARACTERS_PER_PAGE` | `200` | routing floor |
 | `FINEPDFS_MIN_TEXT_COVERAGE` | `0.5` | routing floor |
 | `FINEPDFS_MAX_GARBLED_RATIO` | `0.05` | routing ceiling |
@@ -151,6 +176,12 @@ nothing was published, so an operator or a CI can tell "engine is down" from "no
 | `FINEPDFS_MIN_CHARACTERS` | `200` | publish minimum |
 | `FINEPDFS_LANGUAGES` | all | comma-separated allow-list in the codes the chosen adapter emits: `eng,spa` under `fasttext`, `Latn,Grek` under `script` |
 | `FINEPDFS_SIMILARITY_THRESHOLD` | `0.8` | fingerprint similarity above which one document is a near-duplicate of another |
+| `FINEPDFS_GPU_PROVIDER` | `none` | where a GPU engine runs: `none`, `static`, or `command` that rents one |
+| `FINEPDFS_GPU_BASE_URL` / `_MODEL` / `_API_KEY` | -- | with `static`: where the GPU server is |
+| `FINEPDFS_GPU_IDENTITY` | the address | with `static`: the memo name, when the address is not what you want remembered |
+| `FINEPDFS_GPU_START_COMMAND` | -- | with `command`: starts a worker and prints its endpoint on stdout |
+| `FINEPDFS_GPU_STOP_COMMAND` | -- | with `command`: gives the worker back when the run ends |
+| `FINEPDFS_GPU_TIMEOUT` | `1800` | seconds allowed to start or stop a worker |
 
 ## Output layout
 
