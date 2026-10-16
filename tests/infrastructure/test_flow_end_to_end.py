@@ -173,6 +173,8 @@ def test_a_failed_run_gives_the_worker_back_and_clears_the_endpoint(monkeypatch,
     assert "FINEPDFS_ENGINE_API_KEY" not in os.environ
     assert "FINEPDFS_ENGINE_IDENTITY" not in os.environ
     assert os.environ["FINEPDFS_ENGINE_MODEL"] == "operator-pinned", "the lease's export must be undone"
+    with pytest.raises(RuntimeError):
+        flow.active_runtime()
 
 
 def test_a_run_publishes_real_text_records_and_exclusions(monkeypatch, tmp_path, corpus) -> None:
