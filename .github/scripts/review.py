@@ -38,6 +38,8 @@ DEFAULT_MODELS = ("deepseek-v4.1-flash", "glm-5.3-flash")
 AXIS_HEADING = re.compile(r"^## If the axis is (?P<name>.+?)\s*$", re.MULTILINE)
 # git starts every file in a unified diff with this header; its b-side is the file's name after the change.
 DIFF_FILE_HEADER = re.compile(r"^diff --git .* (?P<path>b/.+?)\s*$", re.MULTILINE)
+# One placeholder in the prompt; fill substitutes these in a single pass over the template.
+PLACEHOLDER = re.compile(r"\{\{(?P<key>[A-Z0-9_]+)\}\}")
 SYSTEM_PROMPT = (
     "You are a precise code reviewer. You follow the repository's own documented standards, "
     "and you answer with one markdown comment."
@@ -174,11 +176,17 @@ def truncation_note(slice_: DiffSlice) -> str:
 
 
 def fill(template: str, values: dict[str, str]) -> str:
-    """Substitute ``{{KEY}}`` placeholders literally; a diff must never be interpreted as a format string."""
-    text = template
-    for key, value in values.items():
-        text = text.replace("{{" + key + "}}", value)
-    return text
+    """Substitute ``{{KEY}}`` placeholders in one pass over the template, and only there.
+
+    Replacing key by key re-reads the text already dropped in: a pull-request body that quotes
+    ``{{DIFF}}`` would be replaced by the diff. One pass over the template cannot see what it has
+    inserted, and a placeholder with no value is left as written rather than blanked.
+    """
+
+    def substitute(match: re.Match[str]) -> str:
+        return values.get(match.group("key"), match.group(0))
+
+    return PLACEHOLDER.sub(substitute, template)
 
 
 def build_prompt(template: str, diff: str, context: dict[str, str], note: str = "") -> str:

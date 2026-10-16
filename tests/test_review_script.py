@@ -163,6 +163,40 @@ def test_a_truncated_diff_names_its_unseen_files_in_the_comment_and_in_the_promp
         assert "`file13.py`" in prompt
 
 
+def test_a_body_that_looks_like_a_placeholder_is_not_substituted_a_second_time() -> None:
+    """Substituting key by key re-reads what was already inserted: one pass, over the template only."""
+    filled = review.fill(
+        "{{PR_BODY}}|{{AXIS}}",
+        {"PR_BODY": "the body quotes {{AXIS}}", "AXIS": "Spec"},
+    )
+
+    assert filled == "the body quotes {{AXIS}}|Spec"
+
+
+def test_the_prompt_carries_a_placeholder_shaped_body_as_text(tmp_path, capsys) -> None:
+    """A body mentioning {{DIFF}} is data, not a slot: the diff must not be spliced into it."""
+    diff = tmp_path / "pr.diff"
+    diff.write_text("diff --git a/x b/x\n+one\n", encoding="utf-8")
+
+    code = review.main(
+        [
+            "--diff",
+            str(diff),
+            "--prompt",
+            str(PROMPT_PATH),
+            "--pr-number",
+            "4",
+            "--body",
+            "the intent is {{DIFF}}",
+            "--print-prompt",
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "the intent is {{DIFF}}" in out
+
+
 def test_a_plain_text_200_names_the_status_and_the_body_instead_of_raising(monkeypatch, tmp_path) -> None:
     """The tombstone endpoint answers 200 text/plain 'OK'; that is what the comment must say."""
     code, posted = _run(
