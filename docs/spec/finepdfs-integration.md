@@ -209,8 +209,7 @@ to put behind it (YAGNI). Recorded in ADR-0004.
 *script* (Latn, Grek, Cyrl) with a confidence equal to the winning script's share of letters, and reports
 `unknown` rather than guessing below forty letters. It cannot tell English from German, and the README
 says so. A fastText/GlotLID adapter replaces it behind the same port; the fastText one ships (see the
-amendment below) and GlotLID does not, because shipping a model download that this environment cannot
-run would be a claim, not a feature.
+amendment below), and GlotLID does not.
 
 *Amended during implementation (ticket 08).* Both the script adapter and the fastText adapter are now
 shipped. `ScriptLanguageIdentifier` stays the default and the model-free fallback;
