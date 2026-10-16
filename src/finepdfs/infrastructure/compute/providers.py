@@ -52,7 +52,11 @@ class NoGpuProvider:
 
 
 class StaticGpuProvider:
-    """A GPU already running at a known address. Its address is stable, so it may name the identity."""
+    """A GPU already running at a known address.
+
+    The address is where the bytes go, not who the worker is: even a fixed server's address belongs
+    in ``base_url`` alone, so a memoised corpus survives the server being moved (ADR-0007).
+    """
 
     def __init__(self, endpoint: GpuEndpoint) -> None:
         self._endpoint = endpoint
@@ -172,11 +176,16 @@ def gpu_provider_from_environment(
 
 
 def _static_endpoint(values: Mapping[str, str]) -> GpuEndpoint:
-    """A fixed endpoint. Its address does not move, so the address itself may be the identity."""
+    """A fixed endpoint named by its model, never by its address.
+
+    ``FINEPDFS_ENGINE_IDENTITY`` and ``FINEPDFS_GPU_IDENTITY`` win when set; otherwise the model names
+    the deployment, which is what keeps the memo key still when the address moves (ADR-0007). An
+    operator who wants a different name has the identity variables for it.
+    """
     base_url = values.get(GPU_BASE_URL, "").strip() or values.get("FINEPDFS_ENGINE_BASE_URL", "").strip()
     model = values.get(GPU_MODEL, "").strip() or values.get("FINEPDFS_ENGINE_MODEL", "").strip()
     api_key = values.get(GPU_API_KEY, "").strip() or values.get("FINEPDFS_ENGINE_API_KEY", "").strip()
     identity = values.get(GPU_IDENTITY, "").strip() or values.get("FINEPDFS_ENGINE_IDENTITY", "").strip()
-    if not identity and base_url:
-        identity = f"static:{model}@{base_url}" if model else f"static:{base_url}"
+    if not identity:
+        identity = f"static:{model}" if model else STATIC
     return GpuEndpoint(base_url=base_url, model=model, api_key=api_key, identity=identity)

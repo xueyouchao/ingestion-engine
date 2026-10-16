@@ -71,8 +71,8 @@ def test_without_a_provider_nothing_is_rented() -> None:
         assert not endpoint
 
 
-def test_a_static_provider_names_its_address_stable() -> None:
-    """A fixed server does not move, so its address may be the identity -- as it always was."""
+def test_a_static_provider_names_the_model_not_the_address() -> None:
+    """ADR-0007: address and identity are separate fields, so the model alone names the deployment."""
     provider = gpu_provider_from_environment(
         {"FINEPDFS_GPU_PROVIDER": "static", "FINEPDFS_GPU_BASE_URL": "http://host:8000/v1", "FINEPDFS_GPU_MODEL": "m"}
     )
@@ -80,7 +80,33 @@ def test_a_static_provider_names_its_address_stable() -> None:
     assert isinstance(provider, StaticGpuProvider)
     with provider.lease() as endpoint:
         assert endpoint.base_url == "http://host:8000/v1"
-        assert endpoint.identity == "static:m@http://host:8000/v1"
+        assert endpoint.identity == "static:m"
+
+
+def test_a_static_provider_without_a_model_is_still_named_static() -> None:
+    provider = gpu_provider_from_environment(
+        {"FINEPDFS_GPU_PROVIDER": "static", "FINEPDFS_GPU_BASE_URL": "http://host:8000/v1"}
+    )
+
+    with provider.lease() as endpoint:
+        assert endpoint.identity == "static"
+
+
+def test_moving_a_static_address_does_not_move_the_memo_key() -> None:
+    """The provider's identity rule, checked where it becomes the memo key (ADR-0005, ADR-0007)."""
+
+    def memo_key(base_url: str) -> str:
+        environ = {
+            "FINEPDFS_GPU_PROVIDER": "static",
+            "FINEPDFS_GPU_BASE_URL": base_url,
+            "FINEPDFS_GPU_MODEL": "PaddleOCR-VL-1.6",
+            "FINEPDFS_ENGINE": "paddleocr-vl",
+        }
+        with gpu_provider_from_environment(environ).lease() as endpoint:
+            export_endpoint(endpoint, environ)
+        return str(runtime_from_environment(environ).engines["paddleocr-vl"].identity)
+
+    assert memo_key("http://a.example:8000/v1") == memo_key("http://b.example:8000/v1")
 
 
 def test_a_command_provider_parses_the_endpoint_and_gives_it_back() -> None:
