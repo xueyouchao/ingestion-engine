@@ -6,9 +6,12 @@ changing a cheap rule must re-run only the cheap half.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import os
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -122,6 +125,54 @@ def _record(out_dir: Path, url: str) -> dict:
 
 def _exclusion(out_dir: Path, url: str) -> dict:
     return json.loads((out_dir / "excluded" / f"{document_key(url)}.json").read_text())
+
+
+def test_a_failed_run_gives_the_worker_back_and_clears_the_endpoint(monkeypatch, tmp_path) -> None:
+    """ADR-0007: the lease wraps the run, so its effects must not outlive it either.
+
+    This drives the flow's own lifespan, not the provider: a run that fails after the lease was taken
+    must still hand the worker back, and must not leave the process naming a worker it has returned.
+    """
+    started = tmp_path / "worker.started"
+    stopped = tmp_path / "worker.stopped"
+    start_script = tmp_path / "start_worker.py"
+    start_script.write_text(
+        "import json\n"
+        f"open({str(started)!r}, 'w').write('up')\n"
+        "print(json.dumps({'base_url': 'http://127.0.0.1:9/v1', 'model': 'm', 'identity': 'flow:test'}))\n"
+    )
+    stop_script = tmp_path / "stop_worker.py"
+    stop_script.write_text(f"open({str(stopped)!r}, 'w').write('down')\n")
+
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    (corpus_dir / "manifest.json").write_text("{ this manifest is not JSON")
+
+    monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
+    monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", f"{sys.executable} {start_script}")
+    monkeypatch.setenv("FINEPDFS_GPU_STOP_COMMAND", f"{sys.executable} {stop_script}")
+    monkeypatch.setenv("FINEPDFS_DB", str(tmp_path / "flow.db"))
+    monkeypatch.setenv("FINEPDFS_CORPUS", str(corpus_dir))
+    monkeypatch.setenv("FINEPDFS_ENGINE", "paddleocr-vl")
+    monkeypatch.setenv("FINEPDFS_ENGINE_MODEL", "operator-pinned")
+    monkeypatch.delenv("FINEPDFS_ENGINE_BASE_URL", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_API_KEY", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_IDENTITY", raising=False)
+    flow.configure_runtime(None)
+
+    async def failing_run() -> None:
+        async with coco.runtime():
+            await flow.build_app().update()
+
+    with pytest.raises(ValueError):
+        asyncio.run(failing_run())
+
+    assert started.exists(), "the flow's lifespan must have leased a worker"
+    assert stopped.exists(), "a leaked GPU bills by the hour"
+    assert "FINEPDFS_ENGINE_BASE_URL" not in os.environ, "the returned worker must not stay the engine"
+    assert "FINEPDFS_ENGINE_API_KEY" not in os.environ
+    assert "FINEPDFS_ENGINE_IDENTITY" not in os.environ
+    assert os.environ["FINEPDFS_ENGINE_MODEL"] == "operator-pinned", "the lease's export must be undone"
 
 
 def test_a_run_publishes_real_text_records_and_exclusions(monkeypatch, tmp_path, corpus) -> None:
