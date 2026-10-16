@@ -14,7 +14,11 @@ from finepdfs.domain.document import Document
 from finepdfs.infrastructure.cocoindex.runtime import Runtime, runtime_from_environment
 from finepdfs.infrastructure.commoncrawl.source import CommonCrawlSource
 from finepdfs.infrastructure.compute.endpoint import export_endpoint
-from finepdfs.infrastructure.compute.providers import KNOWN_PROVIDERS, UnknownGpuProvider, gpu_provider_from_environment
+from finepdfs.infrastructure.compute.providers import (
+    PROVIDERS,
+    UnknownGpuProvider,
+    gpu_provider_from_environment,
+)
 from finepdfs.infrastructure.corpus.fetch import fetch_corpus
 from finepdfs.infrastructure.corpus.index import CorpusIndex
 from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifest
@@ -114,8 +118,8 @@ def _add_engine_arguments(parser: argparse.ArgumentParser, *, out: bool) -> None
         "--gpu-provider",
         dest="gpu_provider",
         default=argparse.SUPPRESS,
-        choices=list(KNOWN_PROVIDERS),
-        help="where a GPU engine runs: none, a static server, or a command that rents one",
+        choices=list(PROVIDERS),
+        help="where a GPU engine runs: " + ", ".join(PROVIDERS),
     )
     parser.add_argument(
         "--gpu-start-command",

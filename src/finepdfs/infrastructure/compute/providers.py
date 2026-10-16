@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 import shlex
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -43,7 +43,6 @@ GPU_TIMEOUT = "FINEPDFS_GPU_TIMEOUT"
 NONE = "none"
 STATIC = "static"
 COMMAND = "command"
-KNOWN_PROVIDERS = (NONE, STATIC, COMMAND)
 
 
 class UnknownGpuProvider(ValueError):
@@ -158,6 +157,39 @@ def _url_line(stdout: str) -> str:
     return ""
 
 
+ProviderFactory = Callable[[Mapping[str, str], CommandRunner | None], GpuProvider]
+
+
+def _none_provider(_values: Mapping[str, str], _runner: CommandRunner | None) -> GpuProvider:
+    """No rented GPU: the engine is reached the way it always was, from FINEPDFS_ENGINE_*."""
+    return NoGpuProvider()
+
+
+def _static_provider(values: Mapping[str, str], _runner: CommandRunner | None) -> GpuProvider:
+    return StaticGpuProvider(_static_endpoint(values))
+
+
+def _command_provider(values: Mapping[str, str], runner: CommandRunner | None) -> GpuProvider:
+    start_command = values.get(GPU_START_COMMAND, "").strip()
+    if not start_command:
+        raise UnknownGpuProvider(f"{GPU_PROVIDER}={COMMAND} needs {GPU_START_COMMAND}")
+    timeout = float(values.get(GPU_TIMEOUT, "1800"))
+    return CommandGpuProvider(
+        start_command=start_command,
+        stop_command=values.get(GPU_STOP_COMMAND, "").strip(),
+        runner=runner or SubprocessRunner(timeout),
+    )
+
+
+# The one registration point: a new adapter adds its name here, and the factory and the CLI both read
+# this mapping rather than repeating the list. No entry points, no plugin framework: one dict.
+PROVIDERS: dict[str, ProviderFactory] = {
+    NONE: _none_provider,
+    STATIC: _static_provider,
+    COMMAND: _command_provider,
+}
+
+
 def gpu_provider_from_environment(
     environ: Mapping[str, str] | None = None,
     runner: CommandRunner | None = None,
@@ -165,21 +197,12 @@ def gpu_provider_from_environment(
     """The provider a run asked for. Unset means none, which is the offline default."""
     values = environ if environ is not None else os.environ
     name = values.get(GPU_PROVIDER, "").strip().lower() or NONE
-    if name == NONE:
-        return NoGpuProvider()
-    if name == STATIC:
-        return StaticGpuProvider(_static_endpoint(values))
-    if name == COMMAND:
-        start_command = values.get(GPU_START_COMMAND, "").strip()
-        if not start_command:
-            raise UnknownGpuProvider(f"{GPU_PROVIDER}=command needs {GPU_START_COMMAND}")
-        timeout = float(values.get(GPU_TIMEOUT, "1800"))
-        return CommandGpuProvider(
-            start_command=start_command,
-            stop_command=values.get(GPU_STOP_COMMAND, "").strip(),
-            runner=runner or SubprocessRunner(timeout),
+    factory = PROVIDERS.get(name)
+    if factory is None:
+        raise UnknownGpuProvider(
+            f"unknown GPU provider {name!r}; known providers are {', '.join(PROVIDERS)}"
         )
-    raise UnknownGpuProvider(f"unknown GPU provider {name!r}; known providers are {', '.join(KNOWN_PROVIDERS)}")
+    return factory(values, runner)
 
 
 def _static_endpoint(values: Mapping[str, str]) -> GpuEndpoint:

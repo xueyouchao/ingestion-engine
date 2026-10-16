@@ -8,12 +8,14 @@ the whole corpus again -- which is the cost the memo exists to remove.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument
 from finepdfs.infrastructure.cocoindex.runtime import runtime_from_environment
+from finepdfs.infrastructure.compute import providers
 from finepdfs.infrastructure.compute.endpoint import GpuEndpoint, export_endpoint
 from finepdfs.infrastructure.compute.providers import (
     CommandGpuProvider,
@@ -27,7 +29,7 @@ from finepdfs.infrastructure.compute.providers import (
 from finepdfs.infrastructure.engines.registry import EngineConfig, build_engine
 from finepdfs.infrastructure.engines.stable_identity import StableIdentity
 from finepdfs.infrastructure.engines.subprocess_support import CommandFailed, CommandResult
-from finepdfs.interfaces.cli import main
+from finepdfs.interfaces.cli import build_parser, main
 
 START = "start-worker"
 STOP = "stop-worker"
@@ -168,6 +170,28 @@ def test_a_start_command_that_prints_nothing_is_an_error() -> None:
 def test_a_command_provider_without_a_start_command_is_rejected() -> None:
     with pytest.raises(UnknownGpuProvider):
         gpu_provider_from_environment({"FINEPDFS_GPU_PROVIDER": "command"})
+
+
+def test_a_new_provider_is_registered_in_one_place(monkeypatch) -> None:
+    """A Modal or RunPod adapter should be one entry the factory and the CLI both read."""
+    class ModalProvider:
+        @contextmanager
+        def lease(self):
+            yield GpuEndpoint(base_url="https://modal.example/v1", identity="modal:ocr")
+
+    monkeypatch.setitem(providers.PROVIDERS, "modal", lambda values, runner: ModalProvider())
+
+    provider = gpu_provider_from_environment({"FINEPDFS_GPU_PROVIDER": "modal"})
+
+    assert isinstance(provider, ModalProvider)
+    assert build_parser().parse_args(["dry-run", "--gpu-provider", "modal"]).gpu_provider == "modal"
+
+
+@pytest.mark.parametrize("name", sorted(providers.PROVIDERS))
+def test_every_registered_provider_is_also_a_cli_choice(name: str) -> None:
+    args = build_parser().parse_args(["dry-run", "--gpu-provider", name])
+
+    assert args.gpu_provider == name
 
 
 def test_an_unknown_provider_is_rejected() -> None:
