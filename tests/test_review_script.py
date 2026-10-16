@@ -836,12 +836,14 @@ def test_a_findings_free_run_posts_nothing_when_the_comment_cannot_be_read(monke
 
 
 def test_fresh_findings_are_handed_to_post_when_the_old_comment_cannot_be_read(monkeypatch, tmp_path) -> None:
-    """Fresh findings are worth more than the stale ones a failed read could not show, so they are posted.
+    """Fresh findings are worth more than the stale ones a failed read could not show, so ``main`` hands
+    them to ``post`` instead of withholding them.
 
-    This pins the rule at the seam this file owns -- what ``main`` hands to ``post``. The second read
-    inside ``upsert_comment``, which decides patch-or-create from it, is pinned by
+    This pins the seam this file owns: what ``main`` decides. The second read inside ``upsert_comment``
+    decides patch-or-create from it and is pinned by
     ``test_a_later_run_updates_the_existing_comment_instead_of_adding_another`` and
-    ``test_the_first_run_creates_the_comment``.
+    ``test_the_first_run_creates_the_comment``; when that read fails too, nothing can be posted -- gh is
+    not answering -- and ``post`` prints it with the run still exiting 0.
     """
     code, posted = _run(
         monkeypatch,
@@ -1033,3 +1035,27 @@ def test_an_endpoint_that_never_answered_is_named_unreachable(monkeypatch, tmp_p
     assert "endpoint unreachable" in posted[0]
     assert "Connection refused" in posted[0]
     assert "read timed out" not in posted[0]
+
+
+def test_an_empty_answer_is_its_own_class_and_keeps_the_findings(monkeypatch, tmp_path) -> None:
+    """A model that answered with nothing is neither a success nor a failure, and must not erase anything."""
+
+    def open_(request, timeout=None):
+        answer = {"choices": [{"message": {"content": "   "}}]}
+        return _Response(json.dumps(answer).encode("utf-8"), content_type="application/json")
+
+    _, first = _run(
+        monkeypatch, tmp_path, env={"OLLAMA_API_KEY": "test-key"}, opener=_findings_opener("findings kept")
+    )
+    code, posted = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key"},
+        opener=open_,
+        previous_body=first[0],
+    )
+
+    assert code == 0
+    assert "empty review" in posted[0]
+    assert "findings kept" in posted[0]
+    assert "they are kept rather than erased" in posted[0]

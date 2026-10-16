@@ -168,9 +168,11 @@ class AxisOutcome:
     """One axis's call: how it ended, how long it took, and what it found.
 
     ``status`` is one of the ``OUTCOME_*`` classes. ``detail`` carries the endpoint's own words when it
-    sent any, and otherwise this module's own sentence saying why the class was reached -- an
-    abandonment says so rather than pretending the attempt answered. ``attempts`` is above one only when
-    a dropped connection was retried. The comment renders :attr:`label` for every axis of every run, so
+    sent any and may be empty; where this module has something to add -- the class an abandonment
+    interrupted, the status an HTTP call answered -- that sentence is the detail, so a reader is never
+    told an attempt answered when it did not. ``seconds`` is the call's wall clock, or the stage
+    deadline itself when the axis was abandoned at it. ``attempts`` is above one only when a dropped
+    connection was retried. The comment renders :attr:`label` for every axis of every run, so
     a failure is never silent: the reader can tell a slow model from a dropped socket from a refused
     request.
     """
