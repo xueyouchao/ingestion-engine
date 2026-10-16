@@ -132,6 +132,30 @@ def test_a_diff_under_the_cap_gets_no_note() -> None:
     assert review.truncation_note(sliced) == ""
 
 
+def test_a_cut_with_no_file_boundary_says_so_and_names_no_file_as_shown_in_part() -> None:
+    """A headerless diff has nothing to cut on: the note must say that, not invent a boundary."""
+    sliced = review.slice_diff("x" * 500, limit=200)
+
+    assert sliced.text == "x" * 200
+    assert sliced.files_total == 0
+    assert sliced.omitted == ()
+    assert sliced.partial is None
+    assert "No `diff --git` file boundary was found at or before the cut" in review.truncation_note(sliced)
+
+
+def test_headers_that_all_start_past_the_cut_are_named_yet_never_shown_whole() -> None:
+    """A preamble longer than the cap leaves no boundary to cut on; the files past it are still named."""
+    diff = "preamble\n" * 30 + _diff_chunk("later.py", 100)
+
+    sliced = review.slice_diff(diff, limit=50)
+
+    assert sliced.text == diff[:50]
+    assert sliced.partial is None
+    assert sliced.files_total == 1
+    assert sliced.omitted == ("later.py",)
+    assert "1 of 1 files were not shown to any model" in review.truncation_note(sliced)
+
+
 def test_a_truncated_diff_names_its_unseen_files_in_the_comment_and_in_the_prompt(monkeypatch, tmp_path) -> None:
     """A reader, and the model, must both be able to tell what the 120k-character cut left out."""
     prompts_seen: list[str] = []
@@ -161,6 +185,34 @@ def test_a_truncated_diff_names_its_unseen_files_in_the_comment_and_in_the_promp
     for prompt in prompts_seen:
         assert "7 of 20 files were not shown" in prompt
         assert "`file13.py`" in prompt
+
+
+def test_an_oversized_diff_without_file_headers_still_posts_a_comment(monkeypatch, tmp_path) -> None:
+    """A headerless oversized diff used to raise inside slice_diff, so the run died with no comment."""
+    monkeypatch.setattr(review, "MAX_DIFF_CHARS", 400)
+    diff = "".join(f"line {index}\n" for index in range(200))  # ~2000 characters, no `diff --git` anywhere
+    prompts_seen: list[str] = []
+
+    def open_(request, timeout=None):
+        prompts_seen.append(json.loads(request.data)["messages"][1]["content"])
+        answer = {"choices": [{"message": {"content": "findings"}}]}
+        return _Response(json.dumps(answer).encode("utf-8"), content_type="application/json")
+
+    code, posted = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key"},
+        opener=open_,
+        diff_text=diff,
+    )
+
+    note = "No `diff --git` file boundary was found at or before the cut"
+    assert code == 0
+    assert len(posted) == 1
+    assert note in posted[0]
+    assert len(prompts_seen) == 2
+    for prompt in prompts_seen:
+        assert note in prompt
 
 
 def test_the_workflow_does_not_spell_an_axis_name() -> None:

@@ -77,7 +77,9 @@ class DiffSlice:
 
     Both axes see the same slice, so the files below the cut were not shown to any model. The
     numbers travel with the text because both the comment and the prompt have to say what was left
-    out: a partial review that does not name its omissions reads like a whole one.
+    out: a partial review that does not name its omissions reads like a whole one. ``boundary``
+    records whether the cut landed on a file header, so the note may promise no file is half-read
+    only when one did.
     """
 
     text: str
@@ -86,6 +88,7 @@ class DiffSlice:
     files_total: int = 0
     omitted: tuple[str, ...] = ()
     partial: str | None = None
+    boundary: bool = False
 
     @property
     def truncated(self) -> bool:
@@ -128,16 +131,28 @@ def slice_diff(diff: str, limit: int = MAX_DIFF_CHARS) -> DiffSlice:
             limit=limit,
             files_total=len(starts),
             omitted=tuple(path for _, path in starts[index:]),
+            boundary=True,
         )
-    # Not even the first file fits whole: show its head and admit the rest was never in view.
-    index = max(index for index, (start, _) in enumerate(starts) if start <= limit)
+    first_files = [index for index, (start, _) in enumerate(starts) if start <= limit]
+    if first_files:
+        # Not even the first file fits whole: show its head and admit the rest was never in view.
+        index = first_files[-1]
+        return DiffSlice(
+            diff[:limit],
+            characters=characters,
+            limit=limit,
+            files_total=len(starts),
+            omitted=tuple(path for _, path in starts[index + 1 :]),
+            partial=starts[index][1],
+        )
+    # No header at or before the cut, so there is no boundary to stop on and every file lies below
+    # it. The old max() over that empty choice raised before anything could be posted at all.
     return DiffSlice(
         diff[:limit],
         characters=characters,
         limit=limit,
         files_total=len(starts),
-        omitted=tuple(path for _, path in starts[index + 1 :]),
-        partial=starts[index][1],
+        omitted=tuple(path for _, path in starts),
     )
 
 
@@ -155,7 +170,7 @@ def truncation_note(slice_: DiffSlice) -> str:
             f"The first file alone is larger than that, so `{slice_.partial}` is shown only in part "
             "and its tail was not read."
         )
-    elif slice_.files_total:
+    elif slice_.boundary:
         head = (
             f"The diff is {slice_.characters} characters and the review reads at most {slice_.limit}, "
             "stopping at a file boundary so no file is shown half-read."
@@ -163,7 +178,8 @@ def truncation_note(slice_: DiffSlice) -> str:
     else:
         head = (
             f"The diff is {slice_.characters} characters and the review reads at most {slice_.limit}. "
-            "It carries no `diff --git` headers to cut on, so the files below the cut cannot be named."
+            "No `diff --git` file boundary was found at or before the cut, so nothing below it is "
+            "shown whole."
         )
     if not slice_.omitted:
         return head
