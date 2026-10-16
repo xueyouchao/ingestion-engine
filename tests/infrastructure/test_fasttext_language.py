@@ -99,6 +99,21 @@ def test_the_identifier_records_the_labellers_iso_639_3_code_untouched() -> None
     assert tag.page_number == 1
 
 
+def test_two_languages_the_script_adapter_merges_are_separated_by_the_language_adapter() -> None:
+    # Ticket 08's point, provable in the default suite: on this fixture text the script adapter reports
+    # Latn for English and German alike -- exactly the gap a language-tagged corpus cannot live with --
+    # while the language adapter, given a labeller that names them apart, keeps them apart.
+    script = ScriptLanguageIdentifier()
+    identifier = FastTextLanguageIdentifier(
+        KeywordLabeller({"resolution": ("eng", 0.95), "Entschließung": ("deu", 0.95)})
+    )
+
+    assert script.identify(ENGLISH, page_number=1).language == "Latn"
+    assert script.identify(GERMAN, page_number=2).language == "Latn"
+    assert identifier.identify(ENGLISH, page_number=1).language == "eng"
+    assert identifier.identify(GERMAN, page_number=2).language == "deu"
+
+
 def test_a_page_with_too_little_text_is_unknown_not_a_guess() -> None:
     labeller = FixedLabeller("eng", 0.99)
 
