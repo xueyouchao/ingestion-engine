@@ -51,11 +51,13 @@ class UnknownGpuProvider(ValueError):
 
 
 class MisconfiguredGpuProvider(ValueError):
-    """Raised when a known GPU provider is missing what it needs to run.
+    """Raised when a known GPU provider is missing what it needs to run, or what it was given is unusable.
 
     A class of its own, not ``UnknownGpuProvider``: "there is no provider by that name" and "the
     provider you named cannot run" are different failures with different fixes, and the CLI decides by
-    type. The unknown error stays for an actually unknown name.
+    type. The unknown error stays for an actually unknown name. A command with unbalanced quotes is the
+    same kind of fault as a missing one: the provider cannot do its job until the operator fixes what
+    they typed.
     """
 
 
@@ -91,6 +93,20 @@ class StaticGpuProvider:
         yield self._endpoint
 
 
+def _argv(command: str) -> list[str]:
+    """Split one of the provider's commands, naming an unparseable one as a provider fault.
+
+    ``shlex.split`` raises ``ValueError`` on unbalanced quotes. That is neither a provider error the CLI
+    reports nor an engine failure, so left alone it prints a traceback where ADR-0007 promises the exit-2
+    message for a provider that cannot start the run. The command the operator typed comes with it, so
+    the message points at the typo rather than at shlex.
+    """
+    try:
+        return shlex.split(command)
+    except ValueError as error:
+        raise MisconfiguredGpuProvider(f"the GPU command is malformed: {command!r} ({error})") from error
+
+
 @dataclass(frozen=True, slots=True)
 class CommandGpuProvider:
     """Rents a GPU by running a start command, and returns it with a stop command.
@@ -116,7 +132,7 @@ class CommandGpuProvider:
         # The start command is the provider's own, so its failure is "this run cannot start", not an
         # engine failure: wrap it in the error the CLI reports, and keep CommandFailed for engines.
         try:
-            started = self.runner.run(shlex.split(self.start_command))
+            started = self.runner.run(_argv(self.start_command))
             require_success(started)
             endpoint = endpoint_from_start_output(started.stdout, self.start_command, self.model)
         except CommandFailed as error:
@@ -126,7 +142,7 @@ class CommandGpuProvider:
         finally:
             # The worker is given back even when the run failed: a leaked GPU bills by the hour.
             if self.stop_command:
-                self.runner.run(shlex.split(self.stop_command))
+                self.runner.run(_argv(self.stop_command))
 
 
 def endpoint_from_start_output(stdout: str, command: str, model: str = "") -> GpuEndpoint:

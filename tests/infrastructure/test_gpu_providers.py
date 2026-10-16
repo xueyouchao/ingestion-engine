@@ -334,3 +334,30 @@ def test_a_start_command_that_cannot_run_fails_the_cli_cleanly(monkeypatch, caps
 
     assert code == 2
     assert "GPU start command" in capsys.readouterr().err
+
+
+def test_a_malformed_start_command_fails_the_cli_cleanly(monkeypatch, capsys) -> None:
+    """shlex.split raises ValueError on unbalanced quotes, which no CLI except clause names.
+
+    A command an operator typed wrong is a provider that cannot run, so it must reach the same exit-2
+    message as a start command that exits nonzero -- not a ValueError traceback (ADR-0007).
+    """
+    monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
+    monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", "start-worker 'unclosed")
+
+    code = main(["dry-run", "--engine", "paddleocr-vl"])
+
+    assert code == 2
+    assert "malformed" in capsys.readouterr().err
+
+
+def test_a_malformed_stop_command_fails_the_cli_cleanly(monkeypatch, tmp_path, capsys) -> None:
+    """The stop command is split on the way out too, so it fails the same clean way, not in a finally."""
+    monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
+    monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", "/bin/echo https://rented.example/v1")
+    monkeypatch.setenv("FINEPDFS_GPU_STOP_COMMAND", "stop-worker 'unclosed")
+
+    code = main(["dry-run", "--corpus", str(tmp_path / "nothing"), "--engine", "paddleocr-vl"])
+
+    assert code == 2
+    assert "malformed" in capsys.readouterr().err
