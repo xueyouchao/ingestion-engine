@@ -156,12 +156,12 @@ class CommandGpuProvider:
         try:
             yield endpoint
         except BaseException as error:
-            # The worker is given back even when the run failed: a leaked GPU bills by the hour. A stop
-            # that fails here must not take the place of the error that ended the run, because that
-            # error is what the operator has to act on: report the leak beside it and re-raise it.
+            # The worker is given back even when the run failed: a leaked GPU bills by the hour. Any
+            # failure in that attempt must not take the place of the error that ended the run, because
+            # that error is what the operator has to act on: report the leak beside it and re-raise it.
             try:
                 self._release()
-            except (GpuStopFailed, MisconfiguredGpuProvider) as leak:
+            except Exception as leak:
                 logger.error(
                     "the GPU stop command failed after the run had already failed, so the worker may "
                     "still be billing: %s",
@@ -177,13 +177,14 @@ class CommandGpuProvider:
         """Run the stop command, and refuse to pass a failure over in silence.
 
         The command is the provider's own, so a failure here is the provider's fault and not an engine's,
-        and it means the worker is still up: the one thing ADR-0007 exists to prevent.
+        and it means the worker is still up: the one thing ADR-0007 exists to prevent. The runner's own
+        failure is wrapped with the exit code, because ``SubprocessRunner`` raises ``CommandFailed`` for
+        a binary it cannot find before there is any exit code to read.
         """
         if not self.stop_command:
             return
-        stopped = self.runner.run(_argv(self.stop_command))
         try:
-            require_success(stopped)
+            require_success(self.runner.run(_argv(self.stop_command)))
         except CommandFailed as error:
             raise GpuStopFailed(f"the GPU stop command failed: {error}") from error
 

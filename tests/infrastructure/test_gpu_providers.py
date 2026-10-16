@@ -54,20 +54,23 @@ class RecordingRunner:
     start that fails means no run, a stop that fails means a worker somebody is still paying for.
     """
 
-    def __init__(self, stdout: str = "", returncode: int = 0, stop_returncode: int = 0) -> None:
+    def __init__(
+        self, stdout: str = "", returncode: int = 0, stop_returncode: int = 0, stop_error: Exception | None = None
+    ) -> None:
         self.stdout = stdout
         self.returncode = returncode
         self.stop_returncode = stop_returncode
+        self.stop_error = stop_error
         self.calls: list[tuple[str, ...]] = []
 
     def run(self, argv: Sequence[str], cwd: Path | None = None) -> CommandResult:
         self.calls.append(tuple(argv))
         starting = argv[0] == START
-        return CommandResult(
-            argv=tuple(argv),
-            returncode=self.returncode if starting else self.stop_returncode,
-            stdout=self.stdout if starting else "",
-        )
+        if starting:
+            return CommandResult(argv=tuple(argv), returncode=self.returncode, stdout=self.stdout)
+        if self.stop_error is not None:
+            raise self.stop_error
+        return CommandResult(argv=tuple(argv), returncode=self.stop_returncode)
 
 
 class CountingEngine:
@@ -179,6 +182,20 @@ def test_a_failing_stop_does_not_mask_the_error_that_ended_the_run(caplog) -> No
 
     assert [call[0] for call in runner.calls] == [START, STOP]
     assert "billing" in caplog.text, "the leak is reported even though it must not replace the run's error"
+
+
+def test_a_stop_that_explodes_does_not_mask_the_error_that_ended_the_run(caplog) -> None:
+    """Any stop failure masks the run's error if it escapes, not only the types the provider wraps."""
+    runner = RecordingRunner(
+        stdout="https://rented.example/v1", stop_error=OSError("the control plane is unreachable")
+    )
+    provider = CommandGpuProvider(start_command=START, stop_command=STOP, runner=runner)
+
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError, match="the run blew up"), provider.lease():
+        raise RuntimeError("the run blew up")
+
+    assert "billing" in caplog.text
+    assert "control plane" in caplog.text, "the message says what the stop attempt actually did"
 
 
 def test_the_endpoint_is_the_first_json_object_not_a_later_log_line() -> None:
@@ -442,6 +459,22 @@ def test_a_stop_command_that_fails_fails_the_cli_cleanly(monkeypatch, tmp_path, 
     monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
     monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", "/bin/echo https://rented.example/v1")
     monkeypatch.setenv("FINEPDFS_GPU_STOP_COMMAND", "/bin/false")
+
+    code = main(["dry-run", "--corpus", str(tmp_path / "nothing"), "--engine", "paddleocr-vl"])
+
+    assert code == 2
+    assert "GPU stop command failed" in capsys.readouterr().err
+
+
+def test_a_stop_command_that_is_not_installed_fails_the_cli_cleanly(monkeypatch, tmp_path, capsys) -> None:
+    """A missing stop binary fails before require_success: SubprocessRunner raises CommandFailed itself.
+
+    That is the runner's failure, not an engine's, so the stop path has to name it the provider's way --
+    and on the failure path it must not escape in place of the error that ended the run.
+    """
+    monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
+    monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", "/bin/echo https://rented.example/v1")
+    monkeypatch.setenv("FINEPDFS_GPU_STOP_COMMAND", "/no/such/stop-worker")
 
     code = main(["dry-run", "--corpus", str(tmp_path / "nothing"), "--engine", "paddleocr-vl"])
 
