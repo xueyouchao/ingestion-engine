@@ -1,4 +1,4 @@
-"""Where a rented GPU worker is, and how a run leases one.
+"""Where a run reaches its engine, and how it leases that endpoint.
 
 A worker is rented for the length of a run: start it, learn where it is listening, use it, give it
 back. The endpoint is *not* the engine's identity. A provider that hands out a new host every run
@@ -22,7 +22,7 @@ ENGINE_IDENTITY = "FINEPDFS_ENGINE_IDENTITY"
 
 @dataclass(frozen=True, slots=True)
 class GpuEndpoint:
-    """A GPU worker a run may use: where to reach it, what it runs, and its stable name.
+    """One run's endpoint: where to reach the engine, what it runs, and its stable name.
 
     ``identity`` is what enters the memo key. ``base_url`` is where the bytes go right now; for a
     rented worker that address is new every run and must never be mistaken for identity.
@@ -35,7 +35,12 @@ class GpuEndpoint:
 
 
 class GpuProvider(Protocol):
-    """Rents the GPU a remote engine runs on. The lease lasts exactly as long as the run does."""
+    """Leases the endpoint an engine is reached at, for exactly as long as the run lasts.
+
+    The port promises the endpoint, not a GPU. An adapter may rent a GPU, name a server that already
+    exists, or lease nothing at all; each says in its own docstring what it does about the GPU
+    (ADR-0007).
+    """
 
     def lease(self) -> AbstractContextManager[GpuEndpoint]: ...
 
