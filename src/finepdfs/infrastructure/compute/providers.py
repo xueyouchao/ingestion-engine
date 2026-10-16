@@ -16,7 +16,14 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
-from finepdfs.infrastructure.compute.endpoint import GpuEndpoint, GpuProvider
+from finepdfs.infrastructure.compute.endpoint import (
+    ENGINE_API_KEY,
+    ENGINE_BASE_URL,
+    ENGINE_IDENTITY,
+    ENGINE_MODEL,
+    GpuEndpoint,
+    GpuProvider,
+)
 from finepdfs.infrastructure.engines.subprocess_support import (
     CommandFailed,
     CommandRunner,
@@ -182,10 +189,10 @@ def _static_endpoint(values: Mapping[str, str]) -> GpuEndpoint:
     the deployment, which is what keeps the memo key still when the address moves (ADR-0007). An
     operator who wants a different name has the identity variables for it.
     """
-    base_url = values.get(GPU_BASE_URL, "").strip() or values.get("FINEPDFS_ENGINE_BASE_URL", "").strip()
-    model = values.get(GPU_MODEL, "").strip() or values.get("FINEPDFS_ENGINE_MODEL", "").strip()
-    api_key = values.get(GPU_API_KEY, "").strip() or values.get("FINEPDFS_ENGINE_API_KEY", "").strip()
-    identity = values.get(GPU_IDENTITY, "").strip() or values.get("FINEPDFS_ENGINE_IDENTITY", "").strip()
+    base_url = values.get(GPU_BASE_URL, "").strip() or values.get(ENGINE_BASE_URL, "").strip()
+    model = values.get(GPU_MODEL, "").strip() or values.get(ENGINE_MODEL, "").strip()
+    api_key = values.get(GPU_API_KEY, "").strip() or values.get(ENGINE_API_KEY, "").strip()
+    identity = values.get(GPU_IDENTITY, "").strip() or values.get(ENGINE_IDENTITY, "").strip()
     if not identity:
         identity = f"static:{model}" if model else STATIC
     return GpuEndpoint(base_url=base_url, model=model, api_key=api_key, identity=identity)
