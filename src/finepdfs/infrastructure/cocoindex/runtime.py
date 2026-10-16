@@ -18,7 +18,7 @@ from finepdfs.domain.publishing import PublishPolicy
 from finepdfs.infrastructure.compute.endpoint import (
     ENGINE_API_KEY,
     ENGINE_BASE_URL,
-    ENGINE_IDENTITY,
+    ENGINE_DETAIL,
     ENGINE_MODEL,
 )
 from finepdfs.infrastructure.corpus.index import CorpusIndex
@@ -86,7 +86,7 @@ def runtime_from_environment(environ: Mapping[str, str] | None = None) -> Runtim
         page_dpi=int(values.get("FINEPDFS_ENGINE_DPI", "200")),
         work_dir=pathlib.Path(values["FINEPDFS_ENGINE_WORK_DIR"]) if values.get("FINEPDFS_ENGINE_WORK_DIR") else None,
         timeout_seconds=float(values.get("FINEPDFS_ENGINE_TIMEOUT", "300")),
-        detail=values.get(ENGINE_IDENTITY, ""),
+        detail=values.get(ENGINE_DETAIL, ""),
     )
     engines = build_engines([] if engine_name == "pymupdf" else [engine_config])
 

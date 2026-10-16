@@ -16,7 +16,7 @@ from finepdfs.infrastructure.commoncrawl.source import CommonCrawlSource
 from finepdfs.infrastructure.compute.endpoint import (
     ENGINE_API_KEY,
     ENGINE_BASE_URL,
-    ENGINE_IDENTITY,
+    ENGINE_DETAIL,
     ENGINE_MODEL,
 )
 from finepdfs.infrastructure.compute.providers import (
@@ -52,7 +52,7 @@ ENVIRONMENT_FOR_ENGINE = {
     "model": ENGINE_MODEL,
     "api_key": ENGINE_API_KEY,
     "engine_command": "FINEPDFS_ENGINE_COMMAND",
-    "engine_identity": ENGINE_IDENTITY,
+    "engine_detail": ENGINE_DETAIL,
     "dpi": "FINEPDFS_ENGINE_DPI",
     "similarity_threshold": "FINEPDFS_SIMILARITY_THRESHOLD",
     "gpu_provider": GPU_PROVIDER,
@@ -122,10 +122,10 @@ def _add_engine_arguments(parser: argparse.ArgumentParser, *, out: bool) -> None
         help="fingerprint similarity above which one document is a near-duplicate of another",
     )
     parser.add_argument(
-        "--engine-identity",
-        dest="engine_identity",
+        "--engine-detail",
+        dest="engine_detail",
         default=argparse.SUPPRESS,
-        help="a stable memo name for the engine, for a worker whose address changes every run",
+        help="the deployment detail in the engine's memo key, for a worker whose address changes every run",
     )
     parser.add_argument(
         "--gpu-provider",

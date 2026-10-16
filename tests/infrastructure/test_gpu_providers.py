@@ -19,7 +19,7 @@ from finepdfs.infrastructure.cocoindex.runtime import runtime_from_environment
 from finepdfs.infrastructure.compute import providers
 from finepdfs.infrastructure.compute.endpoint import (
     ENGINE_BASE_URL,
-    ENGINE_IDENTITY,
+    ENGINE_DETAIL,
     GpuEndpoint,
     export_endpoint,
 )
@@ -34,7 +34,7 @@ from finepdfs.infrastructure.compute.providers import (
     NoGpuProvider,
     StaticGpuProvider,
     UnknownGpuProvider,
-    derive_identity,
+    derive_detail,
     endpoint_from_start_output,
     gpu_provider_from_environment,
     leased_environment,
@@ -99,7 +99,7 @@ def test_without_a_provider_nothing_is_rented() -> None:
 
 
 def test_a_static_provider_names_the_model_not_the_address() -> None:
-    """ADR-0007: address and identity are separate fields, so the model alone names the deployment."""
+    """ADR-0007: address and detail are separate fields, so the model alone names the deployment."""
     provider = gpu_provider_from_environment(
         {"FINEPDFS_GPU_PROVIDER": "static", "FINEPDFS_GPU_BASE_URL": "http://host:8000/v1", "FINEPDFS_GPU_MODEL": "m"}
     )
@@ -107,7 +107,7 @@ def test_a_static_provider_names_the_model_not_the_address() -> None:
     assert isinstance(provider, StaticGpuProvider)
     with provider.lease() as endpoint:
         assert endpoint.base_url == "http://host:8000/v1"
-        assert endpoint.identity == "static:m"
+        assert endpoint.detail == "static:m"
 
 
 def test_a_static_provider_without_a_model_is_still_named_static() -> None:
@@ -116,46 +116,46 @@ def test_a_static_provider_without_a_model_is_still_named_static() -> None:
     )
 
     with provider.lease() as endpoint:
-        assert endpoint.identity == "static"
+        assert endpoint.detail == "static"
 
 
-def test_the_pinned_engine_identity_wins_the_static_providers_own_name() -> None:
+def test_the_pinned_engine_detail_wins_the_static_providers_own_name() -> None:
     """The two names meet in one place, so one rule decides -- and it must be the rule the README states.
 
-    ADR-0007 keeps an identity that is already set, so ``--engine-identity`` pins the memo name and
-    outlives the provider's default. The static provider's own ``FINEPDFS_GPU_IDENTITY`` is that
-    default, so a pinned ``FINEPDFS_ENGINE_IDENTITY`` wins it; ``export_endpoint``'s setdefault then
+    ADR-0007 keeps an identity that is already set, so ``--engine-detail`` pins the memo name and
+    outlives the provider's default. The static provider's own ``FINEPDFS_GPU_DETAIL`` is that
+    default, so a pinned ``FINEPDFS_ENGINE_DETAIL`` wins it; ``export_endpoint``'s setdefault then
     agrees with the one decision instead of quietly taking it back.
     """
     environ = {
         "FINEPDFS_GPU_PROVIDER": "static",
         "FINEPDFS_GPU_BASE_URL": "http://host:8000/v1",
         "FINEPDFS_GPU_MODEL": "m",
-        "FINEPDFS_GPU_IDENTITY": "gpu:v1",
-        "FINEPDFS_ENGINE_IDENTITY": "pinned:v1",
+        "FINEPDFS_GPU_DETAIL": "gpu:v1",
+        "FINEPDFS_ENGINE_DETAIL": "pinned:v1",
     }
 
     with leased_environment(environ) as endpoint:
-        assert endpoint.identity == "pinned:v1", "the pinned identity is the memo name"
-        assert environ["FINEPDFS_ENGINE_IDENTITY"] == "pinned:v1", "the export must not decide it again"
+        assert endpoint.detail == "pinned:v1", "the pinned detail is the memo name"
+        assert environ["FINEPDFS_ENGINE_DETAIL"] == "pinned:v1", "the export must not decide it again"
 
 
-def test_the_gpu_identity_names_the_static_deployment_when_nothing_is_pinned() -> None:
+def test_the_gpu_detail_names_the_static_deployment_when_nothing_is_pinned() -> None:
     """The provider's own name is the fallback, not a loser: with no pin it is what the memo remembers."""
     environ = {
         "FINEPDFS_GPU_PROVIDER": "static",
         "FINEPDFS_GPU_BASE_URL": "http://host:8000/v1",
         "FINEPDFS_GPU_MODEL": "m",
-        "FINEPDFS_GPU_IDENTITY": "gpu:v1",
+        "FINEPDFS_GPU_DETAIL": "gpu:v1",
     }
 
     with leased_environment(environ) as endpoint:
-        assert endpoint.identity == "gpu:v1"
-        assert environ["FINEPDFS_ENGINE_IDENTITY"] == "gpu:v1"
+        assert endpoint.detail == "gpu:v1"
+        assert environ["FINEPDFS_ENGINE_DETAIL"] == "gpu:v1"
 
 
 def test_moving_a_static_address_does_not_move_the_memo_key() -> None:
-    """The provider's identity rule, checked where it becomes the memo key (ADR-0005, ADR-0007)."""
+    """The provider's detail rule, checked where it becomes the memo key (ADR-0005, ADR-0007)."""
 
     def memo_key(base_url: str) -> str:
         environ = {
@@ -237,25 +237,25 @@ def test_a_stop_that_explodes_does_not_mask_the_error_that_ended_the_run(caplog)
 def test_the_endpoint_is_the_first_json_object_not_a_later_log_line() -> None:
     """A start command that prints its endpoint and then logs JSON must yield the endpoint, not the log."""
     stdout = (
-        '{"base_url": "https://rented.example/v1", "identity": "worker"}\n'
+        '{"base_url": "https://rented.example/v1", "detail": "worker"}\n'
         '{"base_url": "https://dashboard.example", "level": "info"}\n'
     )
 
     endpoint = endpoint_from_start_output(stdout, START)
 
     assert endpoint.base_url == "https://rented.example/v1"
-    assert endpoint.identity == "worker"
+    assert endpoint.detail == "worker"
 
 
 def test_a_command_that_only_prints_a_url_is_understood() -> None:
     endpoint = endpoint_from_start_output("booting...\nhttps://rented.example/v1\nready\n", START)
 
     assert endpoint.base_url == "https://rented.example/v1"
-    assert endpoint.identity.startswith("command:")
+    assert endpoint.detail.startswith("command:")
 
 
 def test_a_bare_url_still_names_the_model_the_run_configured() -> None:
-    """ADR-0007: the derived identity is the command line *and the model*, so a model change re-reads."""
+    """ADR-0007: the derived detail is the command line *and the model*, so a model change re-reads."""
     runner = RecordingRunner(stdout="https://rented.example/v1\n")
     provider = gpu_provider_from_environment(
         {
@@ -267,7 +267,7 @@ def test_a_bare_url_still_names_the_model_the_run_configured() -> None:
     )
 
     with provider.lease() as endpoint:
-        assert endpoint.identity == derive_identity(START, "PaddleOCR-VL-1.6")
+        assert endpoint.detail == derive_detail(START, "PaddleOCR-VL-1.6")
 
 
 def test_the_model_a_command_prints_wins_over_the_one_the_run_configured() -> None:
@@ -282,13 +282,13 @@ def test_the_model_a_command_prints_wins_over_the_one_the_run_configured() -> No
     )
 
     with provider.lease() as endpoint:
-        assert endpoint.identity == derive_identity(START, "printed")
+        assert endpoint.detail == derive_detail(START, "printed")
 
 
-def test_a_derived_identity_is_stable_across_runs_and_follows_the_model() -> None:
-    assert derive_identity(START, "m") == derive_identity(START, "m")
-    assert derive_identity(START, "m") != derive_identity(START, "other")
-    assert derive_identity(START, "m") != derive_identity("another-command", "m")
+def test_a_derived_detail_is_stable_across_runs_and_follows_the_model() -> None:
+    assert derive_detail(START, "m") == derive_detail(START, "m")
+    assert derive_detail(START, "m") != derive_detail(START, "other")
+    assert derive_detail(START, "m") != derive_detail("another-command", "m")
 
 
 def test_a_start_command_that_prints_no_endpoint_is_the_providers_own_failure() -> None:
@@ -340,7 +340,7 @@ def test_a_new_provider_is_registered_in_one_place(monkeypatch) -> None:
     class ModalProvider:
         @contextmanager
         def lease(self):
-            yield GpuEndpoint(base_url="https://modal.example/v1", identity="modal:ocr")
+            yield GpuEndpoint(base_url="https://modal.example/v1", detail="modal:ocr")
 
     monkeypatch.setitem(providers.PROVIDERS, "modal", lambda values, runner: ModalProvider())
 
@@ -362,18 +362,18 @@ def test_an_unknown_provider_is_rejected() -> None:
         gpu_provider_from_environment({"FINEPDFS_GPU_PROVIDER": "magic-cloud"})
 
 
-def test_exporting_an_endpoint_moves_the_address_but_not_a_pinned_identity() -> None:
-    environ = {"FINEPDFS_ENGINE_IDENTITY": "pinned:v1"}
+def test_exporting_an_endpoint_moves_the_address_but_not_a_pinned_detail() -> None:
+    environ = {"FINEPDFS_ENGINE_DETAIL": "pinned:v1"}
 
     export_endpoint(
-        GpuEndpoint(base_url="https://new.example/v1", model="m", api_key="k", identity="provider-derived"),
+        GpuEndpoint(base_url="https://new.example/v1", model="m", api_key="k", detail="provider-derived"),
         environ,
     )
 
     assert environ["FINEPDFS_ENGINE_BASE_URL"] == "https://new.example/v1"
     assert environ["FINEPDFS_ENGINE_MODEL"] == "m"
     assert environ["FINEPDFS_ENGINE_API_KEY"] == "k"
-    assert environ["FINEPDFS_ENGINE_IDENTITY"] == "pinned:v1"
+    assert environ["FINEPDFS_ENGINE_DETAIL"] == "pinned:v1"
 
 
 def test_an_empty_endpoint_leaves_the_environment_alone() -> None:
@@ -396,7 +396,7 @@ def test_a_moving_address_does_not_move_the_memo_key() -> None:
     assert str(first.identity) == str(second.identity) == "paddleocr-vl@modal:ocr:1.6@dpi200"
 
 
-def test_without_an_identity_the_address_is_the_key() -> None:
+def test_without_a_pinned_detail_the_address_is_the_key() -> None:
     """The hazard the layer removes: this is what would re-read the corpus on every run."""
     first = build_engine(EngineConfig(name="paddleocr-vl", base_url="https://a.example/v1", model="m"))
     second = build_engine(EngineConfig(name="paddleocr-vl", base_url="https://b.example/v1", model="m"))
@@ -416,14 +416,14 @@ def test_a_stable_identity_keeps_the_engine_name_and_stamps_its_own_identity() -
     assert result.engine == engine.identity
 
 
-def test_the_runtime_builds_the_engine_from_the_exported_identity() -> None:
+def test_the_runtime_builds_the_engine_from_the_exported_detail() -> None:
     """A lease reaches the flow only through the environment, so that path has to be wired."""
     runtime = runtime_from_environment(
         {
             "FINEPDFS_ENGINE": "paddleocr-vl",
             "FINEPDFS_ENGINE_BASE_URL": "https://rented.example/v1",
             "FINEPDFS_ENGINE_MODEL": "m",
-            "FINEPDFS_ENGINE_IDENTITY": "modal:ocr:1.6",
+            "FINEPDFS_ENGINE_DETAIL": "modal:ocr:1.6",
         }
     )
 
@@ -438,14 +438,14 @@ def test_the_seam_variables_have_one_owner_and_every_reader_reads_it() -> None:
     assertions below pin the CLI to the constants, and the runtime assertion passes only against the
     name the constant holds, so a rename that forgets either reader fails here.
     """
-    assert ENVIRONMENT_FOR_ENGINE["engine_identity"] == ENGINE_IDENTITY
+    assert ENVIRONMENT_FOR_ENGINE["engine_detail"] == ENGINE_DETAIL
     assert ENVIRONMENT_FOR_ENGINE["gpu_provider"] == GPU_PROVIDER
     assert ENVIRONMENT_FOR_ENGINE["gpu_start_command"] == GPU_START_COMMAND
     assert ENVIRONMENT_FOR_ENGINE["gpu_stop_command"] == GPU_STOP_COMMAND
 
     runtime = runtime_from_environment(
         {
-            ENGINE_IDENTITY: "modal:ocr:1.6",
+            ENGINE_DETAIL: "modal:ocr:1.6",
             ENGINE_BASE_URL: "https://rented.example/v1",
             "FINEPDFS_ENGINE": "paddleocr-vl",
         }

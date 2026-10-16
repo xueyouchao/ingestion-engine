@@ -140,7 +140,7 @@ def test_a_failed_run_gives_the_worker_back_and_clears_the_endpoint(monkeypatch,
     start_script.write_text(
         "import json\n"
         f"open({str(started)!r}, 'w').write('up')\n"
-        "print(json.dumps({'base_url': 'http://127.0.0.1:9/v1', 'model': 'm', 'identity': 'flow:test'}))\n"
+        "print(json.dumps({'base_url': 'http://127.0.0.1:9/v1', 'model': 'm', 'detail': 'flow:test'}))\n"
     )
     stop_script = tmp_path / "stop_worker.py"
     stop_script.write_text(f"open({str(stopped)!r}, 'w').write('down')\n")
@@ -158,7 +158,7 @@ def test_a_failed_run_gives_the_worker_back_and_clears_the_endpoint(monkeypatch,
     monkeypatch.setenv("FINEPDFS_ENGINE_MODEL", "operator-pinned")
     monkeypatch.delenv("FINEPDFS_ENGINE_BASE_URL", raising=False)
     monkeypatch.delenv("FINEPDFS_ENGINE_API_KEY", raising=False)
-    monkeypatch.delenv("FINEPDFS_ENGINE_IDENTITY", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_DETAIL", raising=False)
     flow.configure_runtime(None)
 
     async def failing_run() -> None:
@@ -172,7 +172,7 @@ def test_a_failed_run_gives_the_worker_back_and_clears_the_endpoint(monkeypatch,
     assert stopped.exists(), "a leaked GPU bills by the hour"
     assert "FINEPDFS_ENGINE_BASE_URL" not in os.environ, "the returned worker must not stay the engine"
     assert "FINEPDFS_ENGINE_API_KEY" not in os.environ
-    assert "FINEPDFS_ENGINE_IDENTITY" not in os.environ
+    assert "FINEPDFS_ENGINE_DETAIL" not in os.environ
     assert os.environ["FINEPDFS_ENGINE_MODEL"] == "operator-pinned", "the lease's export must be undone"
     with pytest.raises(RuntimeError):
         flow.active_runtime()
@@ -189,7 +189,7 @@ def test_a_stop_command_that_fails_after_a_good_run_reaches_the_flow(monkeypatch
     start_script = tmp_path / "start_worker.py"
     start_script.write_text(
         "import json\n"
-        "print(json.dumps({'base_url': 'http://127.0.0.1:9/v1', 'model': 'm', 'identity': 'flow:test'}))\n"
+        "print(json.dumps({'base_url': 'http://127.0.0.1:9/v1', 'model': 'm', 'detail': 'flow:test'}))\n"
     )
     stop_script = tmp_path / "stop_worker.py"
     stop_script.write_text("import sys\nsys.exit(3)\n")
@@ -203,7 +203,7 @@ def test_a_stop_command_that_fails_after_a_good_run_reaches_the_flow(monkeypatch
     monkeypatch.setenv("FINEPDFS_ENGINE", "pymupdf")
     monkeypatch.delenv("FINEPDFS_ENGINE_BASE_URL", raising=False)
     monkeypatch.delenv("FINEPDFS_ENGINE_API_KEY", raising=False)
-    monkeypatch.delenv("FINEPDFS_ENGINE_IDENTITY", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_DETAIL", raising=False)
     flow.configure_runtime(None)
 
     async def good_run() -> None:
@@ -229,7 +229,7 @@ def test_a_missing_stop_binary_after_a_good_run_reaches_the_flow(monkeypatch, tm
     start_script = tmp_path / "start_worker.py"
     start_script.write_text(
         "import json\n"
-        "print(json.dumps({'base_url': 'http://127.0.0.1:9/v1', 'model': 'm', 'identity': 'flow:test'}))\n"
+        "print(json.dumps({'base_url': 'http://127.0.0.1:9/v1', 'model': 'm', 'detail': 'flow:test'}))\n"
     )
 
     monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
@@ -241,7 +241,7 @@ def test_a_missing_stop_binary_after_a_good_run_reaches_the_flow(monkeypatch, tm
     monkeypatch.setenv("FINEPDFS_ENGINE", "pymupdf")
     monkeypatch.delenv("FINEPDFS_ENGINE_BASE_URL", raising=False)
     monkeypatch.delenv("FINEPDFS_ENGINE_API_KEY", raising=False)
-    monkeypatch.delenv("FINEPDFS_ENGINE_IDENTITY", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_DETAIL", raising=False)
     flow.configure_runtime(None)
 
     async def good_run() -> None:
@@ -265,7 +265,7 @@ def test_a_missing_stop_binary_does_not_mask_the_error_that_ended_the_run(monkey
     start_script = tmp_path / "start_worker.py"
     start_script.write_text(
         "import json\n"
-        "print(json.dumps({'base_url': 'http://127.0.0.1:9/v1', 'model': 'm', 'identity': 'flow:test'}))\n"
+        "print(json.dumps({'base_url': 'http://127.0.0.1:9/v1', 'model': 'm', 'detail': 'flow:test'}))\n"
     )
     corpus_dir = tmp_path / "corpus"
     corpus_dir.mkdir()
@@ -280,7 +280,7 @@ def test_a_missing_stop_binary_does_not_mask_the_error_that_ended_the_run(monkey
     monkeypatch.setenv("FINEPDFS_ENGINE_MODEL", "operator-pinned")
     monkeypatch.delenv("FINEPDFS_ENGINE_BASE_URL", raising=False)
     monkeypatch.delenv("FINEPDFS_ENGINE_API_KEY", raising=False)
-    monkeypatch.delenv("FINEPDFS_ENGINE_IDENTITY", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_DETAIL", raising=False)
     flow.configure_runtime(None)
 
     async def failing_run() -> None:

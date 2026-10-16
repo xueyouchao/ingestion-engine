@@ -32,24 +32,24 @@ A GPU is *leased*, and its address is kept out of the memo key.
   `static` (a server that already exists) and `command` (a command that rents one and a command that
   gives it back). Modal and RunPod are a command line today and an adapter behind the same seam later;
   no engine code knows about either.
-* **Address and identity are separate fields.** `GpuEndpoint` carries `base_url`/`model`/`api_key`,
-  which is where the bytes go, and `identity`, which is what the memo remembers. A provider that hands
-  out a moving address must report a stable identity; the command provider derives one from its command
-  line and model when the command does not name one.
-* **`StableIdentity` decorates the engine.** `build_engine` wraps any engine in it when an identity is
+* **Address and detail are separate fields.** `GpuEndpoint` carries `base_url`/`model`/`api_key`, which
+  is where the bytes go, and `detail`, the deployment half of the Engine Identity the memo remembers. A
+  provider that hands out a moving address must report a stable detail; the command provider derives one
+  from its command line and model when the command does not name one.
+* **`StableIdentity` decorates the engine.** `build_engine` wraps any engine in it when a detail is
   configured, so the engine keeps its name and its extraction and only the detail changes.
 * **The lease wraps the run.** It is taken in the flow's `coco_lifespan`, around the `yield`, so a
   worker lives exactly as long as the run and is released even when the run fails. `dry-run` does not go
   through the flow, so it leases for itself.
 * **The lease reaches the flow through the environment.** `export_endpoint` writes `FINEPDFS_ENGINE_*`,
   which is the only channel `cocoindex update main.py` has. A leased address overwrites the environment,
-  because the run asked for that worker; an identity already set is kept, so a user can pin the memo name
-  with `--engine-identity` and have it outlive the provider's derived default.
+  because the run asked for that worker; a detail already set is kept, so a user can pin the memo name
+  with `--engine-detail` and have it outlive the provider's derived default.
 
 ## Consequences
 
 * A rented worker is a drop-in: the endpoint moves, the identity does not, and nothing is re-read.
-* The identity is now an explicit, nameable thing rather than an accident of the transport. It is the
+* The detail is now an explicit, nameable thing rather than an accident of the transport. It is the
   operator's job to encode the model version in it: a worker whose *weights* change while the command
   line does not is, to the memo, the same worker.
 * Two concurrent runs each lease their own worker; they cannot share one. That matches the state

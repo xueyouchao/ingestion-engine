@@ -1,10 +1,11 @@
 """Where a run reaches its engine, and how it leases that endpoint.
 
 A worker is rented for the length of a run: start it, learn where it is listening, use it, give it
-back. The endpoint is *not* the engine's identity. A provider that hands out a new host every run
-(Modal, RunPod) must report a stable identity, because the memo key is the engine identity (ADR-0005):
-an ephemeral URL in that key would re-read the whole corpus on every run, which is the exact cost the
-memo exists to avoid.
+back. The endpoint is not the engine's identity: it carries the deployment detail -- the half the memo
+key remembers beside the engine's own name. A provider that hands out a new host every run (Modal,
+RunPod) must report a detail that does not move with it, because the memo key is the engine identity
+(ADR-0005): an ephemeral URL in that key would re-read the whole corpus on every run, which is the exact
+cost the memo exists to avoid.
 """
 
 from __future__ import annotations
@@ -17,21 +18,22 @@ from typing import Protocol
 ENGINE_BASE_URL = "FINEPDFS_ENGINE_BASE_URL"
 ENGINE_MODEL = "FINEPDFS_ENGINE_MODEL"
 ENGINE_API_KEY = "FINEPDFS_ENGINE_API_KEY"
-ENGINE_IDENTITY = "FINEPDFS_ENGINE_IDENTITY"
+ENGINE_DETAIL = "FINEPDFS_ENGINE_DETAIL"
 
 
 @dataclass(frozen=True, slots=True)
 class GpuEndpoint:
-    """One run's endpoint: where to reach the engine, what it runs, and its stable name.
+    """One run's endpoint: where to reach the engine, what it runs, and the deployment it names.
 
-    ``identity`` is what enters the memo key. ``base_url`` is where the bytes go right now; for a
-    rented worker that address is new every run and must never be mistaken for identity.
+    ``detail`` is the deployment half of what enters the memo key, beside the engine's own name.
+    ``base_url`` is where the bytes go right now; for a rented worker that address is new every run and
+    must never be mistaken for the detail.
     """
 
     base_url: str = ""
     model: str = ""
     api_key: str = ""
-    identity: str = ""
+    detail: str = ""
 
 
 class GpuProvider(Protocol):
@@ -54,7 +56,7 @@ def export_endpoint(endpoint: GpuEndpoint, environ: MutableMapping[str, str]) ->
     export the endpoint, then let the existing environment path build the engine.
 
     Precedence is deliberate. A leased address overwrites whatever the environment held, because the
-    user asked for a rented worker and that worker is where the bytes have to go. The identity is
+    user asked for a rented worker and that worker is where the bytes have to go. The detail is
     different: a value already set is kept, so a user who knows which worker version is running can pin
     the memo name and have it outlive the provider's derived default.
     """
@@ -65,5 +67,5 @@ def export_endpoint(endpoint: GpuEndpoint, environ: MutableMapping[str, str]) ->
     ):
         if value:
             environ[variable] = value
-    if endpoint.identity:
-        environ.setdefault(ENGINE_IDENTITY, endpoint.identity)
+    if endpoint.detail:
+        environ.setdefault(ENGINE_DETAIL, endpoint.detail)

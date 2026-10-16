@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from finepdfs.infrastructure.compute.endpoint import (
     ENGINE_API_KEY,
     ENGINE_BASE_URL,
-    ENGINE_IDENTITY,
+    ENGINE_DETAIL,
     ENGINE_MODEL,
     GpuEndpoint,
     GpuProvider,
@@ -38,7 +38,7 @@ GPU_PROVIDER = "FINEPDFS_GPU_PROVIDER"
 GPU_BASE_URL = "FINEPDFS_GPU_BASE_URL"
 GPU_MODEL = "FINEPDFS_GPU_MODEL"
 GPU_API_KEY = "FINEPDFS_GPU_API_KEY"
-GPU_IDENTITY = "FINEPDFS_GPU_IDENTITY"
+GPU_DETAIL = "FINEPDFS_GPU_DETAIL"
 GPU_START_COMMAND = "FINEPDFS_GPU_START_COMMAND"
 GPU_STOP_COMMAND = "FINEPDFS_GPU_STOP_COMMAND"
 GPU_TIMEOUT = "FINEPDFS_GPU_TIMEOUT"
@@ -127,13 +127,13 @@ class CommandGpuProvider:
 
     The start command prints one JSON object, on its own line or as the whole output:
 
-        {"base_url": "https://...", "model": "...", "api_key": "...", "identity": "..."}
+        {"base_url": "https://...", "model": "...", "api_key": "...", "detail": "..."}
 
     A bare URL line is accepted too. Then the command names no model, so the model the run configured
-    is the one in play, and the derived identity names it (ADR-0007). An identity is required for an
-    ephemeral address, because the memo key is the identity (ADR-0005). When the command does not
-    supply one it is derived from the command line and the model, which is stable across runs and
-    changes when either does.
+    is the one in play, and the derived detail names it (ADR-0007). A detail is required for an
+    ephemeral address, because the memo key remembers it (ADR-0005). When the command does not supply
+    one it is derived from the command line and the model, which is stable across runs and changes when
+    either does.
 
     The stop command's result is checked rather than discarded: a worker it could not give back is
     still billing, which is the cost ADR-0007 exists to remove.
@@ -205,8 +205,8 @@ def endpoint_from_start_output(stdout: str, command: str, model: str = "") -> Gp
     """Read where a start command said its worker is listening.
 
     ``model`` is the model the run configured for the engine. It is the model in play when the command
-    prints a bare URL and therefore names none of its own, so the derived identity can still name it:
-    ADR-0007 derives the identity from the command line *and the model*.
+    prints a bare URL and therefore names none of its own, so the derived detail can still name it:
+    ADR-0007 derives the detail from the command line *and the model*.
 
     A command that names no endpoint cannot start the run, so this function -- the provider's, not an
     engine's -- raises the provider's own ``GpuStartFailed``, which is what the CLI reports and exits 2
@@ -216,7 +216,7 @@ def endpoint_from_start_output(stdout: str, command: str, model: str = "") -> Gp
     base_url = str(payload.get("base_url") or payload.get("url") or "").strip()
     served_model = str(payload.get("model") or "").strip() or model.strip()
     api_key = str(payload.get("api_key") or "").strip()
-    identity = str(payload.get("identity") or "").strip()
+    detail = str(payload.get("detail") or "").strip()
     if not base_url:
         base_url = _url_line(stdout)
     if not base_url:
@@ -225,12 +225,12 @@ def endpoint_from_start_output(stdout: str, command: str, model: str = "") -> Gp
         base_url=base_url,
         model=served_model,
         api_key=api_key,
-        identity=identity or derive_identity(command, served_model),
+        detail=detail or derive_detail(command, served_model),
     )
 
 
-def derive_identity(command: str, model: str = "") -> str:
-    """A stable name for a worker whose address is not: the command line, and the model it serves."""
+def derive_detail(command: str, model: str = "") -> str:
+    """A stable detail for a worker whose address is not: the command line, and the model it serves."""
     digest = hashlib.sha256(command.strip().encode("utf-8")).hexdigest()[:12]
     return f"command:{digest}:{model}" if model else f"command:{digest}"
 
@@ -300,7 +300,7 @@ def _command_provider(values: Mapping[str, str], runner: CommandRunner | None) -
         start_command=start_command,
         stop_command=values.get(GPU_STOP_COMMAND, "").strip(),
         # FINEPDFS_ENGINE_MODEL is the model the run will actually ask for: it is the one the engine is
-        # built with, and the one a bare URL's derived identity has to name. GPU_MODEL belongs to the
+        # built with, and the one a bare URL's derived detail has to name. GPU_MODEL belongs to the
         # static provider and never reaches the engine, so it is not a fallback here.
         model=values.get(ENGINE_MODEL, "").strip(),
         runner=runner or SubprocessRunner(timeout),
@@ -331,7 +331,7 @@ def gpu_provider_from_environment(
     return factory(values, runner)
 
 
-_ENGINE_VARIABLES = (ENGINE_BASE_URL, ENGINE_MODEL, ENGINE_API_KEY, ENGINE_IDENTITY)
+_ENGINE_VARIABLES = (ENGINE_BASE_URL, ENGINE_MODEL, ENGINE_API_KEY, ENGINE_DETAIL)
 
 
 @contextmanager
@@ -360,9 +360,9 @@ def leased_environment(environ: MutableMapping[str, str] | None = None) -> Itera
 def _static_endpoint(values: Mapping[str, str]) -> GpuEndpoint:
     """A fixed endpoint named by its model, never by its address.
 
-    A pinned ``FINEPDFS_ENGINE_IDENTITY`` wins the name the static provider derives, exactly as it wins
-    the command provider's derived one: ADR-0007 keeps an identity already set, so ``--engine-identity``
-    outlives the provider's default. ``FINEPDFS_GPU_IDENTITY`` names the deployment when nothing is
+    A pinned ``FINEPDFS_ENGINE_DETAIL`` wins the name the static provider derives, exactly as it wins
+    the command provider's derived one: ADR-0007 keeps a detail already set, so ``--engine-detail``
+    outlives the provider's default. ``FINEPDFS_GPU_DETAIL`` names the deployment when nothing is
     pinned; otherwise the model names it, which is what keeps the memo key still when the address moves.
     This is the one place the two names meet, so this is where the precedence is decided;
     ``export_endpoint`` publishes the answer rather than deciding it a second time.
@@ -370,7 +370,7 @@ def _static_endpoint(values: Mapping[str, str]) -> GpuEndpoint:
     base_url = values.get(GPU_BASE_URL, "").strip() or values.get(ENGINE_BASE_URL, "").strip()
     model = values.get(GPU_MODEL, "").strip() or values.get(ENGINE_MODEL, "").strip()
     api_key = values.get(GPU_API_KEY, "").strip() or values.get(ENGINE_API_KEY, "").strip()
-    identity = values.get(ENGINE_IDENTITY, "").strip() or values.get(GPU_IDENTITY, "").strip()
-    if not identity:
-        identity = f"static:{model}" if model else STATIC
-    return GpuEndpoint(base_url=base_url, model=model, api_key=api_key, identity=identity)
+    detail = values.get(ENGINE_DETAIL, "").strip() or values.get(GPU_DETAIL, "").strip()
+    if not detail:
+        detail = f"static:{model}" if model else STATIC
+    return GpuEndpoint(base_url=base_url, model=model, api_key=api_key, detail=detail)
