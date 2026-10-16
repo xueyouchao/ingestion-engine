@@ -241,7 +241,7 @@ def test_without_an_identity_the_address_is_the_key() -> None:
     assert str(first.identity) != str(second.identity)
 
 
-def test_a_stable_identity_keeps_the_engine_name_and_delegates_extraction() -> None:
+def test_a_stable_identity_keeps_the_engine_name_and_stamps_its_own_identity() -> None:
     inner = CountingEngine(name="paddleocr-vl")
     engine = StableIdentity(inner, "modal:ocr:1.6")
     document = Document(name="doc", content=b"bytes")
@@ -250,7 +250,7 @@ def test_a_stable_identity_keeps_the_engine_name_and_delegates_extraction() -> N
 
     assert engine.identity == EngineIdentity(name="paddleocr-vl", detail="modal:ocr:1.6")
     assert inner.extracted == [document]
-    assert result.engine == inner.identity
+    assert result.engine == engine.identity
 
 
 def test_the_runtime_builds_the_engine_from_the_exported_identity() -> None:

@@ -10,6 +10,7 @@ from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument
 from finepdfs.domain.language import PageLanguage
 from finepdfs.domain.ocr import OcrRoutingPolicy
 from finepdfs.domain.publishing import PublishPolicy
+from finepdfs.infrastructure.engines.stable_identity import StableIdentity
 
 
 class FakeProbe:
@@ -67,6 +68,20 @@ def _use_case(probe_quality, engines, languages=None, engine="paddleocr-vl", **p
     )
     languages = languages or FakeLanguage()
     return CurateDocument(FakeProbe(probe_quality), engines, languages, policy), engines
+
+
+def test_a_published_record_does_not_move_when_the_host_does() -> None:
+    """ADR-0007: the record's engine is the stable identity, so a rented worker's new address is invisible."""
+    pages = _documents_pages("ocr")
+
+    def record_engine(host: str) -> str:
+        engine = StableIdentity(FakeEngine("paddleocr-vl", pages, detail=f"model@{host}"), "modal:ocr:1.6")
+        use_case, _ = _use_case(SCANNED, {"paddleocr-vl": engine})
+        document = Document(name="https://a.example/scan.pdf", content=b"%PDF-1.7 bytes")
+        return use_case.run(document).record.engine
+
+    assert record_engine("https://a.example/v1") == record_engine("https://b.example/v1")
+    assert record_engine("https://a.example/v1") == "paddleocr-vl@modal:ocr:1.6"
 
 
 def test_a_healthy_document_is_published_by_the_text_layer_engine() -> None:
