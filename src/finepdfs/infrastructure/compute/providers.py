@@ -151,6 +151,10 @@ def endpoint_from_start_output(stdout: str, command: str, model: str = "") -> Gp
     ``model`` is the model the run configured for the engine. It is the model in play when the command
     prints a bare URL and therefore names none of its own, so the derived identity can still name it:
     ADR-0007 derives the identity from the command line *and the model*.
+
+    A command that names no endpoint cannot start the run, so this function -- the provider's, not an
+    engine's -- raises the provider's own ``GpuStartFailed``, which is what the CLI reports and exits 2
+    on, rather than ``CommandFailed``, which stays an engine's failure.
     """
     payload = _json_object(stdout)
     base_url = str(payload.get("base_url") or payload.get("url") or "").strip()
@@ -160,7 +164,7 @@ def endpoint_from_start_output(stdout: str, command: str, model: str = "") -> Gp
     if not base_url:
         base_url = _url_line(stdout)
     if not base_url:
-        raise CommandFailed(f"the GPU start command printed no endpoint: {stdout.strip()[:200]!r}")
+        raise GpuStartFailed(f"the GPU start command printed no endpoint: {stdout.strip()[:200]!r}")
     return GpuEndpoint(
         base_url=base_url,
         model=served_model,

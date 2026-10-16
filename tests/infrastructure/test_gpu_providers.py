@@ -195,8 +195,15 @@ def test_a_derived_identity_is_stable_across_runs_and_follows_the_model() -> Non
     assert derive_identity(START, "m") != derive_identity("another-command", "m")
 
 
-def test_a_start_command_that_prints_nothing_is_an_error() -> None:
-    with pytest.raises(CommandFailed, match="printed no endpoint"):
+def test_a_start_command_that_prints_no_endpoint_is_the_providers_own_failure() -> None:
+    """This test used to pin CommandFailed, which names an engine's own command failing.
+
+    endpoint_from_start_output reads what the *provider's* start command printed, so its failure is the
+    provider's: GpuStartFailed, the type the seam defines for "this run cannot start". CommandFailed
+    stays the engine's, which is the distinction GpuStartFailed's docstring draws and the CLI's exit-2
+    rule depends on (ADR-0007).
+    """
+    with pytest.raises(GpuStartFailed, match="printed no endpoint"):
         endpoint_from_start_output("nothing useful here", START)
 
 
