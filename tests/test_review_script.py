@@ -12,6 +12,8 @@ import io
 import json
 import subprocess
 import sys
+import threading
+import time
 import urllib.error
 from pathlib import Path
 
@@ -235,12 +237,54 @@ def test_each_axis_is_reviewed_independently_and_labelled_with_its_model(monkeyp
     code, posted = _run(monkeypatch, tmp_path, env={"OLLAMA_API_KEY": "test-key"}, opener=open_)
 
     assert code == 0
-    assert models_seen == ["deepseek-v4.1-flash", "glm-5.3-flash"]
+    # The two calls now overlap, so the order they are made in is not fixed; each model is asked once.
+    assert sorted(models_seen) == ["deepseek-v4.1-flash", "glm-5.3-flash"]
     assert len(posted) == 1
     assert "### Standards — `deepseek-v4.1-flash`" in posted[0]
     assert "### Spec — `glm-5.3-flash`" in posted[0]
     assert "findings from deepseek-v4.1-flash" in posted[0]
     assert "findings from glm-5.3-flash" in posted[0]
+
+
+def test_both_axis_calls_are_in_flight_at_once(monkeypatch, tmp_path) -> None:
+    """Run sequentially, the slower model waits behind the faster one; both calls must overlap."""
+    together = threading.Barrier(2, timeout=5)
+
+    def open_(request, timeout=None):
+        together.wait()
+        model = json.loads(request.data)["model"]
+        answer = {"choices": [{"message": {"content": f"findings from {model}"}}]}
+        return _Response(json.dumps(answer).encode("utf-8"), content_type="application/json")
+
+    code, posted = _run(monkeypatch, tmp_path, env={"OLLAMA_API_KEY": "test-key"}, opener=open_)
+
+    assert code == 0
+    assert len(posted) == 1
+    assert "findings from deepseek-v4.1-flash" in posted[0]
+    assert "findings from glm-5.3-flash" in posted[0]
+
+
+def test_a_hung_axis_is_abandoned_at_the_deadline_and_the_other_axis_still_posts(monkeypatch, tmp_path) -> None:
+    """The Spec axis timed out on a large diff: the comment must keep Standards and bound the wait."""
+
+    def open_(request, timeout=None):
+        if json.loads(request.data)["model"] == "glm-5.3-flash":
+            time.sleep(3)
+        answer = {"choices": [{"message": {"content": "standards findings"}}]}
+        return _Response(json.dumps(answer).encode("utf-8"), content_type="application/json")
+
+    monkeypatch.setattr(review, "AXIS_RUN_DEADLINE_SECONDS", 0.2, raising=False)
+    started = time.monotonic()
+    code, posted = _run(monkeypatch, tmp_path, env={"OLLAMA_API_KEY": "test-key"}, opener=open_)
+    elapsed = time.monotonic() - started
+
+    assert code == 0
+    assert elapsed < 2
+    assert len(posted) == 1
+    assert "standards findings" in posted[0]
+    assert "### Spec — `glm-5.3-flash`" in posted[0]
+    assert "did not run" in posted[0]
+    assert "timed out" in posted[0]
 
 
 def test_an_axis_that_fails_still_leaves_the_other_axis_in_the_one_comment(monkeypatch, tmp_path) -> None:

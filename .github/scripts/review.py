@@ -5,7 +5,7 @@ bookkeeping, so the prompt can be printed and checked locally with ``--print-pro
 credentials. It uses only the standard library, and it shells out to ``gh`` to post, so no token
 ever appears in this file or in the YAML beyond an environment variable.
 
-The two axes are reviewed by two different models in two independent calls and presented side by
+The two axes are reviewed by two different models in two concurrent calls and presented side by
 side in one comment. They are never ranked, merged or averaged into a single verdict. The prompt
 itself names the axes and carries their instructions; this module reads the names back out of it, so
 the code holds no second spelling that could drift.
@@ -23,6 +23,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -41,7 +43,12 @@ SYSTEM_PROMPT = (
 MAX_DIFF_CHARS = 60_000
 MAX_BODY_CHARS = 8_000
 MAX_ERROR_BODY_CHARS = 200
-REQUEST_TIMEOUT_SECONDS = 180
+# A slow model on a large diff needs more than the three minutes that timed the Spec axis out twice
+# in three runs on a fourteen-file pull request. The two calls run concurrently, so this bounds the
+# stage rather than doubling it; the deadline sits just past it so a socket timeout, which names
+# itself, normally beats the deadline, which can only say the call never returned.
+REQUEST_TIMEOUT_SECONDS = 600
+AXIS_RUN_DEADLINE_SECONDS = REQUEST_TIMEOUT_SECONDS + 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +213,52 @@ def chat(backend: Backend, model: str, prompt: str, opener=None) -> str:
     return content.strip()
 
 
+def run_axes(
+    axes: tuple[Axis, ...],
+    prompts: dict[str, str],
+    backend: Backend,
+    opener=None,
+) -> list[tuple[Axis, str, str | None]]:
+    """Every axis's call, made concurrently, as ``(axis, review, error)`` in the prompt's order.
+
+    The two models are independent, so running them in sequence makes the slower one pay for the
+    faster one's latency -- and time out for reasons that have nothing to do with its own answer.
+    A call that is still running at :data:`AXIS_RUN_DEADLINE_SECONDS` is abandoned rather than
+    awaited, so a hung socket cannot hold the job open: the surviving axis posts regardless.
+    Exactly one of ``review`` and ``error`` is set: an empty ``review`` with ``error`` ``None`` means
+    the model answered with nothing.
+    """
+    outcomes: dict[str, tuple[str, str | None]] = {}
+    lock = threading.Lock()
+
+    def run(axis: Axis) -> None:
+        try:
+            review = chat(backend, axis.model, prompts[axis.name], opener)
+        except Exception as error:  # Broad on purpose: one axis failing must not sink the other.
+            outcome: tuple[str, str | None] = ("", str(error))
+        else:
+            outcome = (review, None)
+        with lock:
+            outcomes[axis.name] = outcome
+
+    threads = [
+        threading.Thread(target=run, args=(axis,), name=f"review-{axis.name}", daemon=True)
+        for axis in axes
+    ]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + AXIS_RUN_DEADLINE_SECONDS
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+
+    abandoned = f"the call timed out after {AXIS_RUN_DEADLINE_SECONDS:g} seconds and was abandoned"
+    results = []
+    for axis in axes:
+        review, error = outcomes.get(axis.name, ("", abandoned))
+        results.append((axis, review, error))
+    return results
+
+
 def section_body(axis: Axis, outcome: str) -> str:
     """One axis's section, headed by the axis and the model that produced it; never a merged verdict."""
     return f"### {axis.name} — `{axis.model}`\n\n{outcome.strip()}\n"
@@ -329,10 +382,8 @@ def main(argv: list[str] | None = None, opener=None) -> int:
         return 0
 
     sections = []
-    for axis in axes:
-        try:
-            review = chat(backend, axis.model, prompts[axis.name], opener)
-        except Exception as error:  # Broad on purpose: one axis failing must not sink the other.
+    for axis, review, error in run_axes(axes, prompts, backend, opener):
+        if error:
             print(f"{axis.name} review call failed: {error}", file=sys.stderr)
             sections.append(section_body(axis, f"_This axis did not run: {error}_"))
             continue
