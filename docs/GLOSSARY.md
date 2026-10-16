@@ -38,7 +38,8 @@ and a human-readable reason.
 boilerplate removal, running titles, hyphenation repair, whitespace. Cleaning is pure domain logic and
 is cheap, so it runs on every change.
 
-**Page Language** — the language identified for one Page Text, with a confidence.
+**Page Language** — the language or script tag identified for one Page Text, with a confidence; the
+chosen adapter's vocabulary decides which (`Latn` under `script`, `eng` under `fasttext`).
 
 **Language Policy** — how Page Languages become the Document's language and which pages are dropped
 for being below the confidence threshold.

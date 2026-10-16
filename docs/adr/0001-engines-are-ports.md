@@ -24,10 +24,13 @@ ships two adapters: `ScriptLanguageIdentifier`, which needs nothing installed an
 `FastTextLanguageIdentifier`, which names the language rather than the script with a downloaded
 `lid.176` model. The model sits behind its own small protocol so the adapter's page logic is tested
 without it, it is reached as a downloaded file (`FINEPDFS_LANGUAGE_MODEL`) behind an optional extra, and
-the two-letter labels it emits are normalised to ISO 639-3 at the adapter, so every adapter answers the
-port's one vocabulary. This reverses the earlier position that no model-backed language adapter ships:
-this environment can run the model, so shipping it is a feature rather than a claim. That reversal
-belongs here, not in the record about OCR routing (ADR-0004), which decides only how a page is routed.
+the two-letter labels it emits are normalised to ISO 639-3 (`en` -> `eng`) at the adapter. The port
+promises a language *or* script tag, not one code system: the script adapter answers ISO 15924 codes
+(`Latn`, `Grek`, `Cyrl`), which name a script and not a language, and `FINEPDFS_LANGUAGE` decides which
+of the two a record carries. This reverses the earlier position that no model-backed language adapter
+ships: this environment can run the model, so shipping it is a feature rather than a claim. That
+reversal belongs here, not in the record about OCR routing (ADR-0004), which decides only how a page is
+routed.
 
 ## Consequences
 
