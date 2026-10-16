@@ -7,6 +7,8 @@ adapter must not need it installed or a model file downloaded.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from finepdfs.domain.ports import LanguageIdentifier
 from finepdfs.infrastructure.language.script import ScriptLanguageIdentifier
 
@@ -20,20 +22,32 @@ class UnknownLanguageMode(ValueError):
     """Raised when a run names a language mode that does not exist."""
 
 
-def build_language_identifier(mode: str = DEFAULT_LANGUAGE_MODE, model_path: str = "") -> LanguageIdentifier:
+@dataclass(frozen=True, slots=True)
+class LanguageConfig:
+    """The language choice one run was asked for, and where its model lives if it needs one.
+
+    A configuration object, not two bare strings, so the mode and its model travel together the way an
+    engine's do; the registry is then the one place that knows which modes exist.
+    """
+
+    mode: str = DEFAULT_LANGUAGE_MODE
+    model_path: str = ""
+
+
+def build_language_identifier(config: LanguageConfig) -> LanguageIdentifier:
     """The identifier one run was asked for. Nothing heavy is imported until fastText is named."""
-    if mode == SCRIPT:
+    if config.mode == SCRIPT:
         return ScriptLanguageIdentifier()
-    if mode == FASTTEXT:
+    if config.mode == FASTTEXT:
         from finepdfs.infrastructure.language.fasttext import (
             FastTextLanguageIdentifier,
             FastTextModel,
             LanguageModelUnavailable,
         )
 
-        if not model_path:
+        if not config.model_path:
             raise LanguageModelUnavailable(
                 "FINEPDFS_LANGUAGE=fasttext needs FINEPDFS_LANGUAGE_MODEL=<path to a fastText lid model>"
             )
-        return FastTextLanguageIdentifier(FastTextModel(model_path))
-    raise UnknownLanguageMode(f"unknown language mode {mode!r}; known modes are {', '.join(LANGUAGE_MODES)}")
+        return FastTextLanguageIdentifier(FastTextModel(config.model_path))
+    raise UnknownLanguageMode(f"unknown language mode {config.mode!r}; known modes are {', '.join(LANGUAGE_MODES)}")

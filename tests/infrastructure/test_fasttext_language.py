@@ -20,7 +20,7 @@ from finepdfs.infrastructure.language.fasttext import (
     FastTextModel,
     LanguageModelUnavailable,
 )
-from finepdfs.infrastructure.language.registry import build_language_identifier
+from finepdfs.infrastructure.language.registry import LanguageConfig, build_language_identifier
 from finepdfs.infrastructure.language.script import ScriptLanguageIdentifier
 
 ENGLISH = "This resolution concerns the vandalism of weather instruments in remote stations, and it " * 2
@@ -175,7 +175,7 @@ def test_the_map_covers_every_two_letter_label_lid_176_can_emit() -> None:
 
 @pytest.mark.network
 def test_the_real_model_tells_english_from_german_where_the_script_adapter_cannot() -> None:
-    identifier = build_language_identifier("fasttext", _real_model())
+    identifier = build_language_identifier(LanguageConfig(mode="fasttext", model_path=_real_model()))
 
     english = identifier.identify(ENGLISH, page_number=1)
     german = identifier.identify(GERMAN, page_number=2)
