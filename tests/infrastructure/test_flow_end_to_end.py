@@ -17,6 +17,7 @@ import pytest
 
 from finepdfs.application.curate import CurationPolicy, CurationStep, ExtractionStep
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText, TextLayerQuality
+from finepdfs.domain.language import PageLanguage
 from finepdfs.domain.ocr import OcrRoutingPolicy
 from finepdfs.domain.publishing import PublishPolicy
 from finepdfs.infrastructure.cocoindex import flow
@@ -84,7 +85,7 @@ def _write_corpus(corpus_dir: Path) -> None:
     CorpusManifest(crawl_id="CC-MAIN-2026-39", domain="a.example", entries=entries).save(corpus_dir / "manifest.json")
 
 
-def _runtime(corpus_dir: Path, out_dir: Path, *, policy: CurationPolicy | None = None, probe=None, engines=None) -> Runtime:
+def _runtime(corpus_dir: Path, out_dir: Path, *, policy: CurationPolicy | None = None, probe=None, engines=None, languages=None) -> Runtime:
     policy = policy or CurationPolicy(engine_name="pymupdf")
     engines = engines or {"pymupdf": PymupdfTextEngine()}
     probe = probe or PymupdfTextLayerProbe()
@@ -93,7 +94,7 @@ def _runtime(corpus_dir: Path, out_dir: Path, *, policy: CurationPolicy | None =
         out_dir=out_dir,
         policy=policy,
         extraction=ExtractionStep(probe, engines, policy),
-        curation=CurationStep(ScriptLanguageIdentifier(), policy),
+        curation=CurationStep(languages or ScriptLanguageIdentifier(), policy),
     )
 
 
@@ -176,6 +177,38 @@ def test_changing_a_cheap_rule_does_not_re_extract(monkeypatch, tmp_path, corpus
     assert engine.calls == 1, "publish rules are outside the memoised unit"
     exclusion = _exclusion(out_dir, ONE)
     assert "character minimum" in exclusion["reason"]
+
+
+class CountingIdentifier:
+    """A stand-in language identifier that counts the pages it was asked to name."""
+
+    def __init__(self, language: str) -> None:
+        self._language = language
+        self.calls = 0
+
+    def identify(self, text: str, page_number: int) -> PageLanguage:
+        self.calls += 1
+        return PageLanguage(page_number=page_number, language=self._language, confidence=1.0)
+
+
+def test_switching_the_language_adapter_rewrites_the_records(monkeypatch, tmp_path, corpus) -> None:
+    """A mode switch re-curates, because language identification is outside the memoised unit.
+
+    ADR-0001 keys the memo on the engine identity so switching engines re-extracts. The language
+    mode is a second, mode-dependent identity, but it changes no extraction: it changes the recorded
+    language. So the mode belongs in no memo key, and what an operator needs to know is that the next
+    run re-runs the deciding pass and rewrites the record -- not that the mode silently fails to take.
+    """
+    out_dir = tmp_path / "out"
+    script = CountingIdentifier("Latn")
+    _run(monkeypatch, tmp_path, _runtime(corpus, out_dir, languages=script), "runs")
+    assert _record(out_dir, ONE)["language"] == "Latn"
+
+    language = CountingIdentifier("eng")
+    _run(monkeypatch, tmp_path, _runtime(corpus, out_dir, languages=language), "runs")
+
+    assert language.calls > 0, "the deciding pass runs every run, whatever the extraction memo holds"
+    assert _record(out_dir, ONE)["language"] == "eng", "the record carries the adapter that is wired now"
 
 
 def _keep_only(corpus_dir: Path, urls: set[str]) -> None:

@@ -27,10 +27,12 @@ without it, it is reached as a downloaded file (`FINEPDFS_LANGUAGE_MODEL`) behin
 the two-letter labels it emits are normalised to ISO 639-3 (`en` -> `eng`) at the adapter. The port
 promises a language *or* script tag, not one code system: the script adapter answers ISO 15924 codes
 (`Latn`, `Grek`, `Cyrl`), which name a script and not a language, and `FINEPDFS_LANGUAGE` decides which
-of the two a record carries. This reverses the earlier position that no model-backed language adapter
-ships: this environment can run the model, so shipping it is a feature rather than a claim. That
-reversal belongs here, not in the record about OCR routing (ADR-0004), which decides only how a page is
-routed.
+of the two a record carries. The mode is deliberately not part of the extraction memo key stated above:
+it changes no extracted text, only the recorded tag, and language identification runs in the deciding
+pass, which is not memoised, so the next run re-curates and rewrites the record. This reverses the
+earlier position that no model-backed language adapter ships: this environment can run the model, so
+shipping it is a feature rather than a claim. That reversal belongs here, not in the record about OCR
+routing (ADR-0004), which decides only how a page is routed.
 
 ## Consequences
 

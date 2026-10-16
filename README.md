@@ -116,7 +116,9 @@ never both. That is intended -- the list filters the recorded language field, an
 that field -- but it makes the pair mode-dependent: switching adapters means revisiting the list in the
 same change. A `script`-era list left in place under `fasttext` matches no page, so every document is
 dropped, nothing is published, and the run exits 1 with one exclusion per document, naming the tag it
-carried and the required list it did not match.
+carried and the required list it did not match. A mode switch does not re-extract: language
+identification is not part of the extraction memo, so the next run re-runs the deciding pass and rewrites
+each record and exclusion against the new tag.
 
 ## Configuration
 
