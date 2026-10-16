@@ -20,6 +20,18 @@ TABLE_PROMPT = "Table Recognition:"
 PIPELINE_VERSION = "v1.6"
 
 
+def paddleocr_detail(base: str, dpi: int) -> str:
+    """The deployment detail a PaddleOCR-VL engine remembers, with the page DPI it rendered at.
+
+    The model reads page images rendered at this DPI, so the same bytes at 300 DPI can produce text the
+    200 DPI read did not, and ADR-0005 and the spec list page DPI among the engine identity's inputs.
+    Without it in the detail, changing ``FINEPDFS_ENGINE_DPI`` would be served the other read. The base
+    is the model and address the adapter names itself, or the deployment name a provider pinned: that
+    name replaces the adapter's default, but it still has to carry the DPI with it.
+    """
+    return f"{base}@dpi{dpi}"
+
+
 class PaddleOcrError(RuntimeError):
     """Raised when PaddleOCR-VL could not be read or did not produce a result."""
 
@@ -30,7 +42,9 @@ class PaddleOcrVlEngine:
     def __init__(self, transport: VlmChatTransport, dpi: int = 200, detail: str = "") -> None:
         self._transport = transport
         self._dpi = dpi
-        self._identity = EngineIdentity(name="paddleocr-vl", detail=detail or transport.endpoint.describe())
+        self._identity = EngineIdentity(
+            name="paddleocr-vl", detail=paddleocr_detail(detail or transport.endpoint.describe(), dpi)
+        )
 
     @property
     def identity(self) -> EngineIdentity:
@@ -61,7 +75,9 @@ class PaddleOcrVlCliEngine:
 
     @property
     def identity(self) -> EngineIdentity:
-        return EngineIdentity(name="paddleocr-vl", detail=f"cli:{self.command}:{PIPELINE_VERSION}")
+        return EngineIdentity(
+            name="paddleocr-vl", detail=paddleocr_detail(f"cli:{self.command}:{PIPELINE_VERSION}", self.dpi)
+        )
 
     def extract(self, document: Document) -> ExtractedDocument:
         import tempfile

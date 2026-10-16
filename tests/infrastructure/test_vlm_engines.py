@@ -188,7 +188,7 @@ def test_the_paddleocr_command_line_engine_reads_one_result_per_rendered_page(tm
     assert [page.text for page in extracted.pages] == ["page 1 text", "page 2 text"]
     assert runner.argv[:2] == ["paddleocr", "doc_parser"]
     assert "--pipeline_version" in runner.argv and "v1.6" in runner.argv
-    assert extracted.engine.detail == "cli:paddleocr:v1.6"
+    assert extracted.engine.detail == "cli:paddleocr:v1.6@dpi200"
 
 
 def test_the_paddleocr_command_line_engine_fails_loudly_when_nothing_was_written(tmp_path) -> None:

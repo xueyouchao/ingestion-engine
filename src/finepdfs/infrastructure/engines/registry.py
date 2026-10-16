@@ -45,9 +45,27 @@ class EngineConfig:
 def build_engine(config: EngineConfig) -> OcrEngine:
     """One engine, whichever kind it is. Imported lazily so unused engines cost nothing."""
     engine = _build_engine(config)
-    if config.detail:
-        return StableIdentity(engine, config.detail)
+    detail = _deployment_detail(config)
+    if detail:
+        return StableIdentity(engine, detail)
     return engine
+
+
+def _deployment_detail(config: EngineConfig) -> str:
+    """The configured deployment detail, carrying whatever the run's engine renders at.
+
+    ``StableIdentity`` replaces the adapter's detail -- and with it the page DPI the adapter put there.
+    ADR-0005 makes the page DPI an identity input, so the name a provider pins has to carry it too, or
+    changing ``FINEPDFS_ENGINE_DPI`` on a leased worker would be served the other DPI's text. Only the
+    engine that renders at a DPI carries one; the others never read ``page_dpi``.
+    """
+    if not config.detail:
+        return ""
+    if config.name == PADDLEOCR_VL_ENGINE:
+        from finepdfs.infrastructure.engines.paddleocr_vl import paddleocr_detail
+
+        return paddleocr_detail(config.detail, config.page_dpi)
+    return config.detail
 
 
 def _build_engine(config: EngineConfig) -> OcrEngine:

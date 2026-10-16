@@ -393,7 +393,7 @@ def test_a_moving_address_does_not_move_the_memo_key() -> None:
         EngineConfig(name="paddleocr-vl", base_url="https://b.example/v1", model="m", detail="modal:ocr:1.6")
     )
 
-    assert str(first.identity) == str(second.identity) == "paddleocr-vl@modal:ocr:1.6"
+    assert str(first.identity) == str(second.identity) == "paddleocr-vl@modal:ocr:1.6@dpi200"
 
 
 def test_without_an_identity_the_address_is_the_key() -> None:
@@ -427,7 +427,7 @@ def test_the_runtime_builds_the_engine_from_the_exported_identity() -> None:
         }
     )
 
-    assert str(runtime.engines["paddleocr-vl"].identity) == "paddleocr-vl@modal:ocr:1.6"
+    assert str(runtime.engines["paddleocr-vl"].identity) == "paddleocr-vl@modal:ocr:1.6@dpi200"
 
 
 def test_the_seam_variables_have_one_owner_and_every_reader_reads_it() -> None:
@@ -451,7 +451,7 @@ def test_the_seam_variables_have_one_owner_and_every_reader_reads_it() -> None:
         }
     )
 
-    assert str(runtime.engines["paddleocr-vl"].identity) == "paddleocr-vl@modal:ocr:1.6"
+    assert str(runtime.engines["paddleocr-vl"].identity) == "paddleocr-vl@modal:ocr:1.6@dpi200"
 
 
 def test_a_misconfigured_provider_fails_the_cli_cleanly(monkeypatch, capsys) -> None:
