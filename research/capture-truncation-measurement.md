@@ -166,13 +166,13 @@ other transport failures; a cut that persists past them is still the loud `Fetch
 
 ## Reproducing the WARC probe
 
-Read-only, no writes to the corpus, one range request per record, ~14.5 MiB for this corpus. Run from
-anywhere with the project on `sys.path`; point `CORPUS` at the corpus directory.
+Read-only, no writes to the corpus, one range request per record, ~14.5 MiB for this corpus. Run with
+the project on `sys.path`; `CORPUS` follows `FINEPDFS_CORPUS`, so point that at your own corpus.
 
 ```python
-import base64, hashlib, json, urllib.request, zlib
+import base64, hashlib, json, os, urllib.request, zlib
 
-CORPUS = "/home/ubuntu/ingestion-engine/corpus"
+CORPUS = os.environ.get("FINEPDFS_CORPUS", "corpus")
 HDR = b"\r\n\r\n"
 
 def headers(block: bytes) -> dict[str, str]:

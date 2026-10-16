@@ -2,7 +2,7 @@
 
 *Question answered: what exactly is the router's feature vector, what does each feature need from the
 PDF, how much of it do we already compute, what may we legally reuse, and should we build it? Verified
-by reading the upstream clone at `/tmp/upstream-finepdfs` (read-only), parsing the shipped model
+by reading a checkout of the upstream FinePDFs repository (read-only), parsing the shipped model
 binaries, querying the Hugging Face APIs, and running an end-to-end extraction probe on this machine
 with the PyMuPDF that is already installed.*
 
