@@ -149,7 +149,7 @@ the whole crawl.
 
 ~~~~bash
 .venv/bin/python -m pytest              # the default suite: offline, no model and no network
-.venv/bin/python -m pytest -m network   # 4 marked network: two live, two parsers over live-shaped answers
+.venv/bin/python -m pytest -m network   # the tests the default run deselects: they reach live hosts
 ~~~~
 
 ## What is verified, and how

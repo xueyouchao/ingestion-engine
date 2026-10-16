@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 import urllib.error
 from pathlib import Path
@@ -170,14 +171,55 @@ def test_only_the_ollama_key_yields_a_backend() -> None:
     assert backend.url == "https://ollama.com/v1/chat/completions"
 
 
-def test_the_two_axes_use_two_models_overridable_by_variables() -> None:
-    default = review.review_axes({})
+def test_the_axes_are_named_once_in_the_prompt_and_the_code_pairs_them_with_models() -> None:
+    """The prompt's headings are the only spelling of an axis name; the code reads them back."""
+    template = PROMPT_PATH.read_text(encoding="utf-8")
+    default = review.review_axes(template, {})
     assert [(axis.name, axis.model) for axis in default] == [
         ("Standards", "deepseek-v4.1-flash"),
         ("Spec", "glm-5.3-flash"),
     ]
-    overridden = review.review_axes({"REVIEW_MODEL_STANDARDS": "std-x", "REVIEW_MODEL_SPEC": "spec-y"})
+    overridden = review.review_axes(
+        template, {"REVIEW_MODEL_STANDARDS": "std-x", "REVIEW_MODEL_SPEC": "spec-y"}
+    )
     assert [axis.model for axis in overridden] == ["std-x", "spec-y"]
+
+
+def test_renaming_an_axis_in_the_prompt_needs_no_second_edit() -> None:
+    """Rename the heading and the code follows it, so the model is never left without its section."""
+    renamed = PROMPT_PATH.read_text(encoding="utf-8").replace(
+        "## If the axis is Spec", "## If the axis is Conformance"
+    )
+
+    axes = review.review_axes(renamed, {})
+
+    assert [axis.name for axis in axes] == ["Standards", "Conformance"]
+    assert [axis.model for axis in axes] == ["deepseek-v4.1-flash", "glm-5.3-flash"]
+
+
+def test_the_prompt_carries_the_pull_request_body_as_the_statement_of_intent(capsys, tmp_path) -> None:
+    """Spec cannot read the gitignored ticket in CI, so the body must reach the prompt as the intent."""
+    diff = tmp_path / "pr.diff"
+    diff.write_text("diff --git a/x b/x\n+one\n", encoding="utf-8")
+
+    code = review.main(
+        [
+            "--diff",
+            str(diff),
+            "--prompt",
+            str(PROMPT_PATH),
+            "--pr-number",
+            "4",
+            "--body",
+            "the body states the intent",
+            "--print-prompt",
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "BEGIN PULL REQUEST BODY" in out
+    assert "the body states the intent" in out
 
 
 def test_each_axis_is_reviewed_independently_and_labelled_with_its_model(monkeypatch, tmp_path) -> None:
@@ -216,3 +258,39 @@ def test_an_axis_that_fails_still_leaves_the_other_axis_in_the_one_comment(monke
     assert "standards findings" in posted[0]
     assert "text/plain" in posted[0]
     assert "OK" in posted[0]
+
+
+def _gh_recorder(monkeypatch, existing_ids: list[str]):
+    """Capture every ``gh`` call; answer the comment-list request with the given ids."""
+    calls: list[list[str]] = []
+
+    def fake_gh(arguments):
+        calls.append(list(arguments))
+        if arguments[0] == "api" and arguments[1].endswith("/comments"):
+            return subprocess.CompletedProcess(arguments, 0, "".join(f"{identifier}\n" for identifier in existing_ids))
+        return subprocess.CompletedProcess(arguments, 0, "")
+
+    monkeypatch.setattr(review, "_gh", fake_gh)
+    return calls
+
+
+def test_a_later_run_updates_the_existing_comment_instead_of_adding_another(monkeypatch) -> None:
+    """The marker comment's promise: the second run PATCHes it and never opens a second one."""
+    calls = _gh_recorder(monkeypatch, ["6222255138"])
+
+    review.upsert_comment("owner/repo", "4", review.comment_body("## LLM review\n\nsecond run"))
+
+    assert calls[0][:2] == ["api", "repos/owner/repo/issues/4/comments"]
+    assert calls[1][:4] == ["api", "-X", "PATCH", "repos/owner/repo/issues/comments/6222255138"]
+    assert not any(call[0] == "pr" for call in calls)
+
+
+def test_the_first_run_creates_the_comment(monkeypatch) -> None:
+    """With no marker comment yet, the run creates one: the other half of the upsert."""
+    calls = _gh_recorder(monkeypatch, [])
+
+    review.upsert_comment("owner/repo", "4", review.comment_body("## LLM review\n\nfirst run"))
+
+    assert calls[1][0] == "pr"
+    assert calls[1][1] == "comment"
+    assert not any(call[:2] == ["api", "-X"] for call in calls)

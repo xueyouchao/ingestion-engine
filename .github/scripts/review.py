@@ -6,7 +6,9 @@ credentials. It uses only the standard library, and it shells out to ``gh`` to p
 ever appears in this file or in the YAML beyond an environment variable.
 
 The two axes are reviewed by two different models in two independent calls and presented side by
-side in one comment. They are never ranked, merged or averaged into a single verdict.
+side in one comment. They are never ranked, merged or averaged into a single verdict. The prompt
+itself names the axes and carries their instructions; this module reads the names back out of it, so
+the code holds no second spelling that could drift.
 
 The review is a comment, never a gate. Every failure below ends in a short comment (or a quiet
 exit) with status 0, because a model outage must not hold up a merge.
@@ -17,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -27,13 +30,16 @@ from pathlib import Path
 
 MARKER = "<!-- finepdfs-review -->"
 DEFAULT_BASE_URL = "https://ollama.com/v1"
-DEFAULT_STANDARDS_MODEL = "deepseek-v4.1-flash"
-DEFAULT_SPEC_MODEL = "glm-5.3-flash"
+# The models that answer the prompt's axes, in the order the prompt declares them. The axis names
+# themselves live only in the prompt, in its ``## If the axis is <name>`` headings.
+DEFAULT_MODELS = ("deepseek-v4.1-flash", "glm-5.3-flash")
+AXIS_HEADING = re.compile(r"^## If the axis is (?P<name>.+?)\s*$", re.MULTILINE)
 SYSTEM_PROMPT = (
     "You are a precise code reviewer. You follow the repository's own documented standards, "
     "and you answer with one markdown comment."
 )
 MAX_DIFF_CHARS = 60_000
+MAX_BODY_CHARS = 8_000
 MAX_ERROR_BODY_CHARS = 200
 REQUEST_TIMEOUT_SECONDS = 180
 
@@ -96,11 +102,36 @@ def resolve_backend(env: dict[str, str]) -> Backend | None:
     return Backend(f"{base}/chat/completions", api_key)
 
 
-def review_axes(env: dict[str, str]) -> tuple[Axis, Axis]:
-    """The two axes and their models; each id is overridable by a repository variable."""
-    return (
-        Axis("Standards", env.get("REVIEW_MODEL_STANDARDS") or DEFAULT_STANDARDS_MODEL),
-        Axis("Spec", env.get("REVIEW_MODEL_SPEC") or DEFAULT_SPEC_MODEL),
+def axis_names(template: str) -> tuple[str, ...]:
+    """The axis names, read from the prompt's own ``## If the axis is <name>`` headings.
+
+    The prompt is the one place an axis is named, because it also carries that axis's instructions;
+    the code only pairs the names with models. Renaming an axis is then one edit in the prompt, and
+    cannot leave a model with a name the prompt does not instruct.
+    """
+    names = tuple(match.group("name").strip() for match in AXIS_HEADING.finditer(template))
+    if len(names) != len(DEFAULT_MODELS):
+        raise ValueError(
+            f"the prompt names {len(names)} axes under `## If the axis is <name>`; "
+            f"{len(DEFAULT_MODELS)} default models are configured"
+        )
+    return names
+
+
+def _variable_suffix(name: str) -> str:
+    """An axis name as the upper-case suffix of its ``REVIEW_MODEL_`` repository variable."""
+    return re.sub(r"[^A-Z0-9]+", "_", name.upper()).strip("_")
+
+
+def review_axes(template: str, env: dict[str, str]) -> tuple[Axis, ...]:
+    """The axes the prompt declares, each paired with the model that reviews it.
+
+    The prompt's section order fixes the pairing with :data:`DEFAULT_MODELS`; ``REVIEW_MODEL_<AXIS>``
+    overrides one axis's model, so a renamed axis is overridden under its new name.
+    """
+    return tuple(
+        Axis(name, env.get(f"REVIEW_MODEL_{_variable_suffix(name)}") or DEFAULT_MODELS[index])
+        for index, name in enumerate(axis_names(template))
     )
 
 
@@ -243,6 +274,7 @@ def main(argv: list[str] | None = None, opener=None) -> int:
     parser.add_argument("--pr-number", default=os.environ.get("PR_NUMBER", ""))
     parser.add_argument("--base-ref", default=os.environ.get("BASE_REF", ""))
     parser.add_argument("--title", default=os.environ.get("PR_TITLE", ""))
+    parser.add_argument("--body", default=os.environ.get("PR_BODY", ""))
     parser.add_argument(
         "--print-prompt",
         action="store_true",
@@ -252,14 +284,18 @@ def main(argv: list[str] | None = None, opener=None) -> int:
 
     diff_path = Path(args.diff)
     diff = diff_path.read_text(encoding="utf-8", errors="replace") if diff_path.exists() else ""
-    axes = review_axes(os.environ)
+    body = args.body.strip()
+    if len(body) > MAX_BODY_CHARS:
+        body = body[:MAX_BODY_CHARS] + f"\n\n[body truncated at {MAX_BODY_CHARS} characters]"
+    template = Path(args.prompt).read_text(encoding="utf-8")
+    axes = review_axes(template, os.environ)
     context = {
         "REPO": args.repo or "local/repo",
         "PR_NUMBER": args.pr_number or "0",
         "BASE_REF": args.base_ref or "master",
         "PR_TITLE": args.title or "(no title available locally)",
+        "PR_BODY": body or "(no pull request body available)",
     }
-    template = Path(args.prompt).read_text(encoding="utf-8")
     prompts = {axis.name: build_prompt(template, diff, {**context, "AXIS": axis.name}) for axis in axes}
 
     if args.print_prompt:

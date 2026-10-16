@@ -1,8 +1,10 @@
 name: CI
 
-# The blocking gates. Every job here must pass before a change can merge, and every job runs
-# offline on a CPU runner: no network, no model, no GPU. Live-Common-Crawl tests are marked
-# `network` and deselected by pytest.ini's addopts.
+# The blocking gates. Every job here must pass before a change can merge, and every check runs
+# offline on a CPU runner: no model, no GPU, no live Common Crawl. The install step is not offline --
+# `pip install -e '.[dev]'` reaches the package index from PyPI, so a network-isolated runner must
+# still provide one for the install. Live-Common-Crawl tests are marked `network` and deselected by
+# pytest.ini's addopts.
 
 on:
   pull_request:
@@ -29,7 +31,7 @@ jobs:
       - name: Install
         run: pip install -e '.[dev]'
       - name: ruff
-        run: ruff check src tests main.py
+        run: ruff check .
 
   unit:
     name: unit
@@ -44,8 +46,10 @@ jobs:
       - name: pytest
         run: pytest tests -q
 
-  # The end-to-end path, named as its own gate: the in-memory flow plus the CLI. Fakes satisfy
-  # the ports, so it proves the wiring without a model or a network.
+  # The end-to-end path, named as its own gate because an acceptance gate was asked for. It is a
+  # strict subset of the `unit` job -- same runner, same install, `pytest tests -q` already includes
+  # these files -- so it adds no coverage. Its value is the fast, focused signal a named subset
+  # gives, not extra tests.
   acceptance:
     name: acceptance
     runs-on: ubuntu-latest

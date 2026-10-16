@@ -1,10 +1,11 @@
 name: Review
 
-# The review loop: two models read the pull-request diff, one per axis (Standards, Spec), and upsert
+# The review loop: two models read the pull-request diff, one per axis the prompt declares, and upsert
 # one comment with both axes side by side. It is deliberately non-blocking -- no model, no credentials
 # and no comment may ever stop a merge. It needs the OLLAMA_API_KEY repository secret to reach a model;
 # without it the job still comments, saying so and how to set the secret, and exits 0. There is no
-# built-in-credential fallback.
+# built-in-credential fallback. The optional REVIEW_MODEL_<AXIS> variables override one axis's model,
+# where <AXIS> is that axis's name in .github/prompts/review.md.
 
 on:
   pull_request:
@@ -44,6 +45,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
         run: python3 .github/scripts/review.py --diff pr.diff --prompt .github/prompts/review.md

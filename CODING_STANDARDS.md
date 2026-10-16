@@ -32,8 +32,10 @@ that both consume. If two callers need the same answer, factor the answer.
 
 A document records the command that reveals auth, a GPU or a model path, and what the answer means. It
 never states the answer, because the answer changes without the document. The spec asserted the GitHub
-CLI was unauthenticated; it was authenticated, and agents spent real time on a phantom. Write "run
-`gh auth status`" instead (`docs/spec/finepdfs-integration.md`).
+CLI was unauthenticated; it was authenticated, and agents spent real time on a phantom. The rule is the
+shape, not the fact: name the check (`gh auth status`) and what each answer means, and let the reader run
+it. The spec's own sentence is being corrected to that shape on a branch still in flight, so this rule
+does not cite the spec as already fixed.
 
 ## A published record must be reproducible
 
