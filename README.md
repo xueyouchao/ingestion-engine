@@ -178,8 +178,8 @@ nothing was published, so an operator or a CI can tell "engine is down" from "no
 | `FINEPDFS_LANGUAGES` | all | comma-separated allow-list in the codes the chosen adapter emits: `eng,spa` under `fasttext`, `Latn,Grek` under `script` |
 | `FINEPDFS_SIMILARITY_THRESHOLD` | `0.8` | fingerprint similarity above which one document is a near-duplicate of another |
 | `FINEPDFS_GPU_PROVIDER` | `none` | where a GPU engine runs: `none`, `static`, or `command` that rents one |
-| `FINEPDFS_GPU_BASE_URL` / `_MODEL` / `_API_KEY` | -- | with `static`: where the GPU server is |
-| `FINEPDFS_GPU_IDENTITY` | the address | with `static`: the memo name, when the address is not what you want remembered |
+| `FINEPDFS_GPU_BASE_URL` / `_MODEL` / `_API_KEY` | `FINEPDFS_ENGINE_*` | with `static`: where the GPU server is; each falls back to its `FINEPDFS_ENGINE_*` namesake |
+| `FINEPDFS_GPU_IDENTITY` | `static:<model>`, or `static` without a model | with `static`: the memo name, over `FINEPDFS_ENGINE_IDENTITY`; the model names the deployment, never the address (ADR-0007) |
 | `FINEPDFS_GPU_START_COMMAND` | -- | with `command`: starts a worker and prints its endpoint on stdout |
 | `FINEPDFS_GPU_STOP_COMMAND` | -- | with `command`: gives the worker back when the run ends |
 | `FINEPDFS_GPU_TIMEOUT` | `1800` | seconds allowed to start or stop a worker |
