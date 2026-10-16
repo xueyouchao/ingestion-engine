@@ -19,11 +19,28 @@ deduplication is about.
 **Page Text** — the text of a single page, with its 1-based page number, as produced by a text layer or
 an engine.
 
-**Extraction** — turning Document bytes into an Extracted Document (Page Texts plus engine identity).
+**Extraction** — turning Document bytes into an Extracted Document (Page Texts plus Engine Identity).
 Extraction is the expensive step and is memoized.
 
 **Engine** — an adapter that performs Extraction. Four ship: pymupdf (native text layer), docling,
-paddleocr-vl, mineru. An Engine is selected per run; its identity is part of the memo key.
+paddleocr-vl, mineru. An Engine is selected per run; its Engine Identity is part of the memo key.
+
+**Engine Identity** — an engine's name and its detail, and what the memo key remembers about the Engine:
+the name says which Engine ran, the detail names the deployment behind it. A model, page DPI or tool
+version change moves the detail and re-reads the corpus; a rented worker's new address does not
+(ADR-0005, ADR-0007).
+
+**Provider** — what supplies the Endpoint an Engine is reached at, for exactly as long as the run lasts.
+Three ship: none (the offline default), static (a server that already exists) and command (a start
+command that rents a worker, a stop command that gives it back). Modal and RunPod are another Provider
+behind the same seam, and no Engine knows about either (ADR-0007).
+
+**Lease** — the lifetime of a Provider's Endpoint, taken around the run and given back on the way out,
+including when the run fails, because a leaked GPU bills by the hour.
+
+**Endpoint** — where a run reaches its Engine right now: a base URL, a model and an API key. Where the
+bytes go, never who the Engine is: an Endpoint carries the address a rented worker answers at today,
+Engine Identity carries the name that must not move with it (ADR-0007).
 
 **Text Layer Quality** — what the embedded text of a PDF looks like when measured: characters per page,
 fraction of pages carrying text, garbled-character ratio, image-dominated pages.
