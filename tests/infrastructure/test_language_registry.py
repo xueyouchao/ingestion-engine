@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from finepdfs.infrastructure.cocoindex.runtime import runtime_from_environment
+from finepdfs.infrastructure.language.fasttext import LanguageModelUnavailable
 from finepdfs.infrastructure.language.registry import UnknownLanguageMode, build_language_identifier
 from finepdfs.infrastructure.language.script import ScriptLanguageIdentifier
 
@@ -19,8 +20,14 @@ def test_the_script_adapter_is_the_default_and_keeps_the_policy_floor() -> None:
 
 
 def test_asking_for_fasttext_without_a_model_is_an_error_not_a_silent_downgrade() -> None:
-    with pytest.raises(UnknownLanguageMode, match="FINEPDFS_LANGUAGE_MODEL"):
+    with pytest.raises(LanguageModelUnavailable, match="FINEPDFS_LANGUAGE_MODEL"):
         build_language_identifier("fasttext", model_path="")
+
+
+def test_a_known_mode_with_an_unusable_model_names_the_model_not_the_mode() -> None:
+    # A missing setting and a missing file are the same operator problem, so they raise the same error.
+    with pytest.raises(LanguageModelUnavailable, match="no fastText model"):
+        build_language_identifier("fasttext", model_path=MODEL)
 
 
 def test_an_unknown_mode_says_what_the_modes_are() -> None:
