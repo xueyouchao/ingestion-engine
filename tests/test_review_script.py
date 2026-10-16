@@ -72,12 +72,23 @@ def _run(
     env: dict[str, str],
     opener=None,
     diff_text: str | None = None,
+    previous_body: str | None = None,
 ):
     """Drive ``main`` end to end with the comment posting captured instead of reaching GitHub."""
     posted: list[str] = []
-    monkeypatch.setattr(review, "post", lambda repo, number, body: posted.append(body))
+    monkeypatch.setattr(
+        review, "post", lambda repo, number, body, comment_id=None: posted.append(body)
+    )
     # The retry backoff is real seconds; a test that stubs a dropped socket must not sleep through it.
     monkeypatch.setattr(review, "RETRY_BACKOFF_SECONDS", 0.0, raising=False)
+    monkeypatch.setattr(
+        review,
+        "find_comment",
+        lambda repo, number: review.ExistingComment("1", previous_body)
+        if previous_body is not None
+        else None,
+        raising=False,
+    )
     for name in (
         "OLLAMA_API_KEY",
         "LLM_BASE_URL",
@@ -86,6 +97,9 @@ def _run(
         "REVIEW_MODEL_SPEC",
         "LLM_API_KEY",
         "GITHUB_TOKEN",
+        "HEAD_SHA",
+        "GITHUB_SHA",
+        "RUN_URL",
     ):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
@@ -560,14 +574,15 @@ def test_an_axis_that_fails_still_leaves_the_other_axis_in_the_one_comment(monke
     assert "OK" in posted[0]
 
 
-def _gh_recorder(monkeypatch, existing_ids: list[str]):
-    """Capture every ``gh`` call; answer the comment-list request with the given ids."""
+def _gh_recorder(monkeypatch, existing_ids: list[str], existing_body: str = ""):
+    """Capture every ``gh`` call; answer the comment-list request with the given ids and body."""
     calls: list[list[str]] = []
 
     def fake_gh(arguments):
         calls.append(list(arguments))
         if arguments[0] == "api" and arguments[1].endswith("/comments"):
-            return subprocess.CompletedProcess(arguments, 0, "".join(f"{identifier}\n" for identifier in existing_ids))
+            stdout = "".join(json.dumps([int(identifier), existing_body]) + "\n" for identifier in existing_ids)
+            return subprocess.CompletedProcess(arguments, 0, stdout)
         return subprocess.CompletedProcess(arguments, 0, "")
 
     monkeypatch.setattr(review, "_gh", fake_gh)
@@ -681,3 +696,97 @@ def test_a_read_timeout_is_not_retried(monkeypatch, tmp_path) -> None:
     assert calls.count("deepseek-v4.1-flash") == 1
     assert calls.count("glm-5.3-flash") == 1
     assert "read timed out" in posted[0]
+
+
+# --- Ticket 22: the comment is a durable record, not a snapshot of the last run -------------------
+
+
+def _findings_opener(text: str):
+    def open_(_request, timeout=None):
+        answer = {"choices": [{"message": {"content": text}}]}
+        return _Response(json.dumps(answer).encode("utf-8"), content_type="application/json")
+
+    return open_
+
+
+def _dropped_opener(_request, timeout=None):
+    raise urllib.error.URLError(
+        http.client.RemoteDisconnected("Remote end closed connection without response")
+    )
+
+
+def test_findings_survive_a_run_where_every_axis_fails(monkeypatch, tmp_path) -> None:
+    """The most valuable content the loop makes is the least durable: a failed run must keep it."""
+    _, first = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key", "HEAD_SHA": "abc1234def", "RUN_URL": "https://example.test/runs/1"},
+        opener=_findings_opener("the first run's findings"),
+    )
+
+    _, second = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key", "HEAD_SHA": "def5678abc", "RUN_URL": "https://example.test/runs/2"},
+        opener=_dropped_opener,
+        previous_body=first[0],
+    )
+    body = second[0]
+
+    assert "the first run's findings" in body
+    assert "from `abc1234`" in body  # the retained findings name the revision they reviewed
+    assert "def5678" in body  # the failed attempt names the head it reviewed
+    assert "connection closed without response" in body
+    assert body.count(review.MARKER) == 1
+
+
+def test_new_findings_replace_the_retained_ones(monkeypatch, tmp_path) -> None:
+    """A run that does produce findings is the current record: the old ones must go, not pile up."""
+    _, first = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key", "HEAD_SHA": "abc1234def"},
+        opener=_findings_opener("old findings"),
+    )
+
+    _, second = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key", "HEAD_SHA": "def5678abc"},
+        opener=_findings_opener("new findings"),
+        previous_body=first[0],
+    )
+    body = second[0]
+
+    assert "new findings" in body
+    assert "old findings" not in body
+    assert "abc1234" not in body
+
+
+def test_the_revision_stamp_moves_with_the_head(monkeypatch, tmp_path) -> None:
+    """Findings with no revision read as if they were about the new code; they are not."""
+    _, first = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key", "HEAD_SHA": "aaaaaaa111"},
+        opener=_findings_opener("findings"),
+    )
+
+    _, second = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key", "HEAD_SHA": "bbbbbbb222"},
+        opener=_findings_opener("findings"),
+        previous_body=first[0],
+    )
+
+    assert "from `bbbbbbb`" in second[0]
+    assert "aaaaaaa" not in second[0]
+
+
+def test_the_workflow_hands_over_the_head_sha_and_the_run_url() -> None:
+    """The comment can only stamp the revision it reviewed if the workflow tells it which one."""
+    workflow = (REPO_ROOT / ".github" / "workflows" / "review.yml").read_text(encoding="utf-8")
+
+    assert "github.event.pull_request.head.sha" in workflow
+    assert "github.run_id" in workflow

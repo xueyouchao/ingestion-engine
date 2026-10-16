@@ -18,6 +18,10 @@ findings. The classes stay apart -- a read timeout, a connection the server clos
 and an HTTP status are three different things with three different fixes -- because collapsing them
 into one "did not run" told the reader nothing about which was owed. A dropped connection is retried
 with backoff; a read timeout is not, because the call already sat out the socket's own deadline.
+
+The comment is also the record, not a snapshot of the latest run: it names the head it reviewed and
+the run URL, lists every axis's outcome, and when a run finds nothing it keeps the findings already
+posted rather than erasing them, labelling them with the revision they reviewed.
 """
 
 from __future__ import annotations
@@ -82,6 +86,11 @@ OUTCOME_ABANDONED = "abandoned at the stage deadline"
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = 2.0
 RETRYABLE_FAILURES = frozenset({OUTCOME_CONNECTION_CLOSED})
+
+# The findings region inside the one comment, so a later run can keep it instead of replacing the whole
+# body. The revision rides in the opening marker: that is what lets a reader tell stale from current.
+FINDINGS_OPEN = re.compile(r"<!-- finepdfs-findings revision=(?P<revision>[0-9a-fA-F]{7,40}) -->")
+FINDINGS_CLOSE = "<!-- /finepdfs-findings -->"
 
 
 @dataclass(frozen=True, slots=True)
@@ -523,18 +532,82 @@ def comment_body(markdown: str) -> str:
     return f"{MARKER}\n\n{markdown.strip()}\n"
 
 
+@dataclass(frozen=True, slots=True)
+class ExistingComment:
+    """The one comment this workflow owns: the id it is patched by, and the body it already holds."""
+
+    id: str
+    body: str
+
+
+@dataclass(frozen=True, slots=True)
+class RetainedFindings:
+    """Findings kept from an earlier run, and the revision they were written against."""
+
+    revision: str
+    markdown: str
+
+
+def extract_findings(body: str) -> RetainedFindings | None:
+    """The findings region of a previously posted comment, or ``None`` when it holds none.
+
+    The region is delimited by its own markers rather than re-derived from the headings, so a run
+    keeps exactly what the last run found and nothing it said about how the run went.
+    """
+    opening = FINDINGS_OPEN.search(body)
+    if opening is None:
+        return None
+    end = body.find(FINDINGS_CLOSE, opening.end())
+    if end == -1:
+        return None
+    markdown = body[opening.end() : end].strip()
+    if not markdown:
+        return None
+    return RetainedFindings(opening.group("revision"), markdown)
+
+
+def reviewed_revision(env: dict[str, str]) -> str:
+    """The short head SHA this run reviewed; the workflow passes it, and ``GITHUB_SHA`` is a fallback."""
+    raw = (env.get("HEAD_SHA") or env.get("GITHUB_SHA") or "").strip()
+    return raw[:7] if raw else "unknown"
+
+
 def render_comment(
+    revision: str,
+    run_url: str,
     outcomes: list[AxisOutcome],
+    previous_body: str | None = None,
     preamble: str = "",
     note: str = "",
 ) -> str:
-    """The one comment: every axis's outcome for this run, then the findings it produced.
+    """The one comment: this run's per-axis record, then the findings of record.
 
-    The per-axis record is always present, so a run in which no axis answered still says which class
-    each call ended in and how long it took, rather than posting a bare failure note.
+    A run that found something is the current record and replaces the previous findings. A run that
+    found nothing keeps them, names the revision they are from, and still records its own attempt
+    above them -- a failure may not erase a success, and stale findings may not read as current.
     """
     current = [outcome for outcome in outcomes if outcome.findings]
+    retention = ""
+    if current:
+        findings_revision: str | None = revision
+        findings = "\n\n".join(section_body(outcome.axis, outcome.findings or "") for outcome in current)
+    else:
+        retained = extract_findings(previous_body) if previous_body else None
+        if retained is None:
+            findings_revision, findings = None, ""
+        else:
+            findings_revision, findings = retained.revision, retained.markdown
+            retention = (
+                f"The findings below are from `{retained.revision}`; the run above reviewed "
+                f"`{revision}` and produced none of its own, so they are kept rather than erased.\n"
+            )
+
     parts = [MARKER, "", "## LLM review", ""]
+    if run_url:
+        parts.append(f"Reviewed `{revision}` — [the run]({run_url})")
+    else:
+        parts.append(f"Reviewed `{revision}` (no run URL is available here)")
+    parts.append("")
 
     record = [f"- {preamble}"] if preamble else []
     record += [f"- **{o.axis.name}** — `{o.axis.model}` — {o.label}" for o in outcomes]
@@ -542,9 +615,17 @@ def render_comment(
         parts += ["### This run", "", *record, ""]
     if note:
         parts += ["#### What the model did not see", "", note, ""]
-    if current:
-        parts += ["## Findings", ""]
-        parts.append("\n\n".join(section_body(outcome.axis, outcome.findings or "") for outcome in current))
+    if findings_revision:
+        parts += [f"## Findings from `{findings_revision}`", ""]
+        if retention:
+            parts.append(retention)
+        parts += [
+            f"<!-- finepdfs-findings revision={findings_revision} -->",
+            "",
+            findings,
+            "",
+            FINDINGS_CLOSE,
+        ]
     return "\n".join(parts).strip() + "\n"
 
 
@@ -552,28 +633,52 @@ def _gh(arguments: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["gh", *arguments], text=True, capture_output=True, check=True)
 
 
-def find_comment_id(repo: str, number: str) -> str | None:
-    """The id of this workflow's existing comment, if it posted one on an earlier push."""
+def find_comment(repo: str, number: str) -> ExistingComment | None:
+    """The id and body of this workflow's existing comment, if an earlier push posted one.
+
+    One API call carries both, because the body is what decides whether this run may replace the
+    comment or must keep what is there. Each result is a compact JSON ``[id, body]`` on its own line,
+    so a body full of newlines cannot be mistaken for the end of the record.
+    """
     result = _gh(
         [
             "api",
             f"repos/{repo}/issues/{number}/comments",
             "--paginate",
             "--jq",
-            f'.[] | select(.body | contains("{MARKER}")) | .id',
+            f'.[] | select(.body | contains("{MARKER}")) | [.id, .body] | @json',
         ]
     )
-    ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    return ids[-1] if ids else None
+    found: list[ExistingComment] = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            identifier, body = json.loads(line)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            continue
+        found.append(ExistingComment(str(identifier), body if isinstance(body, str) else ""))
+    return found[-1] if found else None
 
 
-def upsert_comment(repo: str, number: str, body: str) -> None:
+def read_comment(repo: str, number: str) -> ExistingComment | None:
+    """The existing comment, or ``None`` when it cannot be read; a failed read must not lose the run."""
+    try:
+        return find_comment(repo, number)
+    except Exception as error:  # Broad on purpose: the review is non-blocking by design.
+        print(f"could not read the existing review comment: {error}", file=sys.stderr)
+        return None
+
+
+def upsert_comment(repo: str, number: str, body: str, comment_id: str | None = None) -> None:
     """Create the review comment, or update the one this workflow posted before."""
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as handle:
         handle.write(body)
         path = handle.name
     try:
-        comment_id = find_comment_id(repo, number)
+        if comment_id is None:
+            existing = find_comment(repo, number)
+            comment_id = existing.id if existing else None
         if comment_id:
             _gh(["api", "-X", "PATCH", f"repos/{repo}/issues/comments/{comment_id}", "-F", f"body=@{path}"])
         else:
@@ -582,14 +687,14 @@ def upsert_comment(repo: str, number: str, body: str) -> None:
         os.unlink(path)
 
 
-def post(repo: str, number: str, body: str) -> None:
+def post(repo: str, number: str, body: str, comment_id: str | None = None) -> None:
     """Post without letting a comment failure fail the job; on a fork the token cannot write at all.
 
     A fork pull request carries no secrets and a read-only token, so a branch of its own would have
     nothing it could post -- the failure belongs here, printed, with the run still exiting 0.
     """
     try:
-        upsert_comment(repo, number, body)
+        upsert_comment(repo, number, body, comment_id)
     except Exception as error:  # Broad on purpose: the review is non-blocking by design.
         print(f"could not post the review comment: {error}", file=sys.stderr)
 
@@ -644,19 +749,28 @@ def main(argv: list[str] | None = None, opener=None) -> int:
         print("GITHUB_REPOSITORY or PR_NUMBER missing; cannot comment", file=sys.stderr)
         return 0
 
-    backend = resolve_backend(os.environ)
+    env = os.environ
+    revision = reviewed_revision(env)
+    run_url = (env.get("RUN_URL") or "").strip()
+    previous = read_comment(args.repo, args.pr_number)
+
+    backend = resolve_backend(env)
     if backend is None:
         post(
             args.repo,
             args.pr_number,
             render_comment(
+                revision,
+                run_url,
                 [],
+                previous.body if previous else None,
                 preamble=(
                     "no model was called: the review needs the `OLLAMA_API_KEY` repository secret; "
                     f"set it with `gh secret set OLLAMA_API_KEY --repo {args.repo}`. This comment is not "
                     "a gate: the pull request can merge on the CI checks alone."
                 ),
             ),
+            previous.id if previous else None,
         )
         return 0
 
@@ -665,7 +779,18 @@ def main(argv: list[str] | None = None, opener=None) -> int:
         if not outcome.findings:
             print(f"{outcome.axis.name} review call: {outcome.label}", file=sys.stderr)
 
-    post(args.repo, args.pr_number, render_comment(outcomes, note=note))
+    post(
+        args.repo,
+        args.pr_number,
+        render_comment(
+            revision,
+            run_url,
+            outcomes,
+            previous.body if previous else None,
+            note=note,
+        ),
+        previous.id if previous else None,
+    )
     return 0
 
 

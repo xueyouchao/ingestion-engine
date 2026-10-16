@@ -56,4 +56,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          # What the comment stamps itself with: the revision it reviewed, and the run that did it.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python3 .github/scripts/review.py --diff pr.diff --prompt .github/prompts/review.md
