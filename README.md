@@ -179,6 +179,5 @@ the whole crawl.
 * `docs/spec/finepdfs-integration.md` -- the specification this was built from
 * `docs/GLOSSARY.md` -- the vocabulary, kept deliberately small
 * `docs/adr/0001..0006` -- the decisions, with the alternatives that lost
-* `.scratch/finepdfs-cocoindex/issues/` -- the tickets the work was sliced into
 * `research/` -- the research behind the design, including `paddleocr-vl-mineru-adapters.md`
 * `research/diagrams/` -- validated architecture diagrams of the FinePDFs pipeline

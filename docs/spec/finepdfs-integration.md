@@ -1,9 +1,10 @@
 # Spec: FinePDFs-style PDF curation on CocoIndex
 
 - **Slug:** finepdfs-cocoindex
-- **Tracker:** local files. No issue tracker is configured for this workspace and the GitHub CLI is
-  not authenticated, so the spec lives here and the tickets live in
-  .scratch/finepdfs-cocoindex/issues/. If a tracker is configured later, publish these as issues.
+- **Tracker:** local files, deliberately outside the repository. No issue tracker is configured for
+  this workspace and the GitHub CLI is not authenticated, so the spec lives here and the ticket slices
+  stay on the author's machine in `.scratch/finepdfs-cocoindex/issues/` (gitignored, never committed).
+  If a tracker is configured later, publish these as issues.
 - **Vocabulary:** docs/GLOSSARY.md. **Decisions of record:** docs/adr/.
 
 ## Problem Statement

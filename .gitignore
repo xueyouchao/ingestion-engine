@@ -17,3 +17,6 @@ __pycache__/
 bench/venv/
 bench/pdf_real/
 bench/md_real/
+
+# Local-only working notes: the PR draft and the ticket slices. Kept on disk on purpose, never committed.
+/.scratch/
