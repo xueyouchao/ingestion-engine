@@ -40,7 +40,13 @@ def parse_pdf_payload(record_bytes: bytes, expected_length: int | None = None) -
     if not record.startswith(b"WARC/"):
         raise WarcParseError("these bytes do not start a WARC record")
 
-    _, record_content = _split_header_block(record)
+    warc_headers, record_content = _split_header_block(record)
+    if warc_headers.get("warc-truncated"):
+        # Common Crawl flags a record it cut short at capture time. The payload can still satisfy its
+        # own Content-Length, so this header is the only witness that the document is partial.
+        raise WarcParseError(
+            f"Common Crawl truncated this record at capture time (WARC-Truncated: {warc_headers['warc-truncated']})"
+        )
     http_headers, body = _split_header_block(record_content)
     body = _http_body(body, http_headers)
 

@@ -23,16 +23,19 @@ def _warc_record(
     content_type: str = "application/pdf",
     content_encoding: str = "",
     content_length: int | None = None,
+    warc_truncated: str = "",
 ) -> bytes:
     """Build one WARC record the way Common Crawl lays it out, for negative cases."""
     encoding_header = f"Content-Encoding: {content_encoding}\r\n" if content_encoding else ""
     length_header = f"Content-Length: {content_length}\r\n" if content_length is not None else ""
+    truncated_header = f"WARC-Truncated: {warc_truncated}\r\n" if warc_truncated else ""
     http_body = gzip.compress(body) if content_encoding == "gzip" else body
     record = (
         b"WARC/1.0\r\n"
         b"WARC-Type: response\r\n"
         b"WARC-Target-URI: https://example.org/doc.pdf\r\n"
         b"Content-Length: %d\r\n" % len(http_body)
+        + truncated_header.encode()
         + b"\r\n"
         + b"HTTP/1.1 200 OK\r\n"
         + f"Content-Type: {content_type}\r\n".encode()
@@ -133,3 +136,13 @@ def test_a_body_shorter_than_its_own_content_length_is_rejected() -> None:
         parse_pdf_payload(record)
 
     assert "payload bytes" in str(raised.value)
+
+
+def test_a_record_common_crawl_marked_truncated_is_rejected() -> None:
+    """Common Crawl records the truncation in the WARC header; a partial document must not pass."""
+    record = _warc_record(b"%PDF-1.7 half a document", warc_truncated="length")
+
+    with pytest.raises(WarcParseError) as raised:
+        parse_pdf_payload(record)
+
+    assert "truncated" in str(raised.value).lower()
