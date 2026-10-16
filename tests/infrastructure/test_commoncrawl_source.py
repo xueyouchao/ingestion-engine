@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import http.client
 import io
+import threading
 import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Self
 
 import pytest
 
@@ -146,3 +151,93 @@ def test_a_200_that_is_not_an_index_answer_is_an_error_not_an_empty_corpus() -> 
         _source(opener).list_records(QUERY)
 
     assert "without a single usable record" in str(raised.value)
+
+
+class _StubHost:
+    """A real HTTP host that answers every request, and can hang up part way through the body it promised.
+
+    ``Content-Length`` always declares the whole body; ``cut_after`` decides how many bytes are actually
+    paid before the connection closes. Reading fewer bytes than promised is what makes the client raise
+    ``http.client.IncompleteRead`` — the failure this file is about. A fake opener raising that exception
+    would prove only that the retry tuple catches the class; a real socket proves the failure mode.
+    """
+
+    def __init__(self, body: bytes, *, cut_after: int | None = None) -> None:
+        self._body = body
+        self._cut_after = cut_after
+        self.requests: list[str] = []
+        host = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                host.requests.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(host._body)))
+                self.end_headers()
+                self.wfile.write(host._body[: host._cut_after])
+                self.wfile.flush()
+                self.close_connection = host._cut_after is not None
+
+            def log_message(self, *_) -> None:
+                pass
+
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self._httpd.server_address[1]}/doc"
+
+    def __enter__(self) -> Self:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_) -> None:
+        self._httpd.shutdown()
+        self._httpd.server_close()
+        self._thread.join(timeout=5)
+
+
+def _to_stub(url: str):
+    """The request the source built, addressed at the stub host instead of the live one."""
+
+    def opener(request, timeout=None):
+        request.full_url = url
+        return urllib.request.urlopen(request, timeout=timeout)
+
+    return opener
+
+
+def test_a_transfer_cut_mid_body_is_retried_rather_than_lost() -> None:
+    """A cut mid-body is a transport failure, so it costs a retry — not the whole document."""
+
+    with _StubHost(b"x" * 64, cut_after=8) as host, pytest.raises(CommonCrawlError) as raised:
+        _source(_to_stub(host.url), attempts=3).list_records(QUERY)
+
+    assert len(host.requests) == 3, "the cut is worth the same three attempts as any other failure"
+    assert isinstance(raised.value.__cause__, http.client.IncompleteRead)
+
+
+def test_a_cut_that_persists_is_a_reason_not_a_partial_document() -> None:
+    """Past the attempts the record fails with a reason; no half-read bytes reach the caller."""
+
+    with _StubHost(b"x" * 64, cut_after=8) as host, pytest.raises(CommonCrawlError) as raised:
+        _source(_to_stub(host.url), attempts=2).fetch(_record())
+
+    assert len(host.requests) == 2
+    assert "could not read" in str(raised.value)
+    assert isinstance(raised.value.__cause__, http.client.IncompleteRead)
+
+
+def test_a_whole_answer_over_a_real_socket_is_read_exactly_once() -> None:
+    """Retrying a cut must not turn a good answer into a retry, nor a retry into a second download."""
+
+    body = (
+        b'{"url": "https://example.com/a.pdf", "filename": "crawl-data/CC-MAIN-2026-39/x.warc.gz", '
+        b'"offset": "100", "length": "51"}\n'
+    )
+    with _StubHost(body) as host:
+        records = _source(_to_stub(host.url), attempts=3).list_records(QUERY)
+
+    assert [record.url for record in records] == ["https://example.com/a.pdf"]
+    assert len(host.requests) == 1

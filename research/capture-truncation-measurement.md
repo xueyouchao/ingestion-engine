@@ -151,12 +151,14 @@ Test first (`tests/infrastructure/test_warc_record.py::test_a_record_common_craw
 red before green: the same record parsed silently before the change. No other code was touched.
 Refetch machinery is out of scope for this pass, as the ticket says.
 
-**Not fixed, found here, worth its own ticket:** while probing, the data host cut *our* transfer of the
+**Found here, fixed by ticket 12:** while probing, the data host cut *our* transfer of the
 first record short — `http.client.IncompleteRead: IncompleteRead(1363221 bytes read, 599744 more
 expected)`. It failed loudly (a `FetchFailure`, no partial document), but it was **not retried**:
-`IncompleteRead` is an `http.client.HTTPException`, not an `OSError`, so it slips past `_read`'s
-`except (urllib.error.URLError, TimeoutError, OSError)`. A transient mid-transfer cut costs a record
+`IncompleteRead` is an `http.client.HTTPException`, not an `OSError`, so it slipped past `_read`'s
+`except (urllib.error.URLError, TimeoutError, OSError)`. A transient mid-transfer cut cost a record
 instead of a retry. That is a yield bug in the fetch path, not a truncation-detection bug.
+`IncompleteRead` now joins that tuple, so a cut is retried with the same attempts and backoff as the
+other transport failures; a cut that persists past them is still the loud `FetchFailure` measured here.
 
 ## Reproducing the WARC probe
 

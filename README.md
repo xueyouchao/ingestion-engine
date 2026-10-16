@@ -185,10 +185,11 @@ the whole crawl.
   here. The WARC parser is checked against a real 15 KB ranged record whose payload length matches the
   `Content-Length` the origin server sent, and against the metadata recorded beside that capture.
 * **Bad answers from the host are errors, not documents**: a host that ignores `Range`, a gzip member
-  that stops in the middle, two members in one answer, a body shorter than its own `Content-Length`, an
-  index answer that is not an index and a permanent client error that must not be retried all have
-  tests. A range that came back wrong, a truncated or missing PDF on disk and a disk that fills up
-  leave the corpus resumable rather than silently different.
+  that stops in the middle, two members in one answer, a body shorter than its own `Content-Length`, a
+  transfer cut mid-body, an index answer that is not an index and a permanent client error that must not
+  be retried all have tests. A cut that persists past the attempts is that record's `FetchFailure` with
+  a reason, never a partial document. A range that came back wrong, a truncated or missing PDF on disk
+  and a disk that fills up leave the corpus resumable rather than silently different.
 * **Model servers**: the PaddleOCR-VL and MinerU HTTP adapters are exercised against a real stub HTTP
   server on localhost, which proves the wire format, the multipart body and the response parsing.
 * **Command-line engines**: Docling, MinerU and PaddleOCR-VL CLI adapters are exercised with a recording

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import time
@@ -90,7 +91,10 @@ class CommonCrawlSource(CrawlSource):
                     logger.warning("giving up on %s: HTTP %s", url, error.code)
                     break
                 logger.warning("attempt %d/%d failed for %s: %s", attempt, self._attempts, url, error)
-            except (urllib.error.URLError, TimeoutError, OSError) as error:
+            except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead) as error:
+                # IncompleteRead derives from HTTPException, not OSError, so it needs naming: a body cut
+                # mid-transfer is a transport failure like the rest, and unhandled it costs a whole
+                # document on the first attempt instead of a retry.
                 last_error = error
                 logger.warning("attempt %d/%d failed for %s: %s", attempt, self._attempts, url, error)
             if attempt < self._attempts:
