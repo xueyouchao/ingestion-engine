@@ -35,11 +35,12 @@ class GpuEndpoint:
 
 
 class GpuProvider(Protocol):
-    """Leases the endpoint an engine is reached at, for exactly as long as the run lasts.
+    """Supplies the endpoint an engine is reached at, for as long as the caller holds the lease.
 
-    The port promises the endpoint, not a GPU. An adapter may rent a GPU, name a server that already
-    exists, or lease nothing at all; each says in its own docstring what it does about the GPU
-    (ADR-0007).
+    The port promises the endpoint, not a GPU and not a lifetime past the lease. An adapter may rent a
+    GPU, name a server that already exists, or rent nothing at all: ``none`` yields an empty endpoint,
+    ``static`` names a server that outlives the run, ``command`` rents a worker and gives it back. Each
+    says in its own docstring what it does about the GPU (ADR-0007).
     """
 
     def lease(self) -> AbstractContextManager[GpuEndpoint]: ...
