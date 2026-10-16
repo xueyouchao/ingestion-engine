@@ -63,13 +63,14 @@ def _opener(body: bytes, status: int = 200, content_type: str = "text/plain"):
     return open_
 
 
-def _run(monkeypatch, tmp_path, *, env: dict[str, str], opener=None):
+def _run(monkeypatch, tmp_path, *, env: dict[str, str], opener=None, diff_text: str | None = None):
     """Drive ``main`` end to end with the comment posting captured instead of reaching GitHub."""
     posted: list[str] = []
     monkeypatch.setattr(review, "post", lambda repo, number, body: posted.append(body))
     for name in (
         "OLLAMA_API_KEY",
         "LLM_BASE_URL",
+        "REVIEW_VARIABLES",
         "REVIEW_MODEL_STANDARDS",
         "REVIEW_MODEL_SPEC",
         "LLM_API_KEY",
@@ -81,12 +82,85 @@ def _run(monkeypatch, tmp_path, *, env: dict[str, str], opener=None):
         monkeypatch.setenv(name, value)
 
     diff = tmp_path / "pr.diff"
-    diff.write_text("diff --git a/x b/x\n+one\n", encoding="utf-8")
+    diff.write_text(diff_text or "diff --git a/x b/x\n+one\n", encoding="utf-8")
     code = review.main(
         ["--diff", str(diff), "--prompt", str(PROMPT_PATH), "--repo", "owner/repo", "--pr-number", "4"],
         opener=opener,
     )
     return code, posted
+
+
+def _diff_chunk(name: str, size: int) -> str:
+    """One file's hunk, exactly ``size`` characters, so a synthetic diff's file offsets are known."""
+    head = f"diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n+"
+    return head + "x" * (size - len(head) - 1) + "\n"
+
+
+def test_a_truncated_diff_cuts_on_a_file_boundary_and_names_the_files_left_out() -> None:
+    """The Spec axis saw 12 of 17 files; the cut must name the rest and never half-read a file."""
+    diff = "".join(_diff_chunk(f"file{index}.py", 400) for index in range(5))
+
+    sliced = review.slice_diff(diff, limit=1200)
+
+    assert sliced.text == diff[:1200]  # three whole files: the fourth boundary is at 1600
+    assert sliced.truncated
+    assert sliced.files_total == 5
+    assert sliced.omitted == ("file3.py", "file4.py")
+    assert sliced.partial is None
+
+
+def test_a_single_file_larger_than_the_limit_is_named_as_shown_in_part() -> None:
+    """When nothing fits whole, say which file is cut rather than leaving the reader to guess."""
+    diff = _diff_chunk("huge.py", 900)
+
+    sliced = review.slice_diff(diff, limit=400)
+
+    assert sliced.text == diff[:400]
+    assert sliced.partial == "huge.py"
+    assert sliced.omitted == ()
+    assert "huge.py" in review.truncation_note(sliced)
+    assert "in part" in review.truncation_note(sliced)
+
+
+def test_a_diff_under_the_cap_gets_no_note() -> None:
+    """A whole diff is not a truncated one; no note means nothing was left out."""
+    diff = _diff_chunk("small.py", 200)
+
+    sliced = review.slice_diff(diff, limit=60_000)
+
+    assert sliced.truncated is False
+    assert review.truncation_note(sliced) == ""
+
+
+def test_a_truncated_diff_names_its_unseen_files_in_the_comment_and_in_the_prompt(monkeypatch, tmp_path) -> None:
+    """A reader, and the model, must both be able to tell what the 120k-character cut left out."""
+    prompts_seen: list[str] = []
+
+    def open_(request, timeout=None):
+        prompts_seen.append(json.loads(request.data)["messages"][1]["content"])
+        answer = {"choices": [{"message": {"content": "findings"}}]}
+        return _Response(json.dumps(answer).encode("utf-8"), content_type="application/json")
+
+    # Twenty equal 9000-character files: boundaries at 0, 9000, ..., 117000, and 117000 <= 120000 < 126000.
+    diff = "".join(_diff_chunk(f"file{index:02d}.py", 9000) for index in range(20))
+    code, posted = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key"},
+        opener=open_,
+        diff_text=diff,
+    )
+
+    assert code == 0
+    assert len(posted) == 1
+    assert "7 of 20 files were not shown" in posted[0]
+    assert "`file13.py`" in posted[0]
+    assert "`file19.py`" in posted[0]
+    assert "`file12.py`" not in posted[0]
+    assert len(prompts_seen) == 2
+    for prompt in prompts_seen:
+        assert "7 of 20 files were not shown" in prompt
+        assert "`file13.py`" in prompt
 
 
 def test_a_plain_text_200_names_the_status_and_the_body_instead_of_raising(monkeypatch, tmp_path) -> None:
