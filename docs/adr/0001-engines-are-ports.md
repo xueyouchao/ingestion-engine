@@ -18,6 +18,17 @@ handed one subprocess runner carrying the configured timeout, so a hung tool is 
 hung request is. Engine selection is configuration, and engine identity is part of the memo key, so
 switching engines re-extracts and changing a downstream rule does not.
 
+*Amended in ticket 08.* This record owns the language seam too, because it is the record of how a
+model-backed component sits behind a port and how its weights reach the host. `LanguageIdentifier`
+ships two adapters: `ScriptLanguageIdentifier`, which needs nothing installed and is the default, and
+`FastTextLanguageIdentifier`, which names the language rather than the script with a downloaded
+`lid.176` model. The model sits behind its own small protocol so the adapter's page logic is tested
+without it, it is reached as a downloaded file (`FINEPDFS_LANGUAGE_MODEL`) behind an optional extra, and
+the two-letter labels it emits are normalised to ISO 639-3 at the adapter, so every adapter answers the
+port's one vocabulary. This reverses the earlier position that no model-backed language adapter ships:
+this environment can run the model, so shipping it is a feature rather than a claim. That reversal
+belongs here, not in the record about OCR routing (ADR-0004), which decides only how a page is routed.
+
 ## Consequences
 
 - The pipeline host needs no GPU and no multi-gigabyte weights.
@@ -25,3 +36,5 @@ switching engines re-extracts and changing a downstream rule does not.
   recorded responses instead.
 - Adding an engine means one adapter module plus one registry entry; the CLI's list of engines is
   `KNOWN_ENGINES` from that registry, so the two cannot drift apart.
+- Language identification shows the pattern generalises: a model-free default, an opt-in model-backed
+  adapter, and a model reached by download rather than vendored, so the base install carries no weights.

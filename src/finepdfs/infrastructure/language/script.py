@@ -3,7 +3,7 @@
 Latn covers English and German alike, so this adapter cannot tell them apart. It is honest about that:
 the confidence is the share of characters in the winning script, and text that belongs to more than
 one script with no clear winner is reported as unknown. A fastText or GlotLID adapter can replace it
-behind the same port when real language naming is needed. See ADR-0004.
+behind the same port when real language naming is needed. See ADR-0001.
 """
 
 from __future__ import annotations

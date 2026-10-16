@@ -22,3 +22,4 @@ port is introduced until there is a model to put behind it.
 - Every routing decision is explainable from the output record, which the trained model also would not
   give for free.
 - Replacing the policy with a model is a contained change.
+- Language identification is a separate seam and is not decided here; see ADR-0001.

@@ -219,6 +219,7 @@ vendored (`FINEPDFS_LANGUAGE_MODEL`), whose library is an optional extra, and wh
 normalised to ISO 639-3 so `eng` means the same thing here as it does in GlotLID. The per-language
 threshold table stays out: with one global confidence floor the decision is still readable, and a
 per-language table is only worth its weight once there are enough languages in the corpus to tune it.
+Recorded in ADR-0001, which owns the language seam.
 
 ## Testing Decisions
 
