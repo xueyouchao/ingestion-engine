@@ -314,6 +314,48 @@ def test_a_failing_start_command_is_a_provider_failure_of_its_own() -> None:
     assert not issubclass(GpuStartFailed, CommandFailed)
 
 
+def test_a_start_command_that_fails_after_launching_gives_the_worker_back() -> None:
+    """A start that exits nonzero can have launched a worker first, so the stop has to run anyway.
+
+    The stop used to be reachable only past a successful start *and* a parsed endpoint, so this exit
+    left the worker billing -- the cost ADR-0007's "released on the failure path" is written to
+    prevent. The parse failure below is the same hole: nothing about "no endpoint" says "no worker".
+    """
+    runner = RecordingRunner(returncode=1)
+    provider = CommandGpuProvider(start_command=START, stop_command=STOP, runner=runner)
+
+    with pytest.raises(GpuStartFailed, match="start command failed"), provider.lease():
+        pass
+
+    assert [call[0] for call in runner.calls] == [START, STOP], "a failed start is still a billable worker"
+
+
+def test_a_start_command_that_prints_no_endpoint_gives_the_worker_back() -> None:
+    runner = RecordingRunner(stdout="nothing useful here")
+    provider = CommandGpuProvider(start_command=START, stop_command=STOP, runner=runner)
+
+    with pytest.raises(GpuStartFailed, match="printed no endpoint"), provider.lease():
+        pass
+
+    assert [call[0] for call in runner.calls] == [START, STOP]
+
+
+def test_a_stop_that_fails_after_a_failed_start_does_not_replace_the_start_error(caplog) -> None:
+    """The start is what the operator has to act on; the leak is reported beside it, not in its place."""
+    runner = RecordingRunner(returncode=1, stop_returncode=1)
+    provider = CommandGpuProvider(start_command=START, stop_command=STOP, runner=runner)
+
+    with (
+        caplog.at_level(logging.ERROR),
+        pytest.raises(GpuStartFailed, match="start command failed"),
+        provider.lease(),
+    ):
+        pass
+
+    assert [call[0] for call in runner.calls] == [START, STOP]
+    assert "billing" in caplog.text
+
+
 def test_a_start_command_that_is_not_installed_is_the_providers_own_failure() -> None:
     """The same shape as a nonzero exit: the runner raises CommandFailed before require_success runs.
 

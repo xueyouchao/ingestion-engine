@@ -148,12 +148,23 @@ class CommandGpuProvider:
     def lease(self) -> Iterator[GpuEndpoint]:
         # The start command is the provider's own, so its failure is "this run cannot start", not an
         # engine failure: wrap it in the error the CLI reports, and keep CommandFailed for engines.
+        #
+        # A start command that fails may still have launched a worker -- it exits nonzero after starting
+        # one, or prints no endpoint -- so the stop command runs before the start failure is reported. A
+        # stop that fails there is noted on the start error rather than replacing it: the failure the
+        # operator has to act on is the start. A command that cannot even be split is not this case: it
+        # never ran, so there is nothing to give back.
         try:
             started = self.runner.run(_argv(self.start_command))
             require_success(started)
+            endpoint = endpoint_from_start_output(started.stdout, self.start_command, self.model)
         except CommandFailed as error:
-            raise GpuStartFailed(f"the GPU start command failed: {error}") from error
-        endpoint = endpoint_from_start_output(started.stdout, self.start_command, self.model)
+            failure = GpuStartFailed(f"the GPU start command failed: {error}")
+            self._release_reporting(failure)
+            raise failure from error
+        except GpuStartFailed as failure:
+            self._release_reporting(failure)
+            raise
         try:
             yield endpoint
         finally:

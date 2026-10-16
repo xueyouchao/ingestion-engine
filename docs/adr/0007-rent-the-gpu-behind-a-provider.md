@@ -56,6 +56,11 @@ A GPU is *leased*, and its address is kept out of the memo key.
   database, which already refuses a second writer.
 * The lease releases on the way out -- on the success path and on the failure path alike -- because a
   leaked GPU bills by the hour.
+* A start command that fails may already have launched a worker -- it exits nonzero after starting one, or
+  prints no endpoint -- so the stop command runs before that failure is reported, exactly as it does after
+  a failed run. A stop that fails at that point is noted on the start error rather than replacing it,
+  because the start is the failure the operator has to act on. A command that could not even be parsed
+  never ran, so there is nothing to give back and no stop is attempted.
 * The stop command's result is checked, not discarded. A stop that fails while the run is already
   failing is reported beside the run's own exception -- logged, and attached to its traceback -- and
   that exception is then re-raised untouched, because the error that ended the run is the one the
