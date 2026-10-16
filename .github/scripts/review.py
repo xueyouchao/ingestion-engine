@@ -90,8 +90,12 @@ RETRYABLE_FAILURES = frozenset({OUTCOME_CONNECTION_CLOSED})
 # The findings region inside the one comment, so a later run can keep it instead of replacing the whole
 # body. The revision rides in the opening marker: that is what lets a reader tell stale from current.
 # The token is any non-space run, not just a hex SHA, so the ``unknown`` stamp written when no revision
-# is available still round-trips instead of silently making the findings unkeepable.
-FINDINGS_OPEN = re.compile(r"<!-- finepdfs-findings revision=(?P<revision>[^\s>]{1,64}) -->")
+# is available still round-trips instead of silently making the findings unkeepable. The pattern is
+# derived from the template the writer uses, so the two spellings cannot drift apart.
+FINDINGS_OPEN_TEMPLATE = "<!-- finepdfs-findings revision={revision} -->"
+FINDINGS_OPEN = re.compile(
+    re.escape(FINDINGS_OPEN_TEMPLATE).replace(r"\{revision\}", r"(?P<revision>[^\s>]{1,64})")
+)
 FINDINGS_CLOSE = "<!-- /finepdfs-findings -->"
 # A comment the old code posted: findings under `### <axis> -- model` headings, no markers. Read back
 # once, at the upgrade, so the first findings-free run afterwards does not erase them. The old code
@@ -163,10 +167,12 @@ class UnusableResponseError(ReviewCallError):
 class AxisOutcome:
     """One axis's call: how it ended, how long it took, and what it found.
 
-    ``status`` is one of the ``OUTCOME_*`` classes and ``detail`` the endpoint's own words where it
-    had any. ``attempts`` is above one only when a dropped connection was retried. The comment
-    renders :attr:`label` for every axis of every run, so a failure is never silent: the reader can
-    tell a slow model from a dropped socket from a refused request.
+    ``status`` is one of the ``OUTCOME_*`` classes. ``detail`` carries the endpoint's own words when it
+    sent any, and otherwise this module's own sentence saying why the class was reached -- an
+    abandonment says so rather than pretending the attempt answered. ``attempts`` is above one only when
+    a dropped connection was retried. The comment renders :attr:`label` for every axis of every run, so
+    a failure is never silent: the reader can tell a slow model from a dropped socket from a refused
+    request.
     """
 
     axis: Axis
@@ -530,7 +536,7 @@ def run_axes(
         outcome = outcomes.get(axis.name)
         if outcome is None:
             known = last_failure.get(axis.name)
-            detail = f"the last attempt ended with: {known.status}" if known else ""
+            detail = f"the last attempt that ended was: {known.status}" if known else ""
             attempts = known.attempts if known else 0
             outcome = AxisOutcome(axis, OUTCOME_ABANDONED, detail, AXIS_RUN_DEADLINE_SECONDS, None, attempts)
         results.append(outcome)
@@ -563,6 +569,11 @@ class RetainedFindings:
     markdown: str
 
 
+def findings_marker(revision: str) -> str:
+    """The opening marker, from the same template the reader parses: one spelling, so they cannot drift."""
+    return FINDINGS_OPEN_TEMPLATE.format(revision=revision)
+
+
 def extract_findings(body: str) -> RetainedFindings | None:
     """The findings region of a previously posted comment, or ``None`` when it holds none.
 
@@ -579,8 +590,11 @@ def extract_findings(body: str) -> RetainedFindings | None:
     """
     opening = FINDINGS_OPEN.search(body)
     if opening is not None:
-        end = body.find(FINDINGS_CLOSE, opening.end())
-        if end == -1:
+        # The last closing marker, not the first: the review prompt asks a model for lines from the
+        # diff, and this branch's own diff contains the closing marker, so findings that quote it must
+        # not have their tail silently cut off.
+        end = body.rfind(FINDINGS_CLOSE)
+        if end <= opening.end():
             return None
         markdown = body[opening.end() : end].strip()
         return RetainedFindings(opening.group("revision"), markdown) if markdown else None
@@ -652,7 +666,7 @@ def render_comment(
         if retention:
             parts.append(retention)
         parts += [
-            f"<!-- finepdfs-findings revision={findings_revision} -->",
+            findings_marker(findings_revision),
             "",
             findings,
             "",

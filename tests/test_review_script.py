@@ -835,7 +835,7 @@ def test_a_findings_free_run_posts_nothing_when_the_comment_cannot_be_read(monke
     assert posted == []
 
 
-def test_a_run_with_findings_still_posts_when_the_old_comment_cannot_be_read(monkeypatch, tmp_path) -> None:
+def test_fresh_findings_are_handed_to_post_when_the_old_comment_cannot_be_read(monkeypatch, tmp_path) -> None:
     """Fresh findings are worth more than the stale ones a failed read could not show, so they are posted.
 
     This pins the rule at the seam this file owns -- what ``main`` hands to ``post``. The second read
@@ -880,7 +880,7 @@ def test_an_axis_abandoned_mid_retry_still_names_the_class_it_reached(monkeypatc
     assert code == 0
     assert elapsed < 3
     assert "abandoned at the stage deadline" in posted[0]
-    assert "the last attempt ended with: connection closed without response" in posted[0]
+    assert "the last attempt that ended was: connection closed without response" in posted[0]
     assert "standards findings" in posted[0]
 
 
@@ -991,3 +991,45 @@ def test_a_pre_marker_body_from_a_failing_run_still_posts_nothing_to_keep(monkey
     assert len(posted) == 1
     assert "did not run" not in posted[0]
     assert "finepdfs-findings revision=" not in posted[0]
+
+
+def test_the_writer_and_the_reader_of_the_findings_marker_cannot_drift() -> None:
+    """One template, two uses: a drift here would make the next findings-free run erase the region."""
+    marker = review.findings_marker("abc1234")
+
+    match = review.FINDINGS_OPEN.search(marker)
+
+    assert match is not None
+    assert match.group("revision") == "abc1234"
+
+
+def test_findings_that_quote_the_closing_marker_are_kept_whole() -> None:
+    """The prompt asks for lines from the diff, and this branch's diff contains the closing marker."""
+    quoted = (
+        f"{review.MARKER}\n\n## LLM review\n\n## Findings from `abc1234`\n\n"
+        f"{review.findings_marker('abc1234')}\n\n"
+        "### Standards — `deepseek-v4.1-flash`\n\n"
+        f"- the comment writes `{review.FINDINGS_CLOSE}` at the end of the region.\n"
+        "- a second finding after the quote, which must not be dropped.\n\n"
+        f"{review.FINDINGS_CLOSE}\n"
+    )
+
+    retained = review.extract_findings(quoted)
+
+    assert retained is not None
+    assert "a second finding after the quote" in retained.markdown
+    assert retained.markdown.endswith("must not be dropped.")
+
+
+def test_an_endpoint_that_never_answered_is_named_unreachable(monkeypatch, tmp_path) -> None:
+    """A refused connection never reached the model, which is a different thing to say than a slow one."""
+
+    def open_(*_args, **_kwargs):
+        raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+
+    code, posted = _run(monkeypatch, tmp_path, env={"OLLAMA_API_KEY": "test-key"}, opener=open_)
+
+    assert code == 0
+    assert "endpoint unreachable" in posted[0]
+    assert "Connection refused" in posted[0]
+    assert "read timed out" not in posted[0]
