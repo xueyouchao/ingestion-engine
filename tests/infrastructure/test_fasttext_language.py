@@ -29,19 +29,31 @@ GERMAN = (
     "und die daraus entstehenden Reparaturkosten für die betroffenen Behörden. " * 2
 )
 
-# The two-letter labels lid.176 actually emits, read from the model's own label set (123 of its 176
-# labels; the other 53 are already three letters). It is fixed for this model, so it is the durable,
-# model-free guard on the map below: a missing translation fails here with no model and no network.
-LID_176_TWO_LETTER_LABELS = frozenset({
-    "af", "am", "an", "ar", "as", "av", "az", "ba", "be", "bg", "bh", "bn", "bo", "br", "bs", "ca",
-    "ce", "co", "cs", "cv", "cy", "da", "de", "dv", "el", "en", "eo", "es", "et", "eu", "fa", "fi",
-    "fr", "fy", "ga", "gd", "gl", "gn", "gu", "gv", "he", "hi", "hr", "ht", "hu", "hy", "ia", "id",
-    "ie", "io", "is", "it", "ja", "jv", "ka", "kk", "km", "kn", "ko", "ku", "kv", "kw", "ky", "la",
-    "lb", "li", "lo", "lt", "lv", "mg", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne", "nl", "nn",
-    "no", "oc", "or", "os", "pa", "pl", "ps", "pt", "qu", "rm", "ro", "ru", "sa", "sc", "sd", "sh",
-    "si", "sk", "sl", "so", "sq", "sr", "su", "sv", "sw", "ta", "te", "tg", "th", "tk", "tl", "tr",
-    "tt", "ug", "uk", "ur", "uz", "vi", "vo", "wa", "yi", "yo", "zh",
-})
+# The two-letter labels lid.176 actually emits (123 of its 176 labels; the other 53 are already three
+# letters), each with the code it stands for. The codes are read off the ISO 639 code tables
+# (iso639-3.sil.org), independently of the map under test -- a comparison against a copy of the map's
+# own keys cannot catch a translation that later points at the wrong language, which is the failure this
+# pins. `bh` is the one label with no ISO 639-3 code: ISO 639-1 retired it in 2021, and `bih` is a
+# collective (ISO 639-2/639-5) rather than an individual language, the code the CommonLID normalisation
+# table uses for the label.
+LID_176_AS_ISO_639_3: dict[str, str] = {
+    "af": "afr", "am": "amh", "an": "arg", "ar": "ara", "as": "asm", "av": "ava", "az": "aze", "ba": "bak",
+    "be": "bel", "bg": "bul", "bh": "bih", "bn": "ben", "bo": "bod", "br": "bre", "bs": "bos", "ca": "cat",
+    "ce": "che", "co": "cos", "cs": "ces", "cv": "chv", "cy": "cym", "da": "dan", "de": "deu", "dv": "div",
+    "el": "ell", "en": "eng", "eo": "epo", "es": "spa", "et": "est", "eu": "eus", "fa": "fas", "fi": "fin",
+    "fr": "fra", "fy": "fry", "ga": "gle", "gd": "gla", "gl": "glg", "gn": "grn", "gu": "guj", "gv": "glv",
+    "he": "heb", "hi": "hin", "hr": "hrv", "ht": "hat", "hu": "hun", "hy": "hye", "ia": "ina", "id": "ind",
+    "ie": "ile", "io": "ido", "is": "isl", "it": "ita", "ja": "jpn", "jv": "jav", "ka": "kat", "kk": "kaz",
+    "km": "khm", "kn": "kan", "ko": "kor", "ku": "kur", "kv": "kom", "kw": "cor", "ky": "kir", "la": "lat",
+    "lb": "ltz", "li": "lim", "lo": "lao", "lt": "lit", "lv": "lav", "mg": "mlg", "mk": "mkd", "ml": "mal",
+    "mn": "mon", "mr": "mar", "ms": "msa", "mt": "mlt", "my": "mya", "ne": "nep", "nl": "nld", "nn": "nno",
+    "no": "nor", "oc": "oci", "or": "ori", "os": "oss", "pa": "pan", "pl": "pol", "ps": "pus", "pt": "por",
+    "qu": "que", "rm": "roh", "ro": "ron", "ru": "rus", "sa": "san", "sc": "srd", "sd": "snd", "sh": "hbs",
+    "si": "sin", "sk": "slk", "sl": "slv", "so": "som", "sq": "sqi", "sr": "srp", "su": "sun", "sv": "swe",
+    "sw": "swa", "ta": "tam", "te": "tel", "tg": "tgk", "th": "tha", "tk": "tuk", "tl": "tgl", "tr": "tur",
+    "tt": "tat", "ug": "uig", "uk": "ukr", "ur": "urd", "uz": "uzb", "vi": "vie", "vo": "vol", "wa": "wln",
+    "yi": "yid", "yo": "yor", "zh": "zho",
+}
 
 
 class FixedLabeller:
@@ -183,9 +195,10 @@ def test_a_model_file_that_is_not_there_is_an_error_that_says_where_to_put_it() 
         FastTextModel("/nonexistent/models/lid.176.ftz")
 
 
-def test_the_map_covers_every_two_letter_label_lid_176_can_emit() -> None:
-    # Equality, not just coverage: an entry that is not a real label is as wrong as a missing one.
-    assert set(ISO_639_3_BY_LID_LABEL) == LID_176_TWO_LETTER_LABELS
+def test_the_map_translates_every_two_letter_label_lid_176_can_emit_and_nothing_else() -> None:
+    # Equality of the whole mapping, not just its keys: an entry that is not a real label is as wrong as
+    # a missing one, and a value that points at the wrong language is wrong too.
+    assert ISO_639_3_BY_LID_LABEL == LID_176_AS_ISO_639_3
 
 
 @pytest.mark.model

@@ -22,8 +22,10 @@ LANGUAGE_PREFIX = "__label__"
 # lid.176 answers in whatever code its training data used, which for the well-covered languages is the
 # two-letter ISO 639-1 code: `en`, `de`, `fr`. An operator's allow-list and GlotLID both use ISO 639-3
 # (`eng`, `deu`, `fra`), and a corpus whose field mixes `en` with `eng` cannot be filtered at all, so the
-# two-letter labels are normalised here. Taken from the ISO 639-3 code table (iso639-3.sil.org); labels
-# that are already three letters pass through untouched.
+# two-letter labels are normalised here. The values are the ISO 639-3 code each label stands for, from
+# the ISO 639 code tables (iso639-3.sil.org); labels that are already three letters pass through
+# untouched. `bh` is the one exception: ISO 639-1 retired it in 2021 and it has no ISO 639-3 code, so it
+# carries `bih`, the collective (ISO 639-2/639-5) that the CommonLID normalisation table uses for it.
 ISO_639_3_BY_LID_LABEL: dict[str, str] = {"af": "afr", "am": "amh", "an": "arg", "ar": "ara", "as": "asm",
     "av": "ava", "az": "aze", "ba": "bak", "be": "bel", "bg": "bul", "bh": "bih", "bn": "ben", "bo": "bod",
     "br": "bre", "bs": "bos", "ca": "cat", "ce": "che", "co": "cos", "cs": "ces", "cv": "chv", "cy": "cym", "da": "dan",
