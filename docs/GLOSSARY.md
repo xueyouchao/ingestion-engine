@@ -48,12 +48,14 @@ for being below the confidence threshold.
 **Similarity Fingerprint** — the MinHash signature that decides near duplication.
 
 **Deduplication** — deciding that a Document is an exact duplicate, a near duplicate (with a
-similarity score and the document it matches), or unique.
+similarity score and the document it matches), or unique. Near-duplicates are grouped transitively:
+a chain in which each link is similar to the next is one group, and the smallest URL in a group is the
+keeper (ADR-0006).
 
 **Publish Policy** — whether a Document is published, dropped, or excluded, and why.
 
 **Published Document** — a Document that passed routing, cleaning, language and dedup, and is written
-out as markdown plus one JSONL record.
+out as markdown plus one JSON record.
 
 **Exclusion** — a Document recorded as dropped or failed, with its reason, so nothing disappears
 silently.

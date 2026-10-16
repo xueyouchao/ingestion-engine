@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from finepdfs.domain.crawl import CrawlQuery
@@ -47,7 +48,13 @@ def fetch_corpus(
     corpus_dir: Path,
     manifest_name: str = MANIFEST_NAME,
 ) -> FetchReport:
-    """Fetch every record of a query that is not in the corpus yet."""
+    """Fetch every record of a query that is not in the corpus yet.
+
+    Resumable in the way that matters. A record counts as present only when its bytes are on disk at
+    the size the manifest claims, so a half-written file is fetched again; the manifest is
+    checkpointed after every stored record, so a crash keeps what was already fetched; and a record
+    that cannot be fetched or stored is that record's problem rather than the run's.
+    """
     manifest_path = corpus_dir / manifest_name
     manifest = CorpusManifest.load(manifest_path)
     if not manifest.entries:
@@ -55,12 +62,13 @@ def fetch_corpus(
         manifest.domain = query.domain
 
     records = list(source.list_records(query))
-    already_have = manifest.urls
+    stored_by_url = {entry.url: entry for entry in manifest.entries}
     fetched = skipped = failed = 0
     failures: list[FetchFailure] = []
 
     for record in records:
-        if record.url in already_have:
+        existing = stored_by_url.get(record.url)
+        if existing is not None and _is_stored(corpus_dir, existing):
             skipped += 1
             continue
         try:
@@ -72,23 +80,30 @@ def fetch_corpus(
             continue
 
         digest = content_digest(payload)
-        target = pdf_path(corpus_dir, digest)
-        if not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(payload)
-        manifest.add(
-            CorpusEntry(
-                url=record.url,
-                digest=digest,
-                file=relative_pdf_path(digest),
-                bytes=len(payload),
-                crawl_id=record.crawl_id,
-                warc_filename=record.warc_filename,
-                offset=record.offset,
-                length=record.length,
-            )
+        try:
+            _store(corpus_dir, digest, payload)
+        except OSError as error:  # a full disk is one record's problem too
+            logger.warning("could not store %s: %s", record.url, error)
+            failures.append(FetchFailure(url=record.url, reason=str(error)))
+            failed += 1
+            continue
+
+        entry = CorpusEntry(
+            url=record.url,
+            digest=digest,
+            file=relative_pdf_path(digest),
+            bytes=len(payload),
+            crawl_id=record.crawl_id,
+            warc_filename=record.warc_filename,
+            offset=record.offset,
+            length=record.length,
         )
-        already_have.add(record.url)
+        if existing is None:
+            manifest.add(entry)
+        else:
+            manifest.replace(existing, entry)
+        stored_by_url[record.url] = entry
+        manifest.save(manifest_path)
         fetched += 1
 
     manifest.save(manifest_path)
@@ -99,3 +114,20 @@ def fetch_corpus(
         failed=failed,
         failures=tuple(failures),
     )
+
+
+def _is_stored(corpus_dir: Path, entry: CorpusEntry) -> bool:
+    """An entry counts as present only if its bytes are on disk at the size the manifest promises."""
+    try:
+        return pdf_path(corpus_dir, entry.digest).stat().st_size == entry.bytes
+    except OSError:
+        return False
+
+
+def _store(corpus_dir: Path, digest: str, payload: bytes) -> None:
+    """Write the bytes under their digest, atomically, so a crash cannot leave half a PDF behind."""
+    target = pdf_path(corpus_dir, digest)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".pdf.tmp")
+    temporary.write_bytes(payload)
+    os.replace(temporary, target)

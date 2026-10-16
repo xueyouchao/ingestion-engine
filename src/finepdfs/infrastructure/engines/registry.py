@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from finepdfs.domain.ports import OcrEngine
-from finepdfs.infrastructure.engines.pdf_document import PdfDocument
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextEngine
+from finepdfs.infrastructure.engines.subprocess_support import SubprocessRunner
 
 NATIVE_ENGINE = "pymupdf"
 DOCLING_ENGINE = "docling"
@@ -34,21 +34,6 @@ class EngineConfig:
     work_dir: Path | None = None
 
 
-class PageRenderer:
-    """Renders a PDF page to PNG so a vision model can read it."""
-
-    def __init__(self, dpi: int = 200) -> None:
-        self._dpi = dpi
-
-    @property
-    def dpi(self) -> int:
-        return self._dpi
-
-    def render(self, document_bytes: bytes, page_number: int) -> bytes:
-        with PdfDocument(document_bytes) as pdf:
-            return pdf.render_page_png(page_number, dpi=self._dpi)
-
-
 def build_engine(config: EngineConfig) -> OcrEngine:
     """One engine, whichever kind it is. Imported lazily so unused engines cost nothing."""
     if config.name == NATIVE_ENGINE:
@@ -56,9 +41,21 @@ def build_engine(config: EngineConfig) -> OcrEngine:
     if config.name == DOCLING_ENGINE:
         from finepdfs.infrastructure.engines.docling_engine import DoclingEngine
 
-        return DoclingEngine(command=config.command or "docling", work_dir=config.work_dir)
+        return DoclingEngine(
+            command=config.command or "docling",
+            work_dir=config.work_dir,
+            runner=SubprocessRunner(config.timeout_seconds),
+        )
     if config.name == PADDLEOCR_VL_ENGINE:
-        from finepdfs.infrastructure.engines.paddleocr_vl import PaddleOcrVlEngine
+        from finepdfs.infrastructure.engines.paddleocr_vl import PaddleOcrVlCliEngine, PaddleOcrVlEngine
+
+        if config.command:
+            return PaddleOcrVlCliEngine(
+                command=config.command,
+                work_dir=config.work_dir,
+                dpi=config.page_dpi,
+                runner=SubprocessRunner(config.timeout_seconds),
+            )
         from finepdfs.infrastructure.engines.vlm_chat import ChatEndpoint, VlmChatTransport
 
         endpoint = ChatEndpoint(
@@ -67,7 +64,7 @@ def build_engine(config: EngineConfig) -> OcrEngine:
             api_key=config.api_key,
             timeout_seconds=config.timeout_seconds,
         )
-        return PaddleOcrVlEngine(transport=VlmChatTransport(endpoint), renderer=PageRenderer(config.page_dpi))
+        return PaddleOcrVlEngine(transport=VlmChatTransport(endpoint), dpi=config.page_dpi)
     if config.name == MINERU_ENGINE:
         from finepdfs.infrastructure.engines.mineru import MineruEngine, MineruHttpBackend, MineruSubprocessBackend
 
@@ -79,7 +76,7 @@ def build_engine(config: EngineConfig) -> OcrEngine:
             backend = MineruSubprocessBackend(
                 command=config.command or "mineru",
                 work_dir=config.work_dir,
-                timeout_seconds=config.timeout_seconds,
+                runner=SubprocessRunner(config.timeout_seconds),
             )
         return MineruEngine(backend=backend)
     raise UnknownEngine(f"unknown engine {config.name!r}; known engines are {', '.join(KNOWN_ENGINES)}")

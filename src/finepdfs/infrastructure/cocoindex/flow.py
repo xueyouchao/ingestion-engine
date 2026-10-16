@@ -24,9 +24,10 @@ from finepdfs.domain.dedup import (
     exact_duplicate_keepers,
     plan_deduplication,
 )
-from finepdfs.domain.document import Document, ExtractedDocument
+from finepdfs.domain.document import Document, ExtractedDocument, content_digest
 from finepdfs.infrastructure.cocoindex.runtime import Runtime, runtime_from_environment
 from finepdfs.infrastructure.corpus.index import CorpusDocument
+from finepdfs.infrastructure.corpus.manifest import pdf_path
 from finepdfs.infrastructure.publishing.disk import DUPLICATES_REPORT, KEPT_REPORT, PublishedCorpus
 
 logger = logging.getLogger(__name__)
@@ -50,16 +51,30 @@ def active_runtime() -> Runtime:
 def coco_lifespan(builder: coco.EnvironmentBuilder):
     """Where the database lives, and how this run is wired."""
     builder.settings.db_path = pathlib.Path(os.environ.get("FINEPDFS_DB", "cocoindex.db"))
-    configure_runtime(runtime_from_environment())
+    if _app_runtime is None:
+        # A caller that configured a runtime itself (a dry run, a test) keeps it.
+        configure_runtime(runtime_from_environment())
     yield
     configure_runtime(None)
 
 
 @coco.fn(memo=True)
-async def extract_with_engine(pdf_path: pathlib.Path, engine_name: str) -> ExtractedDocument:
-    """Read one document with one engine. Memoised on exactly those two things (ADR-0005)."""
+async def extract_with_engine(digest: str, engine_name: str, engine_identity: str) -> ExtractedDocument:
+    """Read one document with one engine.
+
+    Memoised on the content digest, the engine name and the engine identity, and on nothing else: not
+    on where the corpus happens to live, so moving a corpus re-reads nothing (ADR-0003), and not on
+    where the document came from. The identity is an argument for the key's sake alone -- a different
+    model, base URL, page DPI or tool version changes it, so memoised text cannot outlive the engine
+    that produced it (ADR-0005). The bytes are checked against the digest they are named after, so a
+    file that no longer holds what its name says fails visibly instead of serving stale text.
+    """
     runtime = active_runtime()
-    document = Document(name=str(pdf_path), content=pdf_path.read_bytes())
+    path = pdf_path(runtime.corpus_dir, digest)
+    content = path.read_bytes()
+    if content_digest(content) != digest:
+        raise ValueError(f"{path} does not hold the bytes its digest names")
+    document = Document(name=str(path), content=content)
     return runtime.extraction.extract_with(document, engine_name)
 
 
@@ -90,12 +105,17 @@ async def read_document(request: ReadingRequest) -> DocumentReading:
         return DocumentReading(document=document, exact_duplicate_of=request.keeper)
     runtime = active_runtime()
     try:
-        plan = runtime.extraction.route(document.path.read_bytes())
+        content = document.path.read_bytes()
+        if content_digest(content) != document.digest:
+            raise ValueError(f"{document.path} does not hold the bytes its digest names")
+        plan = runtime.extraction.route(content)
+        engine = runtime.engines[plan.engine_name]
         extracted = await coco.use_mount(
             coco.component_subpath("extract", document.key),
             extract_with_engine,
-            document.path,
+            document.digest,
             plan.engine_name,
+            str(engine.identity),
         )
     except Exception as error:  # one unreadable document must not end the run
         logger.warning("could not read %s: %s", document.url, error)

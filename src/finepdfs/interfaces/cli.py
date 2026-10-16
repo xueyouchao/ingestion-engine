@@ -16,6 +16,7 @@ from finepdfs.infrastructure.commoncrawl.source import CommonCrawlSource
 from finepdfs.infrastructure.corpus.fetch import fetch_corpus
 from finepdfs.infrastructure.corpus.index import CorpusIndex
 from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifest
+from finepdfs.infrastructure.engines.registry import KNOWN_ENGINES
 from finepdfs.infrastructure.publishing.disk import PublishedCorpus
 
 DEFAULT_CORPUS = Path("corpus")
@@ -60,29 +61,40 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_engine_arguments(parser: argparse.ArgumentParser, *, out: bool) -> None:
-    parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
+    # Every flag suppresses its own default on purpose: a flag that was not typed must not appear in
+    # the namespace, or _runtime_from_args would export a default over the FINEPDFS_* the user set.
+    parser.add_argument("--corpus", type=Path, default=argparse.SUPPRESS)
     if out:
-        parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+        parser.add_argument("--out", type=Path, default=argparse.SUPPRESS)
+        parser.add_argument(
+            "--allow-empty",
+            action="store_true",
+            help="publish an empty target state on purpose; without this, a run refuses to delete every output",
+        )
     parser.add_argument(
         "--engine",
-        default="pymupdf",
-        choices=["pymupdf", "docling", "paddleocr-vl", "mineru"],
+        default=argparse.SUPPRESS,
+        choices=list(KNOWN_ENGINES),
         help="the engine that reads documents whose text layer is unusable",
     )
-    parser.add_argument("--base-url", default="", help="OpenAI-compatible model server, for paddleocr-vl and mineru")
-    parser.add_argument("--model", default="", help="model name to ask the server for")
-    parser.add_argument("--api-key", default="", help="bearer token for the model server")
+    parser.add_argument(
+        "--base-url", default=argparse.SUPPRESS, help="OpenAI-compatible model server, for paddleocr-vl and mineru"
+    )
+    parser.add_argument("--model", default=argparse.SUPPRESS, help="model name to ask the server for")
+    parser.add_argument("--api-key", default=argparse.SUPPRESS, help="bearer token for the model server")
     parser.add_argument(
         "--engine-command",
         dest="engine_command",
-        default="",
-        help="local command, for docling and mineru",
+        default=argparse.SUPPRESS,
+        help="local command, for docling, mineru and paddleocr-vl",
     )
-    parser.add_argument("--dpi", type=int, default=200, help="resolution used to render pages for a vision model")
+    parser.add_argument(
+        "--dpi", type=int, default=argparse.SUPPRESS, help="resolution used to render pages for a vision model"
+    )
     parser.add_argument(
         "--similarity-threshold",
         type=float,
-        default=0.8,
+        default=argparse.SUPPRESS,
         help="fingerprint similarity above which one document is a near-duplicate of another",
     )
 
@@ -102,12 +114,13 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _fetch_corpus(args: argparse.Namespace) -> int:
+    corpus_dir = _runtime_from_args(args).corpus_dir
     source = CommonCrawlSource()
     crawl_id = args.crawl or source.latest_crawl_id()
     query = CrawlQuery(crawl_id=crawl_id, domain=args.domain, limit=args.limit)
-    print(f"fetching up to {args.limit} PDFs for {args.domain} from {crawl_id} into {args.corpus}")
+    print(f"fetching up to {args.limit} PDFs for {args.domain} from {crawl_id} into {corpus_dir}")
 
-    report = fetch_corpus(source, query, args.corpus)
+    report = fetch_corpus(source, query, corpus_dir)
 
     print(report.summary())
     for failure in report.failures[:5]:
@@ -116,14 +129,15 @@ def _fetch_corpus(args: argparse.Namespace) -> int:
 
 
 def _inspect(args: argparse.Namespace) -> int:
-    manifest_path = args.corpus / MANIFEST_NAME
+    corpus_dir = _runtime_from_args(args).corpus_dir
+    manifest_path = corpus_dir / MANIFEST_NAME
     manifest = CorpusManifest.load(manifest_path)
     if not manifest.entries:
-        print(f"no corpus at {args.corpus} (looked for {manifest_path})", file=sys.stderr)
+        print(f"no corpus at {corpus_dir} (looked for {manifest_path})", file=sys.stderr)
         return 2
 
     total_bytes = sum(entry.bytes for entry in manifest.entries)
-    print(f"corpus: {args.corpus}")
+    print(f"corpus: {corpus_dir}")
     print(f"  crawl: {manifest.crawl_id}  domain: {manifest.domain}")
     print(f"  documents: {len(manifest.entries)}  distinct content: {len(manifest.digests)}")
     print(f"  bytes: {total_bytes}  mean: {total_bytes // max(len(manifest.entries), 1)}")
@@ -145,10 +159,10 @@ def _runtime_from_args(args: argparse.Namespace) -> Runtime:
 
 def _dry_run(args: argparse.Namespace) -> int:
     runtime = _runtime_from_args(args)
-    index = CorpusIndex(args.corpus)
+    index = CorpusIndex(runtime.corpus_dir)
     documents = index.documents()
     if not documents:
-        print(f"no corpus at {args.corpus}", file=sys.stderr)
+        print(f"no corpus at {runtime.corpus_dir}", file=sys.stderr)
         return 2
 
     keepers = exact_duplicate_keepers({document.url: document.digest for document in documents})
@@ -167,7 +181,7 @@ def _dry_run(args: argparse.Namespace) -> int:
             for document, outcome in curated.values()
             if outcome.published
         ],
-        similarity_threshold=args.similarity_threshold,
+        similarity_threshold=runtime.similarity_threshold,
     )
     near_duplicate = {decision.url: decision for decision in plan.duplicates if decision.kind == "near"}
 
@@ -216,15 +230,26 @@ def _run(args: argparse.Namespace) -> int:
 
     from finepdfs.infrastructure.cocoindex.flow import build_app
 
-    _runtime_from_args(args)
+    runtime = _runtime_from_args(args)
+    documents = CorpusIndex(runtime.corpus_dir).documents()
+    if not documents and not getattr(args, "allow_empty", False):
+        print(f"no corpus at {runtime.corpus_dir}: refusing to run", file=sys.stderr)
+        print("  an empty corpus is an empty target state, so every published file would be deleted", file=sys.stderr)
+        print("  fetch one with finepdfs fetch-corpus, or pass --allow-empty to mean it", file=sys.stderr)
+        return 2
+
     with coco.runtime():
         build_app().update_blocking(report_to_stdout=True)
 
-    published = PublishedCorpus(args.out)
+    published = PublishedCorpus(runtime.out_dir)
     records = published.read_records()
     exclusions = published.read_exclusions()
-    print(f"recorded {len(records)} published documents and {len(exclusions)} exclusions under {args.out}")
-    return 0
+    failed = sum(1 for exclusion in exclusions if exclusion.get("kind") == "failed")
+    print(
+        f"recorded {len(records)} published documents, {failed} failed documents and "
+        f"{len(exclusions) - failed} other exclusions under {runtime.out_dir}"
+    )
+    return 1 if exclusions and not records else 0
 
 
 if __name__ == "__main__":

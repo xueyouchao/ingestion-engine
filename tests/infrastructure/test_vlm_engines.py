@@ -32,7 +32,6 @@ from finepdfs.infrastructure.engines.paddleocr_vl import (
     page_from_paddle_result,
     pages_from_paddle_output,
 )
-from finepdfs.infrastructure.engines.registry import PageRenderer
 from finepdfs.infrastructure.engines.subprocess_support import CommandResult
 from finepdfs.infrastructure.engines.vlm_chat import (
     ChatEndpoint,
@@ -119,7 +118,7 @@ def test_paddleocr_vl_reads_every_page_through_a_chat_endpoint(paddle_server) ->
     )
     engine = PaddleOcrVlEngine(
         transport=VlmChatTransport(ChatEndpoint(base_url=server.base_url + "/v1", model="PaddleOCR-VL-1.6")),
-        renderer=PageRenderer(dpi=72),
+        dpi=72,
     )
     try:
         extracted = engine.extract(Document(name="https://a.example/two.pdf", content=_two_page_pdf()))
@@ -145,7 +144,7 @@ def test_paddleocr_vl_reports_a_server_that_answers_without_content() -> None:
     server = StubModelServer({"error": "the model is not loaded"})
     engine = PaddleOcrVlEngine(
         transport=VlmChatTransport(ChatEndpoint(base_url=server.base_url + "/v1", model="m")),
-        renderer=PageRenderer(dpi=72),
+        dpi=72,
     )
     try:
         with pytest.raises(VlmTransportError) as raised:
@@ -302,3 +301,50 @@ def test_strip_model_preamble_removes_an_echoed_prompt_and_code_fences() -> None
     assert strip_model_preamble("OCR:\nreal text", "OCR:") == "real text"
     assert strip_model_preamble("```markdown\nreal text\n```", "OCR:") == "real text"
     assert strip_model_preamble("real text", "OCR:") == "real text"
+
+
+@pytest.mark.parametrize("content", [None, 12345, {"text": "body"}, ["body", 7], [{"text": 7}], []])
+def test_paddleocr_vl_refuses_answer_content_that_is_not_text(content) -> None:
+    """str() around whatever arrived would turn an error or a tool call into a page saying "None"."""
+    server = StubModelServer({"choices": [{"message": {"content": content}}]})
+    engine = PaddleOcrVlEngine(
+        transport=VlmChatTransport(ChatEndpoint(base_url=server.base_url + "/v1", model="m")),
+        dpi=72,
+    )
+    try:
+        with pytest.raises(VlmTransportError) as raised:
+            engine.extract(Document(name="x", content=_two_page_pdf()))
+    finally:
+        server.stop()
+
+    assert "not text" in str(raised.value)
+
+
+def test_paddleocr_vl_reads_content_parts_when_the_server_sends_them() -> None:
+    server = StubModelServer(
+        {"choices": [{"message": {"content": [{"text": "part one "}, {"text": "part two"}]}}]}
+    )
+    engine = PaddleOcrVlEngine(
+        transport=VlmChatTransport(ChatEndpoint(base_url=server.base_url + "/v1", model="m")),
+        dpi=72,
+    )
+    try:
+        extracted = engine.extract(Document(name="x", content=_two_page_pdf()))
+    finally:
+        server.stop()
+
+    assert extracted.pages[0].text == "part one part two"
+
+
+def test_the_mineru_multipart_filename_cannot_break_out_of_its_part() -> None:
+    """The manifest is user-controlled, so a name with a quote or a newline must not split the body."""
+    server = StubModelServer({"results": {"document.pdf": {"content_list": []}}})
+    backend = MineruHttpBackend(base_url=server.base_url)
+    try:
+        backend.content_list(Document(name='ev"il\r\nX-Injected: 1', content=b"%PDF-1.7 fake"))
+    finally:
+        server.stop()
+
+    body = server.requests[0]["body"]
+    assert body.count(b'name="files"') == 1
+    assert b'filename="ev_il__X-Injected: 1"' in body

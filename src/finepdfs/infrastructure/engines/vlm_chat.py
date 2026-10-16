@@ -60,9 +60,6 @@ class VlmChatTransport:
             ]
         )
 
-    def complete(self, prompt: str) -> str:
-        return self._post(messages=[{"role": "user", "content": prompt}])
-
     def _post(self, messages: list[dict]) -> str:
         body = json.dumps({"model": self._endpoint.model, "temperature": 0, "messages": messages}).encode("utf-8")
         headers = {"Content-Type": "application/json"}
@@ -84,9 +81,16 @@ def _first_message_content(payload: dict, endpoint: ChatEndpoint) -> str:
         raise VlmTransportError(
             f"{endpoint.chat_completions_url()} answered without message content: {payload}"
         ) from error
-    if isinstance(content, list):  # some servers answer with content parts
-        return "".join(part.get("text", "") for part in content if isinstance(part, dict))
-    return str(content)
+    if isinstance(content, str):
+        return content
+    if (
+        isinstance(content, list)  # some servers answer with content parts
+        and content
+        and all(isinstance(part, dict) and isinstance(part.get("text"), str) for part in content)
+    ):
+        return "".join(part["text"] for part in content)
+    # Anything else is an error or a tool call, never page text: str() would turn None into a page.
+    raise VlmTransportError(f"{endpoint.chat_completions_url()} answered with content that is not text: {content!r}")
 
 
 def strip_model_preamble(text: str, prompt: str) -> str:

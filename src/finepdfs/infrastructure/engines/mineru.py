@@ -9,6 +9,7 @@ format is the same either way.
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import urllib.error
 import urllib.request
@@ -89,7 +90,6 @@ class MineruSubprocessBackend:
 
     command: str = "mineru"
     work_dir: Path | None = None
-    timeout_seconds: float = 1800.0
     runner: CommandRunner = field(default_factory=SubprocessRunner)
 
     def describe(self) -> str:
@@ -165,7 +165,7 @@ def _multipart_body(document: Document) -> tuple[bytes, str]:
         parts.append(
             f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
         )
-    filename = document.name or "document.pdf"
+    filename = re.sub(r'[\r\n"]', "_", document.name or "document.pdf")
     parts.append(
         f'--{boundary}\r\nContent-Disposition: form-data; name="files"; filename="{filename}"\r\n'
         "Content-Type: application/pdf\r\n\r\n".encode()

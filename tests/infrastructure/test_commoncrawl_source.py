@@ -76,3 +76,73 @@ def test_a_range_request_asks_for_exactly_the_record_it_wants() -> None:
     assert seen["range"] == "bytes=100-150"
     assert seen["url"] == "https://data.commoncrawl.org/crawl-data/x.warc.gz"
     assert "finepdfs" in seen["agent"]
+
+
+class _Response(io.BytesIO):
+    """A stand-in for urllib's response, carrying the status and headers the adapter inspects."""
+
+    def __init__(self, body: bytes, status: int = 206, headers: dict | None = None) -> None:
+        super().__init__(body)
+        self.status = status
+        self.headers = headers or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+def _record():
+    from finepdfs.domain.crawl import CrawlRecord
+
+    return CrawlRecord(
+        url="https://example.com/doc.pdf",
+        crawl_id="CC-MAIN-2026-39",
+        warc_filename="crawl-data/CC-MAIN-2026-39/segments/x/warc/y.warc.gz",
+        offset=100,
+        length=51,
+    )
+
+
+def test_a_host_that_ignores_range_is_an_error_not_a_different_document() -> None:
+    def opener(request, timeout=None):
+        return _Response(b"the whole shard, not the range that was asked for", status=200)
+
+    with pytest.raises(CommonCrawlError) as raised:
+        _source(opener).fetch(_record())
+
+    assert "ignored the Range" in str(raised.value)
+
+
+def test_a_content_range_that_does_not_match_the_request_is_an_error() -> None:
+    def opener(request, timeout=None):
+        return _Response(b"x" * 10, status=206, headers={"Content-Range": "bytes 0-9/19355"})
+
+    with pytest.raises(CommonCrawlError) as raised:
+        _source(opener).fetch(_record())
+
+    assert "Content-Range" in str(raised.value)
+
+
+def test_a_permanent_client_error_is_not_retried() -> None:
+    calls = []
+
+    def opener(request, timeout=None):
+        calls.append(request.full_url)
+        raise _http_error(400, b"<html>bad filter</html>")
+
+    with pytest.raises(CommonCrawlError):
+        _source(opener, attempts=3).list_records(QUERY)
+
+    assert len(calls) == 1, "a 400 will still be a 400 in three seconds"
+
+
+def test_a_200_that_is_not_an_index_answer_is_an_error_not_an_empty_corpus() -> None:
+    def opener(request, timeout=None):
+        return _Response(b"<html><body>503 backend unavailable</body></html>", status=200)
+
+    with pytest.raises(CommonCrawlError) as raised:
+        _source(opener).list_records(QUERY)
+
+    assert "without a single usable record" in str(raised.value)

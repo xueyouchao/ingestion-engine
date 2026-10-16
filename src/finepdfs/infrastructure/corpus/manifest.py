@@ -33,7 +33,7 @@ class CorpusManifest:
     entries: list[CorpusEntry] = field(default_factory=list)
 
     @classmethod
-    def load(cls, path: Path) -> "CorpusManifest":
+    def load(cls, path: Path) -> CorpusManifest:
         if not path.exists():
             return cls()
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -46,7 +46,9 @@ class CorpusManifest:
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"crawl_id": self.crawl_id, "domain": self.domain, "entries": [asdict(e) for e in self.entries]}
-        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
 
     @property
     def urls(self) -> set[str]:
@@ -58,6 +60,10 @@ class CorpusManifest:
 
     def add(self, entry: CorpusEntry) -> None:
         self.entries.append(entry)
+
+    def replace(self, existing: CorpusEntry, entry: CorpusEntry) -> None:
+        """Update the entry of a URL whose file had to be fetched again."""
+        self.entries[self.entries.index(existing)] = entry
 
 
 def pdf_path(corpus_dir: Path, digest: str) -> Path:

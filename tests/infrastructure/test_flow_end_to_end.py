@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -105,7 +106,7 @@ def corpus(tmp_path) -> Path:
 
 def _run(monkeypatch, tmp_path: Path, runtime: Runtime, name: str) -> None:
     monkeypatch.setenv("FINEPDFS_DB", str(tmp_path / f"{name}.db"))
-    monkeypatch.setattr(flow, "runtime_from_environment", lambda *_: runtime)
+    flow.configure_runtime(runtime)
 
     async def update() -> None:
         async with coco.runtime():
@@ -298,7 +299,7 @@ def test_a_near_duplicate_is_excluded_and_stays_excluded(monkeypatch, tmp_path) 
     engine = NamedEngine(
         {
             len(body_a): pages,
-            len(body_b): pages[:2] + (pages[2] + "\nAnnex: the instruments went back to the depot.",),
+            len(body_b): (*pages[:2], pages[2] + "\nAnnex: the instruments went back to the depot."),
         }
     )
     runtime = Runtime(
@@ -329,3 +330,68 @@ def test_a_near_duplicate_is_excluded_and_stays_excluded(monkeypatch, tmp_path) 
     assert engine.calls == 2, "one call per document, and none on the second run"
     assert not (out_dir / "docs" / f"{document_key(NEAR)}.md").exists(), "a re-run must not resurrect it"
     assert _exclusion(out_dir, NEAR)["kind"] == "near-duplicate"
+
+
+def test_a_corpus_file_that_no_longer_matches_its_digest_fails(monkeypatch, tmp_path) -> None:
+    """Bytes swapped under a digest-named file must be a failure, not the old extraction again."""
+    corpus_dir = tmp_path / "corpus"
+    _write_corpus(corpus_dir)
+    out_dir = tmp_path / "out"
+    _run(monkeypatch, tmp_path, _runtime(corpus_dir, out_dir), "first")
+    assert _record(out_dir, ONE)["url"] == ONE
+
+    manifest = CorpusManifest.load(corpus_dir / "manifest.json")
+    digest = next(entry.digest for entry in manifest.entries if entry.url == ONE)
+    (corpus_dir / relative_pdf_path(digest)).write_bytes(b"%PDF-1.5 overwritten with other bytes")
+    _run(monkeypatch, tmp_path, _runtime(corpus_dir, out_dir), "first")
+
+    exclusion = _exclusion(out_dir, ONE)
+    assert exclusion["kind"] == "failed"
+    assert "digest" in exclusion["reason"]
+    assert not (out_dir / "docs" / f"{document_key(ONE)}.md").exists()
+
+
+def test_moving_the_corpus_does_not_send_anything_through_the_engine_again(monkeypatch, tmp_path) -> None:
+    """The expensive memo is keyed on the content, not on where the corpus happens to live (ADR-0003)."""
+    first_dir = tmp_path / "corpus-one"
+    _write_corpus(first_dir)
+    out_dir = tmp_path / "out"
+    engine = CountingEngine("paddleocr-vl", (PageText(number=1, text="page text from the engine"),))
+    policy = CurationPolicy(engine_name="paddleocr-vl")
+    runtime = _runtime(first_dir, out_dir, policy=policy, probe=ScanningProbe(), engines={"paddleocr-vl": engine})
+    _run(monkeypatch, tmp_path, runtime, "runs")
+    calls = engine.calls
+    assert calls > 0
+
+    moved_dir = tmp_path / "corpus-two"
+    shutil.copytree(first_dir, moved_dir)
+    moved = _runtime(moved_dir, out_dir, policy=policy, probe=ScanningProbe(), engines={"paddleocr-vl": engine})
+    _run(monkeypatch, tmp_path, moved, "runs")
+
+    assert engine.calls == calls
+
+
+def test_changing_the_engine_identity_re_extracts_even_though_the_name_is_the_same(monkeypatch, tmp_path) -> None:
+    """A different --model changes the identity, and the memo key has to see it or the switch is ignored."""
+    corpus_dir = tmp_path / "corpus"
+    _write_corpus(corpus_dir)
+    out_dir = tmp_path / "out"
+    policy = CurationPolicy(engine_name="paddleocr-vl")
+
+    first = CountingEngine("paddleocr-vl", (PageText(number=1, text="page text"),), detail="model-a")
+    _run(
+        monkeypatch,
+        tmp_path,
+        _runtime(corpus_dir, out_dir, policy=policy, probe=ScanningProbe(), engines={"paddleocr-vl": first}),
+        "runs",
+    )
+    second = CountingEngine("paddleocr-vl", (PageText(number=1, text="page text"),), detail="model-b")
+    _run(
+        monkeypatch,
+        tmp_path,
+        _runtime(corpus_dir, out_dir, policy=policy, probe=ScanningProbe(), engines={"paddleocr-vl": second}),
+        "runs",
+    )
+
+    assert first.calls > 0
+    assert second.calls > 0, "the model switch must not be served from the previous memo entry"

@@ -37,7 +37,7 @@ The CocoIndex CLI works too, because the pipeline *is* a CocoIndex app:
 2. **Route** -- measure the embedded text layer (characters per page, page coverage, garbled share,
    image-dominated pages) and decide whether to trust it (ADR-0004).
 3. **Extract** -- read it with PyMuPDF's text layer, or with the configured engine: Docling, PaddleOCR-VL
-   or MinerU. This is the expensive step, and it is memoised on *document + engine* (ADR-0003, ADR-0005).
+   or MinerU. This is the expensive step, and it is memoised on *content digest + engine identity* (ADR-0003, ADR-0005).
 4. **Clean** -- different rules for native text and for OCR text: running titles, page numbers, repeated
    table headers, hyphenated line breaks.
 5. **Language** -- per-page language, then a document language; pages that disagree are dropped.
@@ -73,7 +73,7 @@ Seams you can replace without touching the pipeline:
 |---|---|---|
 | `pymupdf` | in process | free, instant, only reads text the PDF already has (AGPL-3.0, so check your use) |
 | `docling` | `--engine-command docling` | local CLI, MIT; document-level Markdown, page markers honoured when written |
-| `paddleocr-vl` | `--base-url http://host:8000/v1 --model PaddleOCR-VL-1.6` | Apache-2.0; one rendered page per request, prompt `OCR:` |
+| `paddleocr-vl` | `--base-url http://host:8000/v1 --model PaddleOCR-VL-1.6`, or `--engine-command paddleocr` | Apache-2.0; one rendered page per request, prompt `OCR:` |
 | `mineru` | `--base-url http://host:8000` (multipart `/file_parse`) or `--engine-command mineru` | MinerU2.5-Pro weights are Apache-2.0; the package carries its own licence |
 
 Serve a model the way its own documentation says, then point the CLI at it:
@@ -89,7 +89,11 @@ vllm serve opendatalab/MinerU2.5-Pro-2605-1.2B --logits-processors mineru_vl_uti
 ## Configuration
 
 Every run is configured by environment variables, because `cocoindex update main.py` takes no
-arguments of its own. The CLI flags above simply set them.
+arguments of its own. The CLI flags above set them, and a flag that is not given leaves its variable
+alone: an environment-only setup survives `finepdfs run` with no flags. `run` refuses to start on an
+empty corpus (exit 2), because an empty corpus is an empty target state and target state deletes every
+file it no longer declares; `--allow-empty` is how to mean it. `run` exits 1 when documents failed and
+nothing was published, so an operator or a CI can tell "engine is down" from "nothing to do".
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -100,9 +104,10 @@ arguments of its own. The CLI flags above simply set them.
 | `FINEPDFS_ENGINE_BASE_URL` | -- | OpenAI-compatible `/v1` server, or MinerU's base URL |
 | `FINEPDFS_ENGINE_MODEL` | -- | model name to ask the server for |
 | `FINEPDFS_ENGINE_API_KEY` | -- | bearer token for the server |
-| `FINEPDFS_ENGINE_COMMAND` | -- | local command for Docling or MinerU |
+| `FINEPDFS_ENGINE_COMMAND` | -- | local command for Docling, MinerU or PaddleOCR-VL |
+| `FINEPDFS_ENGINE_WORK_DIR` | a fresh temporary directory | where a command-line engine may keep scratch files |
 | `FINEPDFS_ENGINE_DPI` | `200` | page render resolution for vision models |
-| `FINEPDFS_ENGINE_TIMEOUT` | `300` | seconds per model request |
+| `FINEPDFS_ENGINE_TIMEOUT` | `300` | seconds per model request, and per command-line engine run |
 | `FINEPDFS_MIN_CHARACTERS_PER_PAGE` | `200` | routing floor |
 | `FINEPDFS_MIN_TEXT_COVERAGE` | `0.5` | routing floor |
 | `FINEPDFS_MAX_GARBLED_RATIO` | `0.05` | routing ceiling |
@@ -143,8 +148,8 @@ the whole crawl.
 ## Tests
 
 ~~~~bash
-.venv/bin/python -m pytest              # 94 tests, no network
-.venv/bin/python -m pytest -m network   # 4 more against the live Common Crawl (deselected above)
+.venv/bin/python -m pytest              # 132 tests, no network
+.venv/bin/python -m pytest -m network   # 4 marked network: two live, two parsers over live-shaped answers
 ~~~~
 
 ## What is verified, and how
@@ -152,7 +157,12 @@ the whole crawl.
 * **Real Common Crawl data**: the corpus fetch (12 PDFs, `CC-MAIN-2026-39`), the incremental flow (12
   documents published; the second run reported `12 unchanged`), the dedup pass, and the CLI, all run
   here. The WARC parser is checked against a real 15 KB ranged record whose payload length matches the
-  `Content-Length` the origin server sent.
+  `Content-Length` the origin server sent, and against the metadata recorded beside that capture.
+* **Bad answers from the host are errors, not documents**: a host that ignores `Range`, a gzip member
+  that stops in the middle, two members in one answer, a body shorter than its own `Content-Length`, an
+  index answer that is not an index and a permanent client error that must not be retried all have
+  tests. A range that came back wrong, a truncated or missing PDF on disk and a disk that fills up
+  leave the corpus resumable rather than silently different.
 * **Model servers**: the PaddleOCR-VL and MinerU HTTP adapters are exercised against a real stub HTTP
   server on localhost, which proves the wire format, the multipart body and the response parsing.
 * **Command-line engines**: Docling, MinerU and PaddleOCR-VL CLI adapters are exercised with a recording

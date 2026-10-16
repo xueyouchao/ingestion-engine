@@ -80,17 +80,30 @@ def near_duplicate_groups(
     signatures_by_url: Mapping[str, Sequence[int]],
     threshold: float = 0.8,
 ) -> list[list[str]]:
-    """Group URLs whose fingerprints are at least this similar, comparing in URL order."""
-    groups: list[tuple[str, list[str]]] = []
+    """Group URLs whose fingerprints are at least this similar.
+
+    A candidate is compared against every member of a group rather than only its first, and a candidate
+    that is close to two groups joins them. Comparing against the leader alone lets a chain leak: with
+    A~B and B~C but not A~C, dropping B as a duplicate of A would leave C in the corpus even though it
+    duplicates the document that was just removed (ADR-0006).
+    """
+    groups: list[list[str]] = []
     for url in sorted(signatures_by_url):
         signature = signatures_by_url[url]
-        for leader, members in groups:
-            if jaccard_estimate(signature, signatures_by_url[leader]) >= threshold:
-                members.append(url)
-                break
-        else:
-            groups.append((url, [url]))
-    return [members for _, members in groups if len(members) > 1]
+        joined = [
+            group
+            for group in groups
+            if any(jaccard_estimate(signature, signatures_by_url[member]) >= threshold for member in group)
+        ]
+        if not joined:
+            groups.append([url])
+            continue
+        merged = [url]
+        for group in joined:
+            merged.extend(group)
+            groups.remove(group)
+        groups.append(sorted(merged))
+    return [group for group in groups if len(group) > 1]
 
 
 @dataclass(frozen=True, slots=True)

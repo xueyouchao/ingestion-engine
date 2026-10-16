@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 
 from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
+from finepdfs.infrastructure.corpus import fetch as fetch_module
 from finepdfs.infrastructure.corpus.fetch import fetch_corpus
 from finepdfs.infrastructure.corpus.manifest import CorpusManifest
 
@@ -122,3 +123,51 @@ def test_an_empty_query_result_is_reported_not_silently_ignored(tmp_path):
 
     assert report.fetched == 0 and report.failed == 0
     assert report.records_seen == 0
+
+
+def test_a_truncated_pdf_on_disk_is_fetched_again(tmp_path):
+    """What a crash between open and close leaves behind must not be trusted forever."""
+    source = FakeCrawlSource([_record("https://a.example/one.pdf")], {"https://a.example/one.pdf": PDF_ONE})
+    fetch_corpus(source, _query(), corpus_dir=tmp_path)
+    stored = next((tmp_path / "pdfs").iterdir())
+    stored.write_bytes(stored.read_bytes()[:5])
+
+    report = fetch_corpus(source, _query(), corpus_dir=tmp_path)
+
+    assert report.fetched == 1 and report.skipped == 0
+    assert stored.read_bytes() == PDF_ONE
+
+
+def test_a_pdf_deleted_from_disk_is_fetched_again(tmp_path):
+    source = FakeCrawlSource([_record("https://a.example/one.pdf")], {"https://a.example/one.pdf": PDF_ONE})
+    fetch_corpus(source, _query(), corpus_dir=tmp_path)
+    for stored in (tmp_path / "pdfs").iterdir():
+        stored.unlink()
+
+    report = fetch_corpus(source, _query(), corpus_dir=tmp_path)
+
+    assert report.fetched == 1 and report.skipped == 0
+    assert len(list((tmp_path / "pdfs").iterdir())) == 1
+
+
+def test_a_disk_that_fills_up_is_one_record_s_problem(tmp_path, monkeypatch):
+    records = [_record("https://a.example/one.pdf"), _record("https://a.example/two.pdf")]
+    source = FakeCrawlSource(
+        records,
+        {"https://a.example/one.pdf": PDF_ONE, "https://a.example/two.pdf": PDF_TWO},
+    )
+    real_store = fetch_module._store
+
+    def failing_store(corpus_dir, digest, payload):
+        if payload == PDF_TWO:
+            raise OSError("No space left on device")
+        real_store(corpus_dir, digest, payload)
+
+    monkeypatch.setattr(fetch_module, "_store", failing_store)
+
+    report = fetch_corpus(source, _query(), corpus_dir=tmp_path)
+
+    assert report.fetched == 1 and report.failed == 1
+    assert "No space left" in report.failures[0].reason
+    manifest = CorpusManifest.load(tmp_path / "manifest.json")
+    assert [entry.url for entry in manifest.entries] == ["https://a.example/one.pdf"]

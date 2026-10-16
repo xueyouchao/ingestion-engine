@@ -12,7 +12,6 @@ from pathlib import Path
 
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText
 from finepdfs.infrastructure.engines.pdf_document import PdfDocument
-from finepdfs.infrastructure.engines.registry import PageRenderer
 from finepdfs.infrastructure.engines.subprocess_support import CommandRunner, SubprocessRunner, require_success
 from finepdfs.infrastructure.engines.vlm_chat import VlmChatTransport, strip_model_preamble
 
@@ -28,9 +27,9 @@ class PaddleOcrError(RuntimeError):
 class PaddleOcrVlEngine:
     """Reads every page through a PaddleOCR-VL server that speaks the OpenAI chat protocol."""
 
-    def __init__(self, transport: VlmChatTransport, renderer: PageRenderer, detail: str = "") -> None:
+    def __init__(self, transport: VlmChatTransport, dpi: int = 200, detail: str = "") -> None:
         self._transport = transport
-        self._renderer = renderer
+        self._dpi = dpi
         self._identity = EngineIdentity(name="paddleocr-vl", detail=detail or transport.endpoint.describe())
 
     @property
@@ -41,7 +40,7 @@ class PaddleOcrVlEngine:
         pages: list[PageText] = []
         with PdfDocument(document.content) as pdf:
             for page_number in range(1, pdf.page_count + 1):
-                image = pdf.render_page_png(page_number, dpi=self._renderer.dpi)
+                image = pdf.render_page_png(page_number, dpi=self._dpi)
                 answer = self._transport.complete_with_page_image(OCR_PROMPT, image)
                 pages.append(PageText(number=page_number, text=strip_model_preamble(answer, OCR_PROMPT)))
         return ExtractedDocument(pages=tuple(pages), engine=self._identity)

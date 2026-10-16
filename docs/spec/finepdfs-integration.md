@@ -160,8 +160,11 @@ shared one. What all four engines do share: a page renderer for vision models, a
 runner (no shell, bounded time, captured output, clear error when the tool is missing) for the three
 CLI-capable engines.
 
-**Engine identity is part of the memo key.** Extraction is memoized on the PDF digest *and* the engine
-identity, so switching engines re-extracts and changing a downstream rule does not.
+**Engine identity is part of the memo key.** Extraction is memoized on the PDF content digest *and* the
+engine identity, so switching engines -- or the model, endpoint, page DPI or tool version behind one --
+re-extracts, moving or renaming the corpus re-reads nothing, and changing a downstream rule re-runs only
+the cheap half. The digest is checked against the bytes on disk, so a file that no longer holds what its
+name says fails visibly instead of serving stale text.
 
 **CocoIndex wiring.** One component per document, mounted with mount_each over a keyed iterable of
 crawl records, with a stable key derived from the document URL. Expensive extraction uses memo=True.
@@ -225,6 +228,9 @@ that test was wrong.
    marked): outputs exist, re-running reprocesses nothing, adding a file processes one, deleting a file
    removes its outputs. It catches wiring, memoization and target-state bugs. It does not isolate the
    cause of a failure.
+The flow seam injects its runtime through the documented `configure_runtime` seam and does not patch an
+internal function.
+
 3. *Adapter contract seam* — the two pure protocol mappings (WARC record bytes to PDF payload; a VLM
    JSON response to pages) tested against recorded fixtures. It catches protocol drift without a live
    service. It does not test the network, retries or engine quality.

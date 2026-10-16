@@ -58,8 +58,13 @@ def test_the_native_engine_returns_one_page_of_text_per_pdf_page(real_pdf_bytes)
     assert extracted.engine.name == "pymupdf"
 
 
-def test_the_native_engine_identity_carries_its_version_so_upgrades_invalidate_memos() -> None:
-    assert PymupdfTextEngine().identity.detail == pymupdf_version()
+def test_the_native_engine_identity_is_reproducible_and_carries_the_version() -> None:
+    """The identity is what the memo key holds, so it must be reproducible and carry the version."""
+    identity = PymupdfTextEngine().identity
+
+    assert identity == PymupdfTextEngine().identity
+    assert identity.name == "pymupdf"
+    assert pymupdf_version() in identity.detail
 
 
 def test_a_page_that_is_only_an_image_is_measured_as_image_dominated() -> None:

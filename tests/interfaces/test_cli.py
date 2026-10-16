@@ -53,3 +53,47 @@ def test_an_unknown_engine_is_rejected() -> None:
 def test_fetch_corpus_needs_a_domain() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["fetch-corpus"])
+
+
+def test_a_flag_that_was_not_given_leaves_the_environment_alone(monkeypatch) -> None:
+    """The documented env-only setup must survive a run that passes no flags at all."""
+    import os
+
+    from finepdfs.interfaces import cli
+
+    monkeypatch.setenv("FINEPDFS_OUT", "/data/out")
+    monkeypatch.setenv("FINEPDFS_ENGINE", "paddleocr-vl")
+    monkeypatch.setenv("FINEPDFS_SIMILARITY_THRESHOLD", "0.5")
+    monkeypatch.setattr(cli, "runtime_from_environment", lambda: "a runtime")
+
+    cli._runtime_from_args(build_parser().parse_args(["run"]))
+
+    assert os.environ["FINEPDFS_OUT"] == "/data/out"
+    assert os.environ["FINEPDFS_ENGINE"] == "paddleocr-vl"
+    assert os.environ["FINEPDFS_SIMILARITY_THRESHOLD"] == "0.5"
+
+
+def test_a_run_over_an_empty_corpus_refuses_to_delete_every_output(tmp_path, capsys) -> None:
+    """An empty corpus is an empty target state, and target state deletes what it no longer declares."""
+    from finepdfs.interfaces import cli
+
+    args = build_parser().parse_args(
+        ["run", "--corpus", str(tmp_path / "nothing"), "--out", str(tmp_path / "out")]
+    )
+
+    assert cli._run(args) == 2
+
+    assert "refusing" in capsys.readouterr().err
+
+
+def test_the_empty_corpus_case_can_be_meant_on_purpose() -> None:
+    args = build_parser().parse_args(["run", "--allow-empty"])
+
+    assert args.allow_empty is True
+
+
+def test_out_comes_from_the_runtime_so_the_environment_can_set_it() -> None:
+    args = build_parser().parse_args(["run", "--out", "somewhere"])
+
+    assert args.out.name == "somewhere"
+    assert not hasattr(build_parser().parse_args(["run"]), "out"), "an untyped flag must not appear at all"

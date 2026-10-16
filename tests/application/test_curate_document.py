@@ -125,13 +125,18 @@ def test_the_record_describes_the_document_and_the_routing() -> None:
     assert "healthy" in record.routing_reason
 
 
-def test_every_page_is_offered_to_the_language_identifier() -> None:
-    languages = FakeLanguage()
-    use_case, _ = _use_case(HEALTHY, {NATIVE_TEXT_ENGINE: FakeEngine(NATIVE_TEXT_ENGINE, _documents_pages())}, languages=languages)
+def test_a_page_the_identifier_is_unsure_about_drops_the_document_with_a_reason() -> None:
+    """What matters is the outcome, not the bookkeeping: a page without a language is not published."""
+    use_case, _ = _use_case(
+        HEALTHY,
+        {NATIVE_TEXT_ENGINE: FakeEngine(NATIVE_TEXT_ENGINE, _documents_pages())},
+        languages=FakeLanguage(language="eng", confidence=0.1),
+    )
 
-    use_case.run(Document(name="https://a.example/one.pdf", content=b"%PDF"))
+    outcome = use_case.run(Document(name="https://a.example/one.pdf", content=b"%PDF"))
 
-    assert languages.seen_pages == [1, 2]
+    assert not outcome.published
+    assert "language" in outcome.reason.lower()
 
 
 def test_a_document_the_policy_drops_is_not_a_failure() -> None:

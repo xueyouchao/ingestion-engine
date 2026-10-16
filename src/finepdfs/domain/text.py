@@ -112,8 +112,9 @@ def _drop_running_titles(pages: Sequence[PageText], page_share: float) -> list[P
     for page in pages:
         for line in {line.strip() for line in page.text.split("\n") if line.strip()}:
             counts[line] = counts.get(line, 0) + 1
-    threshold = max(2, int(len(pages) * page_share))
-    repeated = {line for line, count in counts.items() if count >= threshold}
+    # The share is compared exactly instead of being rounded down into a smaller share: a line on two
+    # of four pages is half of the document, not the 60% this asks for.
+    repeated = {line for line, count in counts.items() if count >= 2 and count >= len(pages) * page_share}
     if not repeated:
         return list(pages)
     def keep(line: str) -> bool:

@@ -65,3 +65,18 @@ def test_pages_left_empty_are_dropped() -> None:
     cleaned = CleaningRules.for_ocr_text().clean(_pages("4", "", "real text"))
 
     assert [page.number for page in cleaned] == [3]
+
+
+def test_a_line_on_half_the_pages_survives_a_sixty_percent_rule() -> None:
+    """Two of four pages is 50%, below the 60% share, so the line is not a running title."""
+    pages = _pages(
+        "Report 2026\nfirst body",
+        "Report 2026\nsecond body",
+        "third body",
+        "fourth body",
+    )
+
+    cleaned = CleaningRules.for_native_text().clean(pages)
+
+    assert cleaned[0].text == "Report 2026\nfirst body"
+    assert cleaned[1].text == "Report 2026\nsecond body"

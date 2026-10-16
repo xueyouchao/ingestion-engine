@@ -23,10 +23,13 @@ The memoised unit is exactly one thing:
 
 ~~~~python
 @coco.fn(memo=True)
-async def extract_with_engine(pdf_path: pathlib.Path, engine_name: str) -> ExtractedDocument: ...
+async def extract_with_engine(digest: str, engine_name: str, engine_identity: str) -> ExtractedDocument: ...
 ~~~~
 
-The memo key is therefore (document, engine). Two consequences, both deliberate:
+The memo key is therefore (content digest, engine name, engine identity), and nothing else: not the path
+the file happens to live at, and not anything the engine does not control. The bytes are found under the
+digest and checked against it, so a file that no longer holds what its name says fails visibly. Two
+consequences, both deliberate:
 
 * The routing decision happens *outside* the memoised function, so a threshold change that moves a
   document between "text layer" and "ocr" changes the engine name, and the memo key changes with it.
@@ -39,13 +42,11 @@ stored as a result and is retried on the next run.
 ## Consequences
 
 * Re-running after a threshold change is fast: no GPU, no model calls, no re-reads.
-* A document is read again when its bytes change (the path is its digest), when the engine name changes,
-  or when the code in that function changes.
-* The engine identity (name plus version or endpoint) is not part of the key by itself: the engine's
-  *name* is, and a version upgrade of PyMuPDF is caught because the adapter builds its identity from
-  `pymupdf.version`, which is in the code path... but only when that function's code hash changes. The
-  honest limitation is documented; a version bump that does not touch this repository does not
-  invalidate memos.
+* A document is read again when its content digest changes, when the engine name or its identity changes
+  (model, base URL, page DPI, tool command or version), or when the code in that function changes.
+* Moving or renaming a corpus re-reads nothing: the digest is the key and the file is looked up under it.
+* Writing different bytes into a digest-named file is a failure, not a second document and not the old
+  extraction: the digest in the name, the digest in the manifest and the bytes are all checked.
 
 ## Alternatives considered
 

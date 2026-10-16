@@ -10,8 +10,12 @@ from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifes
 
 
 def document_key(url: str) -> str:
-    """A short, stable, filesystem-safe name for one document."""
-    return hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+    """A short, stable, filesystem-safe name for one document.
+
+    The first 16 hex digits of the SHA-256 of the URL: the same idea as the PDFs, which are named by
+    their content digest, so a second run writes the same names.
+    """
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from urllib.parse import urlencode
 
 from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
+
+logger = logging.getLogger(__name__)
 
 INDEX_HOST = "https://index.commoncrawl.org"
 COLL_INFO_URL = f"{INDEX_HOST}/collinfo.json"
@@ -34,27 +37,30 @@ def build_index_url(query: CrawlQuery) -> str:
 
 
 def parse_index_response(response_text: str) -> list[CrawlRecord]:
-    """Turn the index's JSON-lines answer into Crawl Records, skipping non-record lines."""
+    """Turn the index's JSON-lines answer into Crawl Records, skipping rows that are not usable."""
     records: list[CrawlRecord] = []
     for line in response_text.splitlines():
         line = line.strip()
         if not line.startswith("{"):
             continue
-        row = json.loads(line)
-        if "filename" not in row or "offset" not in row:
-            continue
-        records.append(
-            CrawlRecord(
-                url=row["url"],
-                crawl_id=crawl_id_from_warc_path(row["filename"]),
-                warc_filename=row["filename"],
-                offset=int(row["offset"]),
-                length=int(row["length"]),
-                mime_type=row.get("mime") or row.get("mime-detected") or "",
-                status=int(row.get("status", 200)),
-            )
-        )
+        try:
+            records.append(_record_from_row(json.loads(line)))
+        except (KeyError, TypeError, ValueError) as error:
+            logger.debug("skipping an index row: %s", error)
     return records
+
+
+def _record_from_row(row: dict) -> CrawlRecord:
+    """A row is usable only if it names the URL, the file it lives in and the bytes to read."""
+    return CrawlRecord(
+        url=str(row["url"]),
+        crawl_id=crawl_id_from_warc_path(str(row["filename"])),
+        warc_filename=str(row["filename"]),
+        offset=int(row["offset"]),
+        length=int(row["length"]),
+        mime_type=str(row.get("mime") or row.get("mime-detected") or ""),
+        status=int(row.get("status", 200)),
+    )
 
 
 def crawl_id_from_warc_path(warc_filename: str) -> str:

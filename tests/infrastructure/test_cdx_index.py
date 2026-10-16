@@ -53,3 +53,27 @@ def test_index_url_carries_the_query_knobs() -> None:
 def test_a_query_rejects_an_empty_domain() -> None:
     with pytest.raises(ValueError):
         CrawlQuery(crawl_id="CC-MAIN-2026-39", domain="  ")
+
+
+def test_rows_missing_a_field_are_skipped_rather_than_fatal() -> None:
+    """One malformed row must not cost the rest of the index answer, or the whole run."""
+    response = "\n".join(
+        [
+            '{"url": "https://a.example/one.pdf", "filename": "crawl-data/CC-MAIN-2026-39/x.warc.gz",'
+            ' "offset": "100", "length": "500"}',
+            '{"url": "https://a.example/two.pdf", "filename": "crawl-data/CC-MAIN-2026-39/x.warc.gz",'
+            ' "offset": "200"}',
+            '{"filename": "crawl-data/CC-MAIN-2026-39/x.warc.gz", "offset": "300", "length": "500"}',
+            '{"url": "https://a.example/three.pdf", "filename": "crawl-data/CC-MAIN-2026-39/x.warc.gz",'
+            ' "offset": "not a number", "length": "500"}',
+            '{"url": "https://a.example/four.pdf", "filename": "crawl-data/CC-MAIN-2026-39/x.warc.gz",'
+            ' "offset": "400", "length": "600"}',
+            "{ this line is not json at all",
+        ]
+    )
+
+    records = parse_index_response(response)
+
+    assert [record.url for record in records] == ["https://a.example/one.pdf", "https://a.example/four.pdf"]
+    assert records[0].offset == 100 and records[0].length == 500
+    assert records[0].crawl_id == "CC-MAIN-2026-39"
