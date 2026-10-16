@@ -70,7 +70,7 @@ def test_without_a_provider_nothing_is_rented() -> None:
 
     assert isinstance(provider, NoGpuProvider)
     with provider.lease() as endpoint:
-        assert not endpoint
+        assert endpoint == GpuEndpoint()
 
 
 def test_a_static_provider_names_the_model_not_the_address() -> None:

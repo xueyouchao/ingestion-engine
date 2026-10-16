@@ -33,9 +33,6 @@ class GpuEndpoint:
     api_key: str = ""
     identity: str = ""
 
-    def __bool__(self) -> bool:
-        return bool(self.base_url or self.identity)
-
 
 class GpuProvider(Protocol):
     """Rents the GPU a remote engine runs on. The lease lasts exactly as long as the run does."""
