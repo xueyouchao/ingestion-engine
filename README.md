@@ -66,6 +66,7 @@ Seams you can replace without touching the pipeline:
 | `TextLayerProbe` | `PymupdfTextLayerProbe` | a fake quality |
 | `OcrEngine` | PyMuPDF, Docling, PaddleOCR-VL, MinerU | counting engines |
 | `LanguageIdentifier` | `ScriptLanguageIdentifier` (script tags, nothing installed) or `FastTextLanguageIdentifier` (language tags, needs a model) | a fixed tag |
+| `GpuProvider` | `none`, `static`, `command` (`infrastructure/compute/`) | a scripted command |
 
 ## Engines
 
