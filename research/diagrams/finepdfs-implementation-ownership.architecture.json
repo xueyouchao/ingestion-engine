@@ -1,0 +1,312 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "FinePDFs: Who Implements What",
+    "subtitle": "third-party engines, repo domain logic, datatrove plumbing",
+    "output": "research/diagrams/finepdfs-implementation-ownership.architecture.html",
+    "viewBox": [
+      1240,
+      780
+    ],
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "engines",
+        "label": "Third-party engines",
+        "focus": [
+          "x_libs",
+          "x_docling",
+          "x_rolmocr"
+        ],
+        "note": "Parsing, OCR and feature extraction are delegated to external libraries and models."
+      },
+      {
+        "id": "domain",
+        "label": "Repo domain logic",
+        "focus": [
+          "fp_script",
+          "fp_router",
+          "fp_clean",
+          "fp_lang",
+          "fp_model"
+        ],
+        "note": "Five repo-owned pieces carry all FinePDFs-specific decisions."
+      },
+      {
+        "id": "plumbing",
+        "label": "datatrove plumbing",
+        "focus": [
+          "dt_exec",
+          "dt_io_dedup",
+          "dt_infer"
+        ],
+        "note": "Execution, staged storage, dedup blocks and the inference runner come from the framework."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "x_libs",
+      "type": "external",
+      "label": "Support Libraries",
+      "sublabel": "pymupdf, ftfy, xgboost",
+      "tag": "PyPI",
+      "pos": [
+        60,
+        130
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "x_docling",
+      "type": "external",
+      "label": "Docling Fork",
+      "sublabel": "OpenVINO INT8",
+      "tag": "vendored",
+      "pos": [
+        60,
+        290
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "x_rolmocr",
+      "type": "external",
+      "label": "RolmOCR",
+      "sublabel": "GPU OCR model",
+      "tag": "vendored",
+      "pos": [
+        60,
+        450
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "fp_script",
+      "type": "backend",
+      "label": "Pipeline Script",
+      "sublabel": "nine stages, staged dirs",
+      "tag": "repo",
+      "pos": [
+        470,
+        130
+      ],
+      "size": [
+        210,
+        64
+      ]
+    },
+    {
+      "id": "fp_router",
+      "type": "backend",
+      "label": "OCR Router",
+      "sublabel": "XGBoost, 7 features",
+      "tag": "repo",
+      "pos": [
+        470,
+        240
+      ],
+      "size": [
+        210,
+        64
+      ]
+    },
+    {
+      "id": "fp_clean",
+      "type": "backend",
+      "label": "Postprocess Rules",
+      "sublabel": "boilerplate, tables, pages",
+      "tag": "repo",
+      "pos": [
+        470,
+        350
+      ],
+      "size": [
+        210,
+        64
+      ]
+    },
+    {
+      "id": "fp_lang",
+      "type": "backend",
+      "label": "Language Thresholds",
+      "sublabel": "GlotLID per page",
+      "tag": "repo",
+      "pos": [
+        470,
+        460
+      ],
+      "size": [
+        210,
+        64
+      ]
+    },
+    {
+      "id": "fp_model",
+      "type": "backend",
+      "label": "Quality Classifier",
+      "sublabel": "ModernBERT multi-head",
+      "tag": "repo",
+      "pos": [
+        470,
+        570
+      ],
+      "size": [
+        210,
+        64
+      ]
+    },
+    {
+      "id": "dt_exec",
+      "type": "backend",
+      "label": "Executors",
+      "sublabel": "Local, Slurm, Ray",
+      "tag": "datatrove",
+      "pos": [
+        880,
+        130
+      ],
+      "size": [
+        210,
+        64
+      ]
+    },
+    {
+      "id": "dt_io_dedup",
+      "type": "cloud",
+      "label": "Storage and Dedup Blocks",
+      "sublabel": "WARC, zstd, exact, MinHash",
+      "tag": "datatrove",
+      "pos": [
+        880,
+        290
+      ],
+      "size": [
+        210,
+        64
+      ]
+    },
+    {
+      "id": "dt_infer",
+      "type": "backend",
+      "label": "Inference Runner",
+      "sublabel": "vLLM rollouts",
+      "tag": "datatrove",
+      "pos": [
+        880,
+        450
+      ],
+      "size": [
+        210,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "third-party engines",
+      "wraps": [
+        "x_libs",
+        "x_docling",
+        "x_rolmocr"
+      ],
+      "pad": 24
+    },
+    {
+      "kind": "region",
+      "label": "finepdfs repo (AGPL-3.0)",
+      "wraps": [
+        "fp_script",
+        "fp_router",
+        "fp_clean",
+        "fp_lang",
+        "fp_model"
+      ],
+      "pad": 24
+    },
+    {
+      "kind": "region",
+      "label": "datatrove (upstream, MIT)",
+      "wraps": [
+        "dt_exec",
+        "dt_io_dedup",
+        "dt_infer"
+      ],
+      "pad": 24
+    }
+  ],
+  "connections": [
+    {
+      "from": "x_libs",
+      "to": "fp_router",
+      "label": "pymupdf features",
+      "variant": "emphasis"
+    },
+    {
+      "from": "x_docling",
+      "to": "fp_clean",
+      "label": "page text"
+    },
+    {
+      "from": "x_rolmocr",
+      "to": "fp_clean",
+      "label": "OCR text"
+    },
+    {
+      "from": "fp_script",
+      "to": "dt_exec",
+      "label": "submits stages",
+      "variant": "emphasis"
+    },
+    {
+      "from": "fp_script",
+      "to": "dt_io_dedup",
+      "label": "staged files"
+    },
+    {
+      "from": "fp_model",
+      "to": "dt_infer",
+      "label": "rollout scoring"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Third-party engines",
+      "items": [
+        "pymupdf supplies the page features the OCR router scores",
+        "ftfy and custom rules normalise the extracted text",
+        "A vendored Docling fork does the text path, RolmOCR does the OCR path"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Repo domain logic",
+      "items": [
+        "The XGBoost router trained on 1,350 annotated PDFs",
+        "Every postprocess rule, language threshold and quality head",
+        "Each custom block is a datatrove PipelineStep subclass"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "datatrove plumbing",
+      "items": [
+        "Executors for local, Slurm and Ray runs",
+        "WARC, zstd, HTTP, JSONL and parquet readers and writers",
+        "Exact and MinHash dedup blocks plus the inference runner"
+      ]
+    }
+  ]
+}

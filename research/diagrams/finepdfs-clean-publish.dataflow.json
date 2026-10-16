@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "FinePDFs: Clean, Dedupe and Publish",
+    "output": "research/diagrams/finepdfs-clean-publish.dataflow.html",
+    "viewBox": [
+      1160,
+      700
+    ],
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "clean-identify",
+        "label": "Clean and identify",
+        "focus": [
+          "clean",
+          "langid"
+        ],
+        "note": "Per-branch page rules first, then per-page language detection with tuned thresholds."
+      },
+      {
+        "id": "dedupe-filter",
+        "label": "Dedupe and filter",
+        "focus": [
+          "exact",
+          "model",
+          "minhash"
+        ],
+        "note": "Two dedup rounds bracket the GPU model filter."
+      }
+    ]
+  },
+  "stages": [
+    {
+      "label": "Clean"
+    },
+    {
+      "label": "Identify"
+    },
+    {
+      "label": "Dedupe"
+    },
+    {
+      "label": "Filter"
+    },
+    {
+      "label": "Publish"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "clean",
+      "type": "backend",
+      "label": "Page Cleanup",
+      "sublabel": "boilerplate, tables",
+      "stage": 0,
+      "row": 0,
+      "tag": "per branch"
+    },
+    {
+      "id": "langid",
+      "type": "backend",
+      "label": "Language ID",
+      "sublabel": "GlotLID per page",
+      "stage": 1,
+      "row": 0,
+      "tag": "1733 pairs"
+    },
+    {
+      "id": "exact",
+      "type": "database",
+      "label": "Exact Dedup",
+      "sublabel": "normalised text",
+      "stage": 2,
+      "row": 0,
+      "tag": "per language"
+    },
+    {
+      "id": "model",
+      "type": "backend",
+      "label": "Model Filter",
+      "sublabel": "ModernBERT, mmBERT",
+      "stage": 3,
+      "row": 0,
+      "tag": "quality scores"
+    },
+    {
+      "id": "minhash",
+      "type": "database",
+      "label": "MinHash Dedup",
+      "sublabel": "parquet to hub",
+      "stage": 4,
+      "row": 0,
+      "tag": "near-duplicate"
+    }
+  ],
+  "flows": [
+    {
+      "id": "f1",
+      "from": "clean",
+      "to": "langid",
+      "label": "cleaned pages",
+      "classification": "rules applied",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f2",
+      "from": "langid",
+      "to": "exact",
+      "label": "language buckets",
+      "classification": "threshold selected"
+    },
+    {
+      "id": "f3",
+      "from": "exact",
+      "to": "model",
+      "label": "unique texts",
+      "classification": "chunked for scoring"
+    },
+    {
+      "id": "f4",
+      "from": "model",
+      "to": "minhash",
+      "label": "kept documents",
+      "classification": "scored above threshold",
+      "labelDy": 53
+    }
+  ],
+  "cards": [
+    {
+      "dot": "violet",
+      "title": "Two cleanup regimes",
+      "items": [
+        "Docling branch: boilerplate tags, page numbers, malformed tables, image annotations",
+        "OCR branch: failed pages dropped, repeated lines and sentences, boilerplate",
+        "Both branches then run shared normalisation with ftfy and spacing repair"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Where the thresholds come from",
+      "items": [
+        "GlotLID runs per page, then scores are averaged and compared to a threshold table",
+        "Thresholds were tuned against gemma-3-27b-it labels on 20k samples per language",
+        "Tuning maximised F-beta with beta 0.1, heavily favouring precision"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Two dedup rounds bracket the filter",
+      "items": [
+        "Exact dedup on PDF bytes runs before extraction, in the ingest half",
+        "Exact dedup on normalised text runs after language selection",
+        "MinHash near-duplicate removal runs last, right before packaging"
+      ]
+    }
+  ]
+}

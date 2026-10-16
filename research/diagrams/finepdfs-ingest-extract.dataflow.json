@@ -1,0 +1,200 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "FinePDFs: Ingest, Route and Extract",
+    "output": "research/diagrams/finepdfs-ingest-extract.dataflow.html",
+    "viewBox": [
+      1080,
+      760
+    ],
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "byte-path",
+        "label": "Byte path",
+        "focus": [
+          "cc",
+          "refetch",
+          "screen",
+          "router"
+        ],
+        "note": "Two byte sources feed one gate; the split decides which path a PDF takes."
+      },
+      {
+        "id": "extract-branch",
+        "label": "Extraction branch",
+        "focus": [
+          "router",
+          "docling",
+          "rolmocr",
+          "extracted"
+        ],
+        "note": "The XGBoost router sends each PDF to the cheap text path or the GPU OCR path."
+      }
+    ]
+  },
+  "stages": [
+    {
+      "label": "Source"
+    },
+    {
+      "label": "Screen"
+    },
+    {
+      "label": "Route"
+    },
+    {
+      "label": "Extract"
+    },
+    {
+      "label": "Extracted"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "cc",
+      "type": "cloud",
+      "label": "CommonCrawl PDFs",
+      "sublabel": "106 dumps, 2013 to 2025",
+      "stage": 0,
+      "row": 0,
+      "tag": "WARC"
+    },
+    {
+      "id": "refetch",
+      "type": "cloud",
+      "label": "HTTP Re-fetch",
+      "sublabel": "HTTPFetchReader, 3 retries",
+      "stage": 0,
+      "row": 2,
+      "tag": "truncated only"
+    },
+    {
+      "id": "screen",
+      "type": "backend",
+      "label": "Screen and Split",
+      "sublabel": "split, gate, byte dedup",
+      "stage": 1,
+      "row": 1,
+      "tag": "PDF bytes"
+    },
+    {
+      "id": "router",
+      "type": "backend",
+      "label": "OCR Router",
+      "sublabel": "XGBoost on pymupdf features",
+      "stage": 2,
+      "row": 1,
+      "tag": "ocr_prob"
+    },
+    {
+      "id": "docling",
+      "type": "backend",
+      "label": "Docling",
+      "sublabel": "vendored, OpenVINO INT8",
+      "stage": 3,
+      "row": 0,
+      "tag": "text path"
+    },
+    {
+      "id": "rolmocr",
+      "type": "backend",
+      "label": "RolmOCR",
+      "sublabel": "vLLM inference runner",
+      "stage": 3,
+      "row": 2,
+      "tag": "image path"
+    },
+    {
+      "id": "extracted",
+      "type": "database",
+      "label": "Extracted Page Text",
+      "sublabel": "markdown or OCR text",
+      "stage": 4,
+      "row": 1
+    }
+  ],
+  "flows": [
+    {
+      "id": "index-in",
+      "from": "cc",
+      "to": "screen",
+      "label": "crawl index entries",
+      "classification": "index parquet",
+      "variant": "emphasis"
+    },
+    {
+      "id": "refetch-in",
+      "from": "refetch",
+      "to": "screen",
+      "label": "re-fetched PDFs",
+      "classification": "truncated re-enter the gate",
+      "variant": "dashed"
+    },
+    {
+      "id": "to-router",
+      "from": "screen",
+      "to": "router",
+      "label": "deduped PDF bytes",
+      "classification": "byte exact dedup"
+    },
+    {
+      "id": "no-ocr",
+      "from": "router",
+      "to": "docling",
+      "label": "no OCR needed",
+      "classification": "ocr_prob below 0.2"
+    },
+    {
+      "id": "needs-ocr",
+      "from": "router",
+      "to": "rolmocr",
+      "label": "needs OCR",
+      "classification": "ocr_prob 0.2 or higher"
+    },
+    {
+      "id": "md-out",
+      "from": "docling",
+      "to": "extracted",
+      "label": "clean markdown",
+      "classification": "per page"
+    },
+    {
+      "id": "ocr-out",
+      "from": "rolmocr",
+      "to": "extracted",
+      "label": "OCR text",
+      "classification": "per page"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "What decides the branch",
+      "items": [
+        "A trained XGBoost model scores 7 document-level and page-level features from pymupdf",
+        "Routing rule: ocr_prob at or above 0.2, or any garbled_text_ratio above 0",
+        "The model was trained on 1,350 hand-annotated PDFs"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Two byte sources, one gate",
+      "items": [
+        "Truncated PDFs are re-fetched from the internet and saved as zstd",
+        "Non-truncated PDFs are re-read straight from the CommonCrawl WARC",
+        "Both paths pass the same MIME and corruption checks before extraction"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Cost shape",
+      "items": [
+        "The cheap CPU text path handles the majority of documents",
+        "The expensive GPU OCR path is reserved for pages that need it",
+        "Exact dedup on PDF bytes runs before any expensive extraction"
+      ]
+    }
+  ]
+}
