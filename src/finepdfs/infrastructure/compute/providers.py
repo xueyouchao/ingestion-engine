@@ -349,10 +349,12 @@ _ENGINE_VARIABLES = (ENGINE_BASE_URL, ENGINE_MODEL, ENGINE_API_KEY, ENGINE_DETAI
 def leased_environment(environ: MutableMapping[str, str] | None = None) -> Iterator[GpuEndpoint]:
     """Lease the GPU this run asked for, then publish it as the environment the flow reads.
 
-    Every entry point is wired the same way -- lease, export, build -- so that sequence has one home
-    rather than one copy per caller. The environment is restored to exactly what it held before the
-    lease ends, whether the run succeeded or failed: a worker that has been given back must not stay
-    in the environment as an engine a later in-process run would silently target.
+    Every entry point shares the same two steps -- lease, export -- so that half has one home rather than
+    one copy per caller. Building the runtime from the exported environment is the half each entry point
+    genuinely does differently: the flow's lifespan and the CLI's dry run each build their own, so this
+    context manager yields the endpoint rather than the runtime. The environment is restored to exactly
+    what it held before the lease ends, whether the run succeeded or failed: a worker that has been given
+    back must not stay in the environment as an engine a later in-process run would silently target.
     """
     target = environ if environ is not None else os.environ
     previous = {name: target[name] for name in _ENGINE_VARIABLES if name in target}
