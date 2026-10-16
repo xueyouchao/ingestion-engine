@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Protocol
 
 from finepdfs.domain.language import UNKNOWN_LANGUAGE, PageLanguage
+from finepdfs.infrastructure.language.floor import MIN_CHARACTERS, enough_letters, unknown_page
 from finepdfs.infrastructure.language.model import TextLabeller
-from finepdfs.infrastructure.language.script import MIN_CHARACTERS
 
 CHUNK_CHARACTERS = 1200
 LANGUAGE_PREFIX = "__label__"
@@ -123,8 +123,8 @@ class FastTextLanguageIdentifier:
         self._chunk_characters = chunk_characters
 
     def identify(self, text: str, page_number: int) -> PageLanguage:
-        if sum(character.isalpha() for character in text) < self._min_characters:
-            return _unknown(page_number)
+        if not enough_letters(text, self._min_characters):
+            return unknown_page(page_number)
 
         chunks = _chunks(text, self._chunk_characters)
         scores: dict[str, float] = {}
@@ -135,7 +135,7 @@ class FastTextLanguageIdentifier:
             scores[language] = scores.get(language, 0.0) + confidence
 
         if not scores:
-            return _unknown(page_number)
+            return unknown_page(page_number)
         language, total = max(sorted(scores.items()), key=lambda item: item[1])
         return PageLanguage(page_number=page_number, language=language, confidence=total / len(chunks))
 
@@ -160,7 +160,3 @@ def _chunks(text: str, size: int) -> tuple[str, ...]:
     if current:
         chunks.append(" ".join(current))
     return tuple(chunks)
-
-
-def _unknown(page_number: int) -> PageLanguage:
-    return PageLanguage(page_number=page_number, language=UNKNOWN_LANGUAGE, confidence=0.0)

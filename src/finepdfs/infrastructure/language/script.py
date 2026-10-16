@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import Counter
 
 from finepdfs.domain.language import UNKNOWN_LANGUAGE, PageLanguage
+from finepdfs.infrastructure.language.floor import MIN_CHARACTERS, enough_letters, unknown_page
 
 SCRIPT_RANGES: tuple[tuple[str, tuple[tuple[int, int], ...]], ...] = (
     ("Latn", ((0x0041, 0x024F), (0x1E00, 0x1EFF), (0x2C60, 0x2C7F), (0xA720, 0xA7FF))),
@@ -25,8 +26,6 @@ SCRIPT_RANGES: tuple[tuple[str, tuple[tuple[int, int], ...]], ...] = (
     ("Thai", ((0x0E00, 0x0E7F),)),
 )
 
-MIN_CHARACTERS = 40
-
 
 class ScriptLanguageIdentifier:
     """Names the dominant script of a page and how dominant it is."""
@@ -35,14 +34,14 @@ class ScriptLanguageIdentifier:
         self._min_characters = min_characters
 
     def identify(self, text: str, page_number: int) -> PageLanguage:
-        letters = [character for character in text if character.isalpha()]
-        if len(letters) < self._min_characters:
-            return PageLanguage(page_number=page_number, language=UNKNOWN_LANGUAGE, confidence=0.0)
+        if not enough_letters(text, self._min_characters):
+            return unknown_page(page_number)
 
+        letters = [character for character in text if character.isalpha()]
         counts: Counter[str] = Counter(_script_of(character) for character in letters)
         counts.pop(UNKNOWN_LANGUAGE, None)
         if not counts:
-            return PageLanguage(page_number=page_number, language=UNKNOWN_LANGUAGE, confidence=0.0)
+            return unknown_page(page_number)
 
         script, count = counts.most_common(1)[0]
         return PageLanguage(page_number=page_number, language=script, confidence=count / len(letters))
