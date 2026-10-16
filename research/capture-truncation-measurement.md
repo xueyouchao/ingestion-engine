@@ -12,6 +12,10 @@ byte-identical to the payload Common Crawl recorded and hashed for it. No trunca
 this corpus, by any of four independent witnesses. **Ticket 10 stays parked**, with the caveat in
 "N = 12" below: this rules out a truncation rate above ~22%, not a rate of 1%.
 
+*What this branch ships is the narrow half of the ticket: `warc.py` now refuses a record Common Crawl
+marked `WARC-Truncated`. What stays parked is the refetch-and-recover machinery. See "What is already
+loud, and the one change made" below.*
+
 ## The hypothesis in the ticket is wrong: what `bytes` and `length` actually mean
 
 The ticket suggests `bytes` (payload) vs `length` (WARC record) is a truncation signal. Read the code
