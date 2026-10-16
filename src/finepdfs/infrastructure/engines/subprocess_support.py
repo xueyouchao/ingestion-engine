@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Protocol
 
 
 class CommandFailed(RuntimeError):
@@ -48,7 +49,12 @@ class SubprocessRunner:
             )
         except subprocess.TimeoutExpired as error:
             raise CommandFailed(f"{executable} did not finish within {self._timeout:.0f}s: {' '.join(argv)}") from error
-        return CommandResult(argv=tuple(argv), returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
+        return CommandResult(
+            argv=tuple(argv),
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
 
 
 def require_success(result: CommandResult) -> None:

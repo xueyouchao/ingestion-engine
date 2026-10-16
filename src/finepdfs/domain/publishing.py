@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from typing import Literal, Sequence
+from typing import Literal
 
 from finepdfs.domain.document import PageText
 from finepdfs.domain.language import LanguageOutcome

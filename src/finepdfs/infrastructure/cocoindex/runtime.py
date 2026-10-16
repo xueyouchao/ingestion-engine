@@ -8,16 +8,15 @@ from __future__ import annotations
 
 import os
 import pathlib
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
-from finepdfs.application.curate import CurationPolicy, CurationStep, CurateDocument, ExtractionStep
+from finepdfs.application.curate import CurateDocument, CurationPolicy, CurationStep, ExtractionStep
 from finepdfs.domain.language import LanguagePolicy
-from finepdfs.domain.ports import LanguageIdentifier, OcrEngine, TextLayerProbe
+from finepdfs.domain.ports import OcrEngine
 from finepdfs.domain.publishing import PublishPolicy
 from finepdfs.infrastructure.corpus.index import CorpusIndex
-from finepdfs.infrastructure.engines.pdf_document import PdfDocument
-from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextEngine, PymupdfTextLayerProbe
+from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextLayerProbe
 from finepdfs.infrastructure.engines.registry import EngineConfig, build_engines
 from finepdfs.infrastructure.language.script import ScriptLanguageIdentifier
 from finepdfs.infrastructure.publishing.disk import PublishedCorpus
@@ -78,7 +77,7 @@ def runtime_from_environment(environ: Mapping[str, str] | None = None) -> Runtim
         language=LanguagePolicy(min_confidence=float(values.get("FINEPDFS_LANGUAGE_CONFIDENCE", "0.65"))),
         publish=PublishPolicy(
             min_characters=int(values.get("FINEPDFS_MIN_CHARACTERS", "200")),
-            required_languages=tuple(filter(None, (part.strip() for part in values.get("FINEPDFS_LANGUAGES", "").split(",")))),
+            required_languages=_languages(values),
         ),
     )
     probe = PymupdfTextLayerProbe()
@@ -89,6 +88,11 @@ def runtime_from_environment(environ: Mapping[str, str] | None = None) -> Runtim
         extraction=ExtractionStep(probe, engines, policy),
         curation=CurationStep(ScriptLanguageIdentifier(), policy),
     )
+
+
+def _languages(values: Mapping[str, str]) -> tuple[str, ...]:
+    """FINEPDFS_LANGUAGES is a comma-separated allow-list; empty means no restriction."""
+    return tuple(part.strip() for part in values.get("FINEPDFS_LANGUAGES", "").split(",") if part.strip())
 
 
 def _routing_policy(values: Mapping[str, str]):

@@ -15,7 +15,7 @@ from pathlib import Path
 import pymupdf
 import pytest
 
-from finepdfs.domain.document import Document, PageText
+from finepdfs.domain.document import Document
 from finepdfs.infrastructure.engines.docling_engine import DoclingEngine, DoclingError, pages_from_markdown
 from finepdfs.infrastructure.engines.mineru import (
     MineruEngine,
@@ -52,7 +52,7 @@ class StubModelServer:
         server = self
 
         class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:  # noqa: N802 - the base class names it
+            def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length)
                 server.requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
@@ -228,7 +228,7 @@ def test_mineru_reads_a_service_that_answers_with_a_content_list() -> None:
     finally:
         server.stop()
 
-    assert [page.text for page in extracted.pages][0].startswith("WMO Resolution 16")
+    assert next(page.text for page in extracted.pages).startswith("WMO Resolution 16")
     assert engine.identity.name == "mineru"
     assert "MinerU2.5-Pro" in str(engine.identity)
 

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 from finepdfs.domain.document import PageText
 
 _HYPHEN_BREAK = re.compile(r"(\w)-\n(\w)")
-_PAGE_NUMBER_LINE = re.compile(r"^[\s\-—–]*\d{1,4}[\s\-—–]*$")
+_PAGE_NUMBER_LINE = re.compile(r"^[\s\-—–]*\d{1,4}[\s\-—–]*$")  # noqa: RUF001 - the dashes are the point
 _WHITESPACE_RUN = re.compile(r"[ \t]+")
 _BLANK_LINE_RUN = re.compile(r"\n{3,}")
 _LETTER = re.compile(r"[^\W\d_]", re.UNICODE)
@@ -55,11 +55,11 @@ class CleaningRules:
     drop_letterless_lines: bool = False
 
     @classmethod
-    def for_native_text(cls) -> "CleaningRules":
+    def for_native_text(cls) -> CleaningRules:
         return cls(repair_hyphenation=False, drop_lines_repeated_within_page=False, drop_letterless_lines=False)
 
     @classmethod
-    def for_ocr_text(cls) -> "CleaningRules":
+    def for_ocr_text(cls) -> CleaningRules:
         return cls(repair_hyphenation=True, drop_lines_repeated_within_page=True, drop_letterless_lines=True)
 
     def clean(self, pages: Sequence[PageText]) -> tuple[PageText, ...]:
@@ -116,7 +116,10 @@ def _drop_running_titles(pages: Sequence[PageText], page_share: float) -> list[P
     repeated = {line for line, count in counts.items() if count >= threshold}
     if not repeated:
         return list(pages)
+    def keep(line: str) -> bool:
+        return line.strip() not in repeated
+
     return [
-        PageText(number=page.number, text="\n".join(line for line in page.text.split("\n") if line.strip() not in repeated))
+        PageText(number=page.number, text="\n".join(line for line in page.text.split("\n") if keep(line)))
         for page in pages
     ]

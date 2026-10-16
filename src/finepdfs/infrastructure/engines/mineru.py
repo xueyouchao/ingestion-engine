@@ -13,9 +13,10 @@ import tempfile
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import Any, Protocol
 
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText
 from finepdfs.infrastructure.engines.subprocess_support import CommandRunner, SubprocessRunner, require_success
@@ -58,13 +59,17 @@ def pages_from_content_list(items: Sequence[dict]) -> tuple[PageText, ...]:
         if not piece:
             continue
         by_page.setdefault(int(item.get("page_idx", 0)), []).append(piece)
-    return tuple(PageText(number=page_index + 1, text="\n\n".join(pieces)) for page_index, pieces in sorted(by_page.items()))
+    return tuple(
+        PageText(number=page_index + 1, text="\n\n".join(pieces))
+        for page_index, pieces in sorted(by_page.items())
+    )
 
 
 def _block_text(item: dict) -> str:
     kind = item.get("type")
     if kind == "table":
-        return "\n\n".join(filter(None, (str(item.get("table_body") or item.get("text") or "").strip(), _captions(item))))
+        body = str(item.get("table_body") or item.get("text") or "").strip()
+        return "\n\n".join(filter(None, (body, _captions(item))))
     if kind in {"image", "figure"}:
         return _captions(item)
     return str(item.get("text") or "").strip()
@@ -158,13 +163,14 @@ def _multipart_body(document: Document) -> tuple[bytes, str]:
     parts: list[bytes] = []
     for name, value in fields.items():
         parts.append(
-            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode("utf-8")
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
         )
+    filename = document.name or "document.pdf"
     parts.append(
-        f'--{boundary}\r\nContent-Disposition: form-data; name="files"; filename="{document.name or "document.pdf"}"\r\n'
-        f"Content-Type: application/pdf\r\n\r\n".encode("utf-8")
+        f'--{boundary}\r\nContent-Disposition: form-data; name="files"; filename="{filename}"\r\n'
+        "Content-Type: application/pdf\r\n\r\n".encode()
         + document.content
         + b"\r\n"
     )
-    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+    parts.append(f"--{boundary}--\r\n".encode())
     return b"".join(parts), f"multipart/form-data; boundary={boundary}"

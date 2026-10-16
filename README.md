@@ -131,8 +131,8 @@ named by their own digest, which is also what makes exact duplicates free to spo
 ## Tests
 
 ~~~~bash
-.venv/bin/python -m pytest              # 97 offline tests
-.venv/bin/python -m pytest -m network   # 4 tests against the live Common Crawl
+.venv/bin/python -m pytest              # 93 tests, no network
+.venv/bin/python -m pytest -m network   # 4 more against the live Common Crawl (deselected above)
 ~~~~
 
 ## What is verified, and how

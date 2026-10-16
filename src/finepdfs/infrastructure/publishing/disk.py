@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import json
 import pathlib
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 from finepdfs.domain.dedup import DedupPlan, PublishedDocumentView
 from finepdfs.domain.publishing import DocumentRecord
@@ -77,7 +77,13 @@ class PublishedCorpus:
             doc_path = self.doc_path(key)
             if not doc_path.exists():
                 continue
-            documents.append(PublishedDocumentView(url=record["url"], digest=record["digest"], text=doc_path.read_text(encoding="utf-8")))
+            documents.append(
+                PublishedDocumentView(
+                    url=record["url"],
+                    digest=record["digest"],
+                    text=doc_path.read_text(encoding="utf-8"),
+                )
+            )
         return documents
 
     def apply_dedup_plan(self, plan: DedupPlan) -> DedupReport:

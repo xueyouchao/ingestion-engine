@@ -8,8 +8,8 @@ often, so they run every time. See ADR-0003.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Mapping
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 from finepdfs.domain import text as text_rules
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText, TextLayerQuality
@@ -28,9 +28,9 @@ class CurationPolicy:
     """The choices a run makes: which engine rescues scanned pages, and the thresholds it applies."""
 
     engine_name: str
-    routing: OcrRoutingPolicy = OcrRoutingPolicy()
-    language: LanguagePolicy = LanguagePolicy()
-    publish: PublishPolicy = PublishPolicy()
+    routing: OcrRoutingPolicy = field(default_factory=OcrRoutingPolicy)
+    language: LanguagePolicy = field(default_factory=LanguagePolicy)
+    publish: PublishPolicy = field(default_factory=PublishPolicy)
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Literal, Mapping, Sequence
+from typing import Literal
 
 DuplicateKind = Literal["exact", "near"]
 
 _SIGNATURE_SEED = b"finepdfs-minhash-v1"
-_WORD = None
-
 
 @dataclass(frozen=True, slots=True)
 class DuplicateDecision:
@@ -73,7 +72,7 @@ def jaccard_estimate(left: Sequence[int], right: Sequence[int]) -> float:
     """Share of signature positions that agree -- an estimate of the Jaccard similarity."""
     if not left or not right:
         return 0.0
-    agreements = sum(1 for a, b in zip(left, right) if a == b)
+    agreements = sum(1 for a, b in zip(left, right, strict=True) if a == b)
     return agreements / len(left)
 
 
@@ -119,7 +118,6 @@ def plan_deduplication(
 
     keepers = [document for document in documents if keeper_by_url[document.url] == document.url]
     signatures = {document.url: similarity_fingerprint(document.text) for document in keepers}
-    text_by_url = {document.url: document.text for document in keepers}
     for group in near_duplicate_groups(signatures, similarity_threshold):
         leader = min(group)
         for url in sorted(group):

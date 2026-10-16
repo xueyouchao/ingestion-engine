@@ -7,7 +7,7 @@ and its weights are Apache-2.0.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText
@@ -58,7 +58,7 @@ class PaddleOcrVlCliEngine:
     command: str = "paddleocr"
     work_dir: Path | None = None
     dpi: int = 200
-    runner: CommandRunner = SubprocessRunner()
+    runner: CommandRunner = field(default_factory=SubprocessRunner)
 
     @property
     def identity(self) -> EngineIdentity:
@@ -76,7 +76,8 @@ class PaddleOcrVlCliEngine:
             with PdfDocument(document.content) as pdf:
                 page_count = pdf.page_count
                 for page_number in range(1, page_count + 1):
-                    (images_dir / f"page-{page_number:04d}.png").write_bytes(pdf.render_page_png(page_number, dpi=self.dpi))
+                    rendered = pdf.render_page_png(page_number, dpi=self.dpi)
+                    (images_dir / f"page-{page_number:04d}.png").write_bytes(rendered)
 
             require_success(
                 self.runner.run(

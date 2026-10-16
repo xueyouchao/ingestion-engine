@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 UNKNOWN_LANGUAGE = "unknown"
 

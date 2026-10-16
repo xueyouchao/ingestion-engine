@@ -10,8 +10,9 @@ import base64
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 
 class VlmTransportError(RuntimeError):
@@ -80,7 +81,9 @@ def _first_message_content(payload: dict, endpoint: ChatEndpoint) -> str:
     try:
         content = payload["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as error:
-        raise VlmTransportError(f"{endpoint.chat_completions_url()} answered without message content: {payload}") from error
+        raise VlmTransportError(
+            f"{endpoint.chat_completions_url()} answered without message content: {payload}"
+        ) from error
     if isinstance(content, list):  # some servers answer with content parts
         return "".join(part.get("text", "") for part in content if isinstance(part, dict))
     return str(content)

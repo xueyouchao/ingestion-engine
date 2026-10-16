@@ -80,6 +80,5 @@ def test_rendering_a_page_gives_a_png_a_vision_model_can_read(real_pdf_bytes) ->
 
 
 def test_bytes_that_are_not_a_pdf_are_rejected_with_a_clear_error() -> None:
-    with pytest.raises(PdfReadError):
-        with PdfDocument(b"this is not a pdf"):
-            pass
+    with pytest.raises(PdfReadError), PdfDocument(b"this is not a pdf"):
+        pass

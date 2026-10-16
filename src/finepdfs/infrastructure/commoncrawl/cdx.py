@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from urllib.parse import urlencode
 
-from typing import Any
-
 from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
 
 INDEX_HOST = "https://index.commoncrawl.org"

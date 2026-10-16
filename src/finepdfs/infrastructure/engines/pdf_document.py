@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Self
 
 import pymupdf
 
@@ -23,7 +24,7 @@ class PdfDocument:
     content: bytes
     _document: pymupdf.Document | None = None
 
-    def __enter__(self) -> "PdfDocument":
+    def __enter__(self) -> Self:
         try:
             self._document = pymupdf.open(stream=self.content, filetype="pdf")
         except Exception as error:

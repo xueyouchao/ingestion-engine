@@ -5,7 +5,7 @@ This is the main seam: no network, no models, no CocoIndex, no filesystem.
 
 from __future__ import annotations
 
-from finepdfs.application.curate import NATIVE_TEXT_ENGINE, CurationPolicy, CurateDocument
+from finepdfs.application.curate import NATIVE_TEXT_ENGINE, CurateDocument, CurationPolicy
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText, TextLayerQuality
 from finepdfs.domain.language import PageLanguage
 from finepdfs.domain.ocr import OcrRoutingPolicy

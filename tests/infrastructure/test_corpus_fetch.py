@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import hashlib
 
-import pytest
-
 from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
 from finepdfs.infrastructure.corpus.fetch import fetch_corpus
 from finepdfs.infrastructure.corpus.manifest import CorpusManifest

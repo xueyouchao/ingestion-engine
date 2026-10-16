@@ -6,10 +6,11 @@ the same interface, which is why the pipeline can be exercised with no network, 
 
 from __future__ import annotations
 
-from typing import Protocol, Sequence
+from collections.abc import Sequence
+from typing import Protocol
 
 from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
-from finepdfs.domain.document import Document, ExtractedDocument, TextLayerQuality
+from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, TextLayerQuality
 from finepdfs.domain.language import PageLanguage
 
 

@@ -7,7 +7,6 @@ changing a cheap rule must re-run only the cheap half.
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 
 import cocoindex as coco

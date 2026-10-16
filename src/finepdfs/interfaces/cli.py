@@ -11,8 +11,8 @@ from pathlib import Path
 from finepdfs.domain.crawl import CrawlQuery
 from finepdfs.domain.dedup import exact_duplicate_keepers, plan_deduplication
 from finepdfs.domain.document import Document
-from finepdfs.infrastructure.commoncrawl.source import CommonCrawlSource
 from finepdfs.infrastructure.cocoindex.runtime import Runtime, runtime_from_environment
+from finepdfs.infrastructure.commoncrawl.source import CommonCrawlSource
 from finepdfs.infrastructure.corpus.fetch import fetch_corpus
 from finepdfs.infrastructure.corpus.index import CorpusIndex
 from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifest
@@ -57,7 +57,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     dedupe = commands.add_parser("dedupe", help="drop near-duplicate documents from the published corpus")
     dedupe.add_argument("--out", type=Path, default=DEFAULT_OUT)
-    dedupe.add_argument("--threshold", type=float, default=0.8, help="fingerprint similarity that counts as a duplicate")
+    dedupe.add_argument(
+        "--threshold", type=float, default=0.8, help="fingerprint similarity that counts as a duplicate"
+    )
 
     return parser
 
@@ -75,7 +77,12 @@ def _add_engine_arguments(parser: argparse.ArgumentParser, *, out: bool) -> None
     parser.add_argument("--base-url", default="", help="OpenAI-compatible model server, for paddleocr-vl and mineru")
     parser.add_argument("--model", default="", help="model name to ask the server for")
     parser.add_argument("--api-key", default="", help="bearer token for the model server")
-    parser.add_argument("--engine-command", dest="engine_command", default="", help="local command, for docling and mineru")
+    parser.add_argument(
+        "--engine-command",
+        dest="engine_command",
+        default="",
+        help="local command, for docling and mineru",
+    )
     parser.add_argument("--dpi", type=int, default=200, help="resolution used to render pages for a vision model")
 
 
@@ -152,7 +159,10 @@ def _dry_run(args: argparse.Namespace) -> int:
     for document in documents:
         keeper = keepers[document.url]
         if keeper != document.url:
-            print(f"{'duplicate':<10} {'-':<22} {'-':<9} {'-':>5} {'-':>7}  {document.url:<45}  identical bytes to {keeper}")
+            print(
+                f"{'duplicate':<10} {'-':<22} {'-':<9} {'-':>5} {'-':>7}  "
+                f"{document.url:<45}  identical bytes to {keeper}"
+            )
             continue
         outcome = use_case.run(Document(name=document.url, content=document.path.read_bytes()))
         record = outcome.record
@@ -160,7 +170,10 @@ def _dry_run(args: argparse.Namespace) -> int:
         language = record.language if record else "-"
         pages = record.page_count if record else 0
         characters = record.character_count if record else 0
-        print(f"{outcome.status:<10} {engine:<22} {language:<9} {pages:>5} {characters:>7}  {document.url:<45}  {outcome.reason}")
+        print(
+            f"{outcome.status:<10} {engine:<22} {language:<9} {pages:>5} {characters:>7}  "
+            f"{document.url:<45}  {outcome.reason}"
+        )
         published += outcome.published
     print(f"{published} of {len(documents)} documents would be published")
     return 0

@@ -9,6 +9,7 @@ import pytest
 
 from finepdfs.domain.crawl import CrawlQuery
 from finepdfs.infrastructure.commoncrawl.source import CommonCrawlError, CommonCrawlSource
+from finepdfs.infrastructure.commoncrawl.warc import WarcParseError
 
 QUERY = CrawlQuery(crawl_id="CC-MAIN-2026-39", domain="example.com")
 
@@ -69,7 +70,7 @@ def test_a_range_request_asks_for_exactly_the_record_it_wants() -> None:
         offset=100,
         length=51,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(WarcParseError):
         _source(opener).fetch(record)  # the payload is not a WARC record, but the request was made
 
     assert seen["range"] == "bytes=100-150"

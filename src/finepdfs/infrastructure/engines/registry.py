@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from finepdfs.domain.ports import OcrEngine
@@ -61,17 +61,26 @@ def build_engine(config: EngineConfig) -> OcrEngine:
         from finepdfs.infrastructure.engines.paddleocr_vl import PaddleOcrVlEngine
         from finepdfs.infrastructure.engines.vlm_chat import ChatEndpoint, VlmChatTransport
 
-        return PaddleOcrVlEngine(
-            transport=VlmChatTransport(ChatEndpoint(base_url=config.base_url, model=config.model, api_key=config.api_key, timeout_seconds=config.timeout_seconds)),
-            renderer=PageRenderer(config.page_dpi),
+        endpoint = ChatEndpoint(
+            base_url=config.base_url,
+            model=config.model,
+            api_key=config.api_key,
+            timeout_seconds=config.timeout_seconds,
         )
+        return PaddleOcrVlEngine(transport=VlmChatTransport(endpoint), renderer=PageRenderer(config.page_dpi))
     if config.name == MINERU_ENGINE:
         from finepdfs.infrastructure.engines.mineru import MineruEngine, MineruHttpBackend, MineruSubprocessBackend
 
         if config.base_url:
-            backend = MineruHttpBackend(base_url=config.base_url, api_key=config.api_key, timeout_seconds=config.timeout_seconds)
+            backend = MineruHttpBackend(
+                base_url=config.base_url, api_key=config.api_key, timeout_seconds=config.timeout_seconds
+            )
         else:
-            backend = MineruSubprocessBackend(command=config.command or "mineru", work_dir=config.work_dir, timeout_seconds=config.timeout_seconds)
+            backend = MineruSubprocessBackend(
+                command=config.command or "mineru",
+                work_dir=config.work_dir,
+                timeout_seconds=config.timeout_seconds,
+            )
         return MineruEngine(backend=backend)
     raise UnknownEngine(f"unknown engine {config.name!r}; known engines are {', '.join(KNOWN_ENGINES)}")
 

@@ -9,7 +9,13 @@ from finepdfs.domain.ocr import OcrRoutingPolicy
 
 
 def _quality(**overrides) -> TextLayerQuality:
-    defaults = dict(page_count=10, pages_with_text=10, character_count=20_000, garbled_ratio=0.001, image_dominated_pages=0)
+    defaults = {
+        "page_count": 10,
+        "pages_with_text": 10,
+        "character_count": 20_000,
+        "garbled_ratio": 0.001,
+        "image_dominated_pages": 0,
+    }
     return TextLayerQuality(**{**defaults, **overrides})
 
 

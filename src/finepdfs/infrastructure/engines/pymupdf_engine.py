@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, TextLayerQuality, PageText
+from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText, TextLayerQuality
 from finepdfs.infrastructure.engines.pdf_document import PdfDocument, pymupdf_version
 
 
