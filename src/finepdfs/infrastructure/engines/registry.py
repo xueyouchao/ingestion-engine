@@ -34,13 +34,12 @@ class EngineConfig:
     timeout_seconds: float = 300.0
     work_dir: Path | None = None
     detail: str = ""
-    """The detail half of the engine's identity, when the address it is reached at is not stable.
-
-    A rented GPU answers on a new host every run, so its address cannot be the memo key without
-    re-reading the whole corpus each time (ADR-0005). Empty means the engine names itself, which is
-    right for anything reached at an address that does not move. This is what ``StableIdentity`` and
-    ``EngineIdentity`` both call ``detail``: the name is the engine's, the detail is the deployment's.
-    """
+    # The detail half of the engine's identity, when the address it is reached at is not stable.
+    #
+    # A rented GPU answers on a new host every run, so its address cannot be the memo key without
+    # re-reading the whole corpus each time (ADR-0005). Empty means the engine names itself, which is
+    # right for anything reached at an address that does not move. This is what ``StableIdentity`` and
+    # ``EngineIdentity`` both call ``detail``: the name is the engine's, the detail is the deployment's.
 
 
 def build_engine(config: EngineConfig) -> OcrEngine:
