@@ -30,17 +30,18 @@ the name says which Engine ran, the detail names the deployment behind it. A mod
 version change moves the detail and re-reads the corpus; a rented worker's new address does not
 (ADR-0005, ADR-0007).
 
-**Provider** — what supplies the Endpoint an Engine is reached at, for exactly as long as the run lasts.
-Three ship: none (the offline default), static (a server that already exists) and command (a start
-command that rents a worker, a stop command that gives it back). Modal and RunPod are another Provider
-behind the same seam, and no Engine knows about either (ADR-0007).
+**Provider** — what supplies the Endpoint an Engine is reached at for a run. Three ship: none (the
+offline default, which supplies nothing and rents nothing), static (a server that already exists and
+outlives the run) and command (a start command that rents a worker, a stop command that gives it back).
+Modal and RunPod are another Provider behind the same seam, and no Engine knows about either (ADR-0007).
 
-**Lease** — the lifetime of a Provider's Endpoint, taken around the run and given back on the way out,
-including when the run fails, because a leaked GPU bills by the hour.
+**Lease** — the hold a run takes on a Provider's Endpoint, released on the way out, including when the
+run fails: a rented worker is given back either way, because a leaked GPU bills by the hour.
 
-**Endpoint** — where a run reaches its Engine right now: a base URL, a model and an API key. Where the
-bytes go, never who the Engine is: an Endpoint carries the address a rented worker answers at today,
-Engine Identity carries the name that must not move with it (ADR-0007).
+**Endpoint** — the bundle a Provider supplies for a run: the base URL, model and API key where the bytes
+go right now, and the detail the memo remembers about the deployment behind them. The address moves with
+a rented worker; the detail must not move with it. It is the detail half of the Engine Identity, whose
+name says which Engine ran (ADR-0007).
 
 **Text Layer Quality** — what the embedded text of a PDF looks like when measured: characters per page,
 fraction of pages carrying text, garbled-character ratio, image-dominated pages.
