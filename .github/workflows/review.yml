@@ -1,0 +1,49 @@
+name: Review
+
+# The review loop: a model reads the pull-request diff on two axes (Standards, Spec) and upserts one
+# comment. It is deliberately non-blocking -- no model, no credentials and no comment may ever stop a
+# merge -- and with no repository secret configured it reaches GitHub Models through the built-in
+# GITHUB_TOKEN, so it works with zero setup.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  models: read
+
+jobs:
+  review:
+    name: review
+    runs-on: ubuntu-latest
+    # Advice, not a gate: a failure here must not fail the workflow or hold up the pull request.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Collect the diff
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git diff --unified=3 "origin/${BASE_REF}...HEAD" > pr.diff
+          wc -c < pr.diff
+      - name: Review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        run: python3 .github/scripts/review.py --diff pr.diff --prompt .github/prompts/review.md
