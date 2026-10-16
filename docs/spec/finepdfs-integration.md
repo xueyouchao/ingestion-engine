@@ -2,7 +2,7 @@
 
 - **Slug:** finepdfs-cocoindex
 - **Tracker:** local files, deliberately outside the repository. No issue tracker is configured for
-  this workspace and the GitHub CLI is not authenticated, so the spec lives here and the ticket slices
+  this workspace, though the GitHub CLI is authenticated, so the spec lives here and the ticket slices
   stay on the author's machine in `.scratch/finepdfs-cocoindex/issues/` (gitignored, never committed).
   If a tracker is configured later, publish these as issues.
 - **Vocabulary:** docs/GLOSSARY.md. **Decisions of record:** docs/adr/.
@@ -264,8 +264,8 @@ network-marked end-to-end test.
 
 ## Further Notes
 
-- This environment has no GPU and no authenticated GitHub CLI, so the PR is prepared locally as a
-  branch plus a PR body; pushing and opening require credentials the environment does not have.
+- This environment has no GPU, but its GitHub CLI is authenticated (as `xueyouchao`), so a branch and
+  PR body prepared here can be pushed and opened as a PR directly.
 - Common Crawl PDFs are fetched live; the corpus directory is not committed.
 - Engine licences differ (Docling MIT, PaddleOCR Apache-2.0, MinerU AGPL-3.0, pymupdf AGPL-3.0): the
   engine adapters are documented with their licence, and using an AGPL engine is the operator's choice.
