@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import shlex
+import sys
 from collections.abc import Callable, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -155,23 +156,34 @@ class CommandGpuProvider:
         endpoint = endpoint_from_start_output(started.stdout, self.start_command, self.model)
         try:
             yield endpoint
-        except BaseException as error:
-            # The worker is given back even when the run failed: a leaked GPU bills by the hour. Any
-            # failure in that attempt must not take the place of the error that ended the run, because
-            # that error is what the operator has to act on: report the leak beside it and re-raise it.
-            try:
-                self._release()
-            except Exception as leak:
-                logger.error(
-                    "the GPU stop command failed after the run had already failed, so the worker may "
-                    "still be billing: %s",
-                    leak,
-                )
-                error.add_note(f"the GPU stop command also failed: {leak}")
-            raise
-        # A worker that could not be given back keeps costing money, so a stop that fails after a run
-        # that otherwise finished is not swallowed either: the provider failed, and the CLI says so.
-        self._release()
+        finally:
+            # The worker is given back however the run ended: a leaked GPU bills by the hour. The error
+            # the run ended on is the one in flight right here, whether it was thrown into this lease by
+            # a plain `with`, or -- under CocoIndex -- never thrown in at all: the lifespan generator is
+            # resumed with `next()` while the failed update is still unwinding, so the `yield` above sees
+            # no exception to catch and the release has to read the traceback in flight instead.
+            self._release_reporting(sys.exc_info()[1])
+
+    def _release_reporting(self, run_error: BaseException | None) -> None:
+        """Give the worker back, and report a stop that failed without hiding the run's own error.
+
+        A stop that fails after a run that otherwise finished is the provider's failure, so
+        ``GpuStopFailed`` is what the CLI reports and exits 2 on. A stop that fails while the run is
+        already failing is reported beside that failure -- logged, and attached to its traceback as a
+        note -- and the run's own error is left to propagate untouched, because that is the error the
+        operator has to act on (ADR-0007).
+        """
+        try:
+            self._release()
+        except Exception as leak:
+            if run_error is None:
+                raise
+            logger.error(
+                "the GPU stop command failed after the run had already failed, so the worker may "
+                "still be billing: %s",
+                leak,
+            )
+            run_error.add_note(f"the GPU stop command also failed: {leak}")
 
     def _release(self) -> None:
         """Run the stop command, and refuse to pass a failure over in silence.
