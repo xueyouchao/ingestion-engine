@@ -1,11 +1,18 @@
 name: Upstream probe (temporary)
 
-# TEMPORARY diagnostic for ticket 24. Dispatch it by hand, read the numbers, then delete this file.
-# It answers one question: does the review endpoint close connections because several requests are in
-# flight against the one OLLAMA_API_KEY at once, or is it simply flaky when a single call is made?
-# The key only exists in Actions, so the measurement can only happen here.
+# TEMPORARY diagnostic for ticket 24. It runs on a push that touches this file, read the numbers, then
+# delete this file. It answers one question: does the review endpoint close connections because several
+# requests are in flight against the one OLLAMA_API_KEY at once, or is it simply flaky when a single
+# call is made? The key only exists in Actions, so the measurement can only happen here.
+#
+# It is a push trigger and not workflow_dispatch because dispatch is registered from the default
+# branch alone: a workflow that exists only on a feature branch answers
+# "Workflow does not have 'workflow_dispatch' trigger" and pushing master is not an option.
 
 on:
+  push:
+    branches: [fix/review-loop-resilience]
+    paths: ['.github/workflows/upstream-probe.yml']
   workflow_dispatch:
 
 concurrency:
