@@ -345,14 +345,17 @@ def leased_environment(environ: MutableMapping[str, str] | None = None) -> Itera
 def _static_endpoint(values: Mapping[str, str]) -> GpuEndpoint:
     """A fixed endpoint named by its model, never by its address.
 
-    ``FINEPDFS_ENGINE_IDENTITY`` and ``FINEPDFS_GPU_IDENTITY`` win when set; otherwise the model names
-    the deployment, which is what keeps the memo key still when the address moves (ADR-0007). An
-    operator who wants a different name has the identity variables for it.
+    A pinned ``FINEPDFS_ENGINE_IDENTITY`` wins the name the static provider derives, exactly as it wins
+    the command provider's derived one: ADR-0007 keeps an identity already set, so ``--engine-identity``
+    outlives the provider's default. ``FINEPDFS_GPU_IDENTITY`` names the deployment when nothing is
+    pinned; otherwise the model names it, which is what keeps the memo key still when the address moves.
+    This is the one place the two names meet, so this is where the precedence is decided;
+    ``export_endpoint`` publishes the answer rather than deciding it a second time.
     """
     base_url = values.get(GPU_BASE_URL, "").strip() or values.get(ENGINE_BASE_URL, "").strip()
     model = values.get(GPU_MODEL, "").strip() or values.get(ENGINE_MODEL, "").strip()
     api_key = values.get(GPU_API_KEY, "").strip() or values.get(ENGINE_API_KEY, "").strip()
-    identity = values.get(GPU_IDENTITY, "").strip() or values.get(ENGINE_IDENTITY, "").strip()
+    identity = values.get(ENGINE_IDENTITY, "").strip() or values.get(GPU_IDENTITY, "").strip()
     if not identity:
         identity = f"static:{model}" if model else STATIC
     return GpuEndpoint(base_url=base_url, model=model, api_key=api_key, identity=identity)

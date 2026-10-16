@@ -37,6 +37,7 @@ from finepdfs.infrastructure.compute.providers import (
     derive_identity,
     endpoint_from_start_output,
     gpu_provider_from_environment,
+    leased_environment,
 )
 from finepdfs.infrastructure.engines.registry import EngineConfig, build_engine
 from finepdfs.infrastructure.engines.stable_identity import StableIdentity
@@ -116,6 +117,41 @@ def test_a_static_provider_without_a_model_is_still_named_static() -> None:
 
     with provider.lease() as endpoint:
         assert endpoint.identity == "static"
+
+
+def test_the_pinned_engine_identity_wins_the_static_providers_own_name() -> None:
+    """The two names meet in one place, so one rule decides -- and it must be the rule the README states.
+
+    ADR-0007 keeps an identity that is already set, so ``--engine-identity`` pins the memo name and
+    outlives the provider's default. The static provider's own ``FINEPDFS_GPU_IDENTITY`` is that
+    default, so a pinned ``FINEPDFS_ENGINE_IDENTITY`` wins it; ``export_endpoint``'s setdefault then
+    agrees with the one decision instead of quietly taking it back.
+    """
+    environ = {
+        "FINEPDFS_GPU_PROVIDER": "static",
+        "FINEPDFS_GPU_BASE_URL": "http://host:8000/v1",
+        "FINEPDFS_GPU_MODEL": "m",
+        "FINEPDFS_GPU_IDENTITY": "gpu:v1",
+        "FINEPDFS_ENGINE_IDENTITY": "pinned:v1",
+    }
+
+    with leased_environment(environ) as endpoint:
+        assert endpoint.identity == "pinned:v1", "the pinned identity is the memo name"
+        assert environ["FINEPDFS_ENGINE_IDENTITY"] == "pinned:v1", "the export must not decide it again"
+
+
+def test_the_gpu_identity_names_the_static_deployment_when_nothing_is_pinned() -> None:
+    """The provider's own name is the fallback, not a loser: with no pin it is what the memo remembers."""
+    environ = {
+        "FINEPDFS_GPU_PROVIDER": "static",
+        "FINEPDFS_GPU_BASE_URL": "http://host:8000/v1",
+        "FINEPDFS_GPU_MODEL": "m",
+        "FINEPDFS_GPU_IDENTITY": "gpu:v1",
+    }
+
+    with leased_environment(environ) as endpoint:
+        assert endpoint.identity == "gpu:v1"
+        assert environ["FINEPDFS_ENGINE_IDENTITY"] == "gpu:v1"
 
 
 def test_moving_a_static_address_does_not_move_the_memo_key() -> None:
