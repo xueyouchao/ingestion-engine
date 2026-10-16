@@ -94,8 +94,11 @@ RETRYABLE_FAILURES = frozenset({OUTCOME_CONNECTION_CLOSED})
 FINDINGS_OPEN = re.compile(r"<!-- finepdfs-findings revision=(?P<revision>[^\s>]{1,64}) -->")
 FINDINGS_CLOSE = "<!-- /finepdfs-findings -->"
 # A comment the old code posted: findings under `### <axis> -- model` headings, no markers. Read back
-# once, at the upgrade, so the first findings-free run afterwards does not erase them.
-LEGACY_SECTION = re.compile(r"^### ", re.MULTILINE)
+# once, at the upgrade, so the first findings-free run afterwards does not erase them. The old code
+# wrote a section for every axis, failures included, so a section's own text has to be checked too: a
+# run note kept as findings would outlive the findings it displaced.
+LEGACY_AXIS_SECTION = re.compile(r"^### (?P<axis>.+?) — (?P<model>`[^`]+`)\s*$", re.MULTILINE)
+LEGACY_RUN_NOTE = re.compile(r"^_(?:This axis did not run:.*|The model returned an empty review\.)_$", re.DOTALL)
 LEGACY_REVISION = "pre-marker"
 
 
@@ -569,7 +572,10 @@ def extract_findings(body: str) -> RetainedFindings | None:
     A comment posted before this branch exists has no markers: it carries its findings as plain
     ``### <axis> -- model`` sections, the way the old code wrote them. Those are still findings, and
     the first findings-free run after the upgrade is exactly when a reader would miss them, so they
-    are read back and stamped as ``pre-marker`` rather than dropped.
+    are read back and stamped as ``pre-marker`` rather than dropped -- but only the sections that
+    actually found something. The old code wrote a section for a failed axis too, and its body there is
+    a single run note in italics; keeping that would let one failed run's "did not run" line outlive
+    the findings it displaced.
     """
     opening = FINDINGS_OPEN.search(body)
     if opening is not None:
@@ -579,11 +585,17 @@ def extract_findings(body: str) -> RetainedFindings | None:
         markdown = body[opening.end() : end].strip()
         return RetainedFindings(opening.group("revision"), markdown) if markdown else None
 
-    legacy = LEGACY_SECTION.search(body)
-    if legacy is None:
+    headings = list(LEGACY_AXIS_SECTION.finditer(body))
+    kept = []
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
+        markdown = body[heading.end() : end].split(FINDINGS_CLOSE)[0].strip()
+        if not markdown or LEGACY_RUN_NOTE.match(markdown):
+            continue
+        kept.append(f"### {heading.group('axis')} — {heading.group('model')}\n\n{markdown}\n")
+    if not kept:
         return None
-    markdown = body[legacy.start() :].split(FINDINGS_CLOSE)[0].strip()
-    return RetainedFindings(LEGACY_REVISION, markdown) if markdown else None
+    return RetainedFindings(LEGACY_REVISION, "\n".join(kept).strip())
 
 
 def reviewed_revision(env: dict[str, str]) -> str:

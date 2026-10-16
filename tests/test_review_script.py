@@ -838,8 +838,10 @@ def test_a_findings_free_run_posts_nothing_when_the_comment_cannot_be_read(monke
 def test_a_run_with_findings_still_posts_when_the_old_comment_cannot_be_read(monkeypatch, tmp_path) -> None:
     """Fresh findings are worth more than the stale ones a failed read could not show, so they are posted.
 
-    This pins the rule at the seam this file owns -- what ``main`` hands to ``post``. Whether the second
-    read inside ``upsert_comment`` then finds the comment is a separate call, tested there.
+    This pins the rule at the seam this file owns -- what ``main`` hands to ``post``. The second read
+    inside ``upsert_comment``, which decides patch-or-create from it, is pinned by
+    ``test_a_later_run_updates_the_existing_comment_instead_of_adding_another`` and
+    ``test_the_first_run_creates_the_comment``.
     """
     code, posted = _run(
         monkeypatch,
@@ -932,3 +934,60 @@ def test_an_unknown_review_call_error_is_not_reported_as_an_unusable_body() -> N
 
     assert status == review.OUTCOME_UNEXPECTED
     assert "something else went wrong" in detail
+
+
+def test_a_pre_marker_comment_that_only_reports_failed_axes_yields_no_findings() -> None:
+    """Master posts a section for a failed axis too; its run note is not a finding and must not be kept."""
+    body = (
+        f"{review.MARKER}\n\n## LLM review\n\n"
+        "### Standards — `deepseek-v4.1-flash`\n\n"
+        "_This axis did not run: <urlopen error Remote end closed connection without response>_\n\n"
+        "### Spec — `glm-5.3-flash`\n\n"
+        "_The model returned an empty review._\n"
+    )
+
+    assert review.extract_findings(body) is None
+
+
+def test_a_pre_marker_comment_keeps_only_the_axis_that_found_something() -> None:
+    """One axis failing in the old format must not carry its note into the retained findings."""
+    body = (
+        f"{review.MARKER}\n\n## LLM review\n\n"
+        "### Standards — `deepseek-v4.1-flash`\n\n"
+        "_This axis did not run: The read operation timed out_\n\n"
+        "### Spec — `glm-5.3-flash`\n\n"
+        "- `docs/GLOSSARY.md` still spells the retired term.\n"
+    )
+
+    retained = review.extract_findings(body)
+
+    assert retained is not None
+    assert retained.revision == "pre-marker"
+    assert "### Spec — `glm-5.3-flash`" in retained.markdown
+    assert "still spells the retired term" in retained.markdown
+    assert "### Standards" not in retained.markdown
+    assert "did not run" not in retained.markdown
+
+
+def test_a_pre_marker_body_from_a_failing_run_still_posts_nothing_to_keep(monkeypatch, tmp_path) -> None:
+    """End to end: upgrade onto a comment whose only content is master's two failure notes."""
+    legacy = (
+        f"{review.MARKER}\n\n## LLM review\n\n"
+        "### Standards — `deepseek-v4.1-flash`\n\n"
+        "_This axis did not run: <urlopen error Remote end closed connection without response>_\n\n"
+        "### Spec — `glm-5.3-flash`\n\n"
+        "_This axis did not run: <urlopen error Remote end closed connection without response>_\n"
+    )
+
+    code, posted = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key"},
+        opener=_dropped_opener,
+        previous_body=legacy,
+    )
+
+    assert code == 0
+    assert len(posted) == 1
+    assert "did not run" not in posted[0]
+    assert "finepdfs-findings revision=" not in posted[0]
