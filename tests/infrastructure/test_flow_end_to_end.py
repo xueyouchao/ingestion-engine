@@ -25,6 +25,7 @@ from finepdfs.domain.ocr import OcrRoutingPolicy
 from finepdfs.domain.publishing import PublishPolicy
 from finepdfs.infrastructure.cocoindex import flow
 from finepdfs.infrastructure.cocoindex.runtime import Runtime
+from finepdfs.infrastructure.compute.providers import GpuStopFailed
 from finepdfs.infrastructure.corpus.index import document_key
 from finepdfs.infrastructure.corpus.manifest import CorpusEntry, CorpusManifest, relative_pdf_path
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextEngine, PymupdfTextLayerProbe
@@ -175,6 +176,46 @@ def test_a_failed_run_gives_the_worker_back_and_clears_the_endpoint(monkeypatch,
     assert os.environ["FINEPDFS_ENGINE_MODEL"] == "operator-pinned", "the lease's export must be undone"
     with pytest.raises(RuntimeError):
         flow.active_runtime()
+
+
+def test_a_stop_command_that_fails_after_a_good_run_reaches_the_flow(monkeypatch, tmp_path, corpus) -> None:
+    """The release runs at the flow's own lifespan, so a leak must reach the caller from there too.
+
+    The provider tests drive the lease directly; this drives the seam production actually takes --
+    `cocoindex update main.py` -- where the lease is taken inside the lifespan. The run publishes, then
+    the stop command fails: the work is done, the worker is not back, and that is a provider failure
+    rather than something CocoIndex's own teardown may swallow.
+    """
+    start_script = tmp_path / "start_worker.py"
+    start_script.write_text(
+        "import json\n"
+        "print(json.dumps({'base_url': 'http://127.0.0.1:9/v1', 'model': 'm', 'identity': 'flow:test'}))\n"
+    )
+    stop_script = tmp_path / "stop_worker.py"
+    stop_script.write_text("import sys\nsys.exit(3)\n")
+
+    monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
+    monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", f"{sys.executable} {start_script}")
+    monkeypatch.setenv("FINEPDFS_GPU_STOP_COMMAND", f"{sys.executable} {stop_script}")
+    monkeypatch.setenv("FINEPDFS_DB", str(tmp_path / "flow.db"))
+    monkeypatch.setenv("FINEPDFS_CORPUS", str(corpus))
+    monkeypatch.setenv("FINEPDFS_OUT", str(tmp_path / "out"))
+    monkeypatch.setenv("FINEPDFS_ENGINE", "pymupdf")
+    monkeypatch.delenv("FINEPDFS_ENGINE_BASE_URL", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_API_KEY", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_IDENTITY", raising=False)
+    flow.configure_runtime(None)
+
+    async def good_run() -> None:
+        async with coco.runtime():
+            await flow.build_app().update()
+
+    with pytest.raises(GpuStopFailed, match="exited with 3"):
+        asyncio.run(good_run())
+
+    assert (tmp_path / "out" / "records" / f"{document_key(ONE)}.json").exists(), "the run did its work"
+    assert "FINEPDFS_ENGINE_BASE_URL" not in os.environ, "the returned worker must not stay the engine"
+    assert "FINEPDFS_ENGINE_API_KEY" not in os.environ
 
 
 def test_a_run_publishes_real_text_records_and_exclusions(monkeypatch, tmp_path, corpus) -> None:
