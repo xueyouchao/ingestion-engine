@@ -156,6 +156,37 @@ def test_a_command_that_only_prints_a_url_is_understood() -> None:
     assert endpoint.identity.startswith("command:")
 
 
+def test_a_bare_url_still_names_the_model_the_run_configured() -> None:
+    """ADR-0007: the derived identity is the command line *and the model*, so a model change re-reads."""
+    runner = RecordingRunner(stdout="https://rented.example/v1\n")
+    provider = gpu_provider_from_environment(
+        {
+            "FINEPDFS_GPU_PROVIDER": "command",
+            "FINEPDFS_GPU_START_COMMAND": START,
+            "FINEPDFS_ENGINE_MODEL": "PaddleOCR-VL-1.6",
+        },
+        runner=runner,
+    )
+
+    with provider.lease() as endpoint:
+        assert endpoint.identity == derive_identity(START, "PaddleOCR-VL-1.6")
+
+
+def test_the_model_a_command_prints_wins_over_the_one_the_run_configured() -> None:
+    runner = RecordingRunner(stdout='{"base_url": "https://rented.example/v1", "model": "printed"}')
+    provider = gpu_provider_from_environment(
+        {
+            "FINEPDFS_GPU_PROVIDER": "command",
+            "FINEPDFS_GPU_START_COMMAND": START,
+            "FINEPDFS_ENGINE_MODEL": "configured",
+        },
+        runner=runner,
+    )
+
+    with provider.lease() as endpoint:
+        assert endpoint.identity == derive_identity(START, "printed")
+
+
 def test_a_derived_identity_is_stable_across_runs_and_follows_the_model() -> None:
     assert derive_identity(START, "m") == derive_identity(START, "m")
     assert derive_identity(START, "m") != derive_identity(START, "other")

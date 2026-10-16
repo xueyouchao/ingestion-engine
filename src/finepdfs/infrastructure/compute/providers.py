@@ -81,21 +81,23 @@ class CommandGpuProvider:
 
         {"base_url": "https://...", "model": "...", "api_key": "...", "identity": "..."}
 
-    A bare URL line is accepted too; then the model and identity are whatever the rest of the run
-    configured. An identity is required for an ephemeral address, because the memo key is the identity
-    (ADR-0005). When the command does not supply one it is derived from the command line and the model,
-    which is stable across runs and changes when either does.
+    A bare URL line is accepted too. Then the command names no model, so the model the run configured
+    is the one in play, and the derived identity names it (ADR-0007). An identity is required for an
+    ephemeral address, because the memo key is the identity (ADR-0005). When the command does not
+    supply one it is derived from the command line and the model, which is stable across runs and
+    changes when either does.
     """
 
     start_command: str
     stop_command: str = ""
+    model: str = ""
     runner: CommandRunner = field(default_factory=SubprocessRunner)
 
     @contextmanager
     def lease(self) -> Iterator[GpuEndpoint]:
         started = self.runner.run(shlex.split(self.start_command))
         require_success(started)
-        endpoint = endpoint_from_start_output(started.stdout, self.start_command)
+        endpoint = endpoint_from_start_output(started.stdout, self.start_command, self.model)
         try:
             yield endpoint
         finally:
@@ -104,11 +106,16 @@ class CommandGpuProvider:
                 self.runner.run(shlex.split(self.stop_command))
 
 
-def endpoint_from_start_output(stdout: str, command: str) -> GpuEndpoint:
-    """Read where a start command said its worker is listening."""
+def endpoint_from_start_output(stdout: str, command: str, model: str = "") -> GpuEndpoint:
+    """Read where a start command said its worker is listening.
+
+    ``model`` is the model the run configured for the engine. It is the model in play when the command
+    prints a bare URL and therefore names none of its own, so the derived identity can still name it:
+    ADR-0007 derives the identity from the command line *and the model*.
+    """
     payload = _json_object(stdout)
     base_url = str(payload.get("base_url") or payload.get("url") or "").strip()
-    model = str(payload.get("model") or "").strip()
+    served_model = str(payload.get("model") or "").strip() or model.strip()
     api_key = str(payload.get("api_key") or "").strip()
     identity = str(payload.get("identity") or "").strip()
     if not base_url:
@@ -117,9 +124,9 @@ def endpoint_from_start_output(stdout: str, command: str) -> GpuEndpoint:
         raise CommandFailed(f"the GPU start command printed no endpoint: {stdout.strip()[:200]!r}")
     return GpuEndpoint(
         base_url=base_url,
-        model=model,
+        model=served_model,
         api_key=api_key,
-        identity=identity or derive_identity(command, model),
+        identity=identity or derive_identity(command, served_model),
     )
 
 
@@ -178,6 +185,10 @@ def _command_provider(values: Mapping[str, str], runner: CommandRunner | None) -
     return CommandGpuProvider(
         start_command=start_command,
         stop_command=values.get(GPU_STOP_COMMAND, "").strip(),
+        # FINEPDFS_ENGINE_MODEL is the model the run will actually ask for: it is the one the engine is
+        # built with, and the one a bare URL's derived identity has to name. GPU_MODEL belongs to the
+        # static provider and never reaches the engine, so it is not a fallback here.
+        model=values.get(ENGINE_MODEL, "").strip(),
         runner=runner or SubprocessRunner(timeout),
     )
 

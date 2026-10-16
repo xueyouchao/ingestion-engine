@@ -135,8 +135,9 @@ A GPU engine can be pointed at a server you run, or at one rented for the length
 ~~~~
 
 The start command prints one JSON object (`{"base_url": ..., "model": ..., "api_key": ..., "identity": ...}`)
-or a bare URL line. Modal and RunPod are a command line today and an adapter behind the same seam later:
-no engine knows about either, and neither SDK is a dependency.
+or a bare URL line; a bare URL names no model, so `FINEPDFS_ENGINE_MODEL` is the model in play and the
+derived identity names it. Modal and RunPod are a command line today and an adapter behind the same seam
+later: no engine knows about either, and neither SDK is a dependency.
 
 Why the identity is separate from the address: the memo key is `(content digest, engine name, engine
 identity)` (ADR-0005), and a rented worker answers on a new hostname every run. The address is where the
