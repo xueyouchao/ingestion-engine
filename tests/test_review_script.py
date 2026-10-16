@@ -73,6 +73,7 @@ def _run(
     opener=None,
     diff_text: str | None = None,
     previous_body: str | None = None,
+    read_raises: bool = False,
 ):
     """Drive ``main`` end to end with the comment posting captured instead of reaching GitHub."""
     posted: list[str] = []
@@ -81,13 +82,18 @@ def _run(
     )
     # The retry backoff is real seconds; a test that stubs a dropped socket must not sleep through it.
     monkeypatch.setattr(review, "RETRY_BACKOFF_SECONDS", 0.0, raising=False)
+
+    def unreadable(repo, number):
+        raise RuntimeError("gh: HTTP 500")
+
     monkeypatch.setattr(
         review,
         "find_comment",
-        lambda repo, number: review.ExistingComment("1", previous_body)
+        unreadable
+        if read_raises
+        else lambda repo, number: review.ExistingComment("1", previous_body)
         if previous_body is not None
         else None,
-        raising=False,
     )
     for name in (
         "OLLAMA_API_KEY",
@@ -784,9 +790,89 @@ def test_the_revision_stamp_moves_with_the_head(monkeypatch, tmp_path) -> None:
     assert "aaaaaaa" not in second[0]
 
 
-def test_the_workflow_hands_over_the_head_sha_and_the_run_url() -> None:
-    """The comment can only stamp the revision it reviewed if the workflow tells it which one."""
+def test_the_workflow_hands_over_the_revision_it_actually_diffed() -> None:
+    """A queued run may check out a later merge ref, so the stamp must name the head it diffed."""
     workflow = (REPO_ROOT / ".github" / "workflows" / "review.yml").read_text(encoding="utf-8")
 
-    assert "github.event.pull_request.head.sha" in workflow
+    assert "REVIEWED_SHA=$(git rev-parse --verify -q HEAD^2 || git rev-parse HEAD)" in workflow
+    assert "HEAD_SHA: ${{ env.REVIEWED_SHA }}" in workflow
     assert "github.run_id" in workflow
+
+
+def test_findings_from_an_unknown_revision_are_still_kept(monkeypatch, tmp_path) -> None:
+    """With no head SHA the stamp is ``unknown``; the reader must still find the region it wrote."""
+    _, first = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key"},
+        opener=_findings_opener("findings kept without a revision"),
+    )
+
+    assert "from `unknown`" in first[0]
+
+    _, second = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key"},
+        opener=_dropped_opener,
+        previous_body=first[0],
+    )
+
+    assert "findings kept without a revision" in second[0]
+
+
+def test_a_findings_free_run_posts_nothing_when_the_comment_cannot_be_read(monkeypatch, tmp_path) -> None:
+    """A failed read is not an absent comment: replacing a body we could not read could erase findings."""
+    code, posted = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key"},
+        opener=_dropped_opener,
+        read_raises=True,
+    )
+
+    assert code == 0
+    assert posted == []
+
+
+def test_a_run_with_findings_still_posts_when_the_old_comment_cannot_be_read(monkeypatch, tmp_path) -> None:
+    """The read failure cannot make fresh findings worth less than the stale ones it could not see."""
+    code, posted = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key"},
+        opener=_findings_opener("fresh findings"),
+        read_raises=True,
+    )
+
+    assert code == 0
+    assert len(posted) == 1
+    assert "fresh findings" in posted[0]
+
+
+def test_an_axis_abandoned_mid_retry_still_names_the_class_it_reached(monkeypatch, tmp_path) -> None:
+    """A retry must not hide why the axis was in trouble when the deadline takes the retry too."""
+    calls: list[str] = []
+
+    def open_(request, timeout=None):
+        model = json.loads(request.data)["model"]
+        calls.append(model)
+        if model == "glm-5.3-flash":
+            if calls.count(model) == 1:
+                raise urllib.error.URLError(
+                    http.client.RemoteDisconnected("Remote end closed connection without response")
+                )
+            time.sleep(5)
+        answer = {"choices": [{"message": {"content": "standards findings"}}]}
+        return _Response(json.dumps(answer).encode("utf-8"), content_type="application/json")
+
+    monkeypatch.setattr(review, "AXIS_RUN_DEADLINE_SECONDS", 0.6)
+    started = time.monotonic()
+    code, posted = _run(monkeypatch, tmp_path, env={"OLLAMA_API_KEY": "test-key"}, opener=open_)
+    elapsed = time.monotonic() - started
+
+    assert code == 0
+    assert elapsed < 3
+    assert "abandoned at the stage deadline" in posted[0]
+    assert "the last attempt ended with: connection closed without response" in posted[0]
+    assert "standards findings" in posted[0]

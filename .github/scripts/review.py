@@ -89,7 +89,9 @@ RETRYABLE_FAILURES = frozenset({OUTCOME_CONNECTION_CLOSED})
 
 # The findings region inside the one comment, so a later run can keep it instead of replacing the whole
 # body. The revision rides in the opening marker: that is what lets a reader tell stale from current.
-FINDINGS_OPEN = re.compile(r"<!-- finepdfs-findings revision=(?P<revision>[0-9a-fA-F]{7,40}) -->")
+# The token is any non-space run, not just a hex SHA, so the ``unknown`` stamp written when no revision
+# is available still round-trips instead of silently making the findings unkeepable.
+FINDINGS_OPEN = re.compile(r"<!-- finepdfs-findings revision=(?P<revision>[^\s>]{1,64}) -->")
 FINDINGS_CLOSE = "<!-- /finepdfs-findings -->"
 
 
@@ -468,10 +470,12 @@ def run_axes(
     awaited, so a hung socket cannot hold the job open: the surviving axis posts regardless.
 
     A connection the server closed without answering is retried, with backoff, up to
-    :data:`RETRY_ATTEMPTS`; the retry stops early rather than start a call that would run past the
-    stage deadline. Every other class is reported as it happened.
+    :data:`RETRY_ATTEMPTS`. The guard only keeps the next attempt's *start* inside the stage deadline;
+    an attempt that then runs long is abandoned like any other, and the class the axis last reached
+    travels with the abandonment so a retry does not hide why the axis was in trouble.
     """
     outcomes: dict[str, AxisOutcome] = {}
+    last_failure: dict[str, AxisOutcome] = {}
     lock = threading.Lock()
     deadline = time.monotonic() + AXIS_RUN_DEADLINE_SECONDS
 
@@ -485,16 +489,17 @@ def run_axes(
                 review = chat(backend, axis.model, prompts[axis.name], opener)
             except Exception as error:  # Broad on purpose: one axis failing must not sink the other.
                 status, detail = classify_failure(error)
-                retry = (
+                outcome = AxisOutcome(axis, status, detail, time.monotonic() - started, None, attempts)
+                with lock:
+                    last_failure[axis.name] = outcome
+                if (
                     status in RETRYABLE_FAILURES
                     and attempts < RETRY_ATTEMPTS
                     and time.monotonic() + backoff < deadline
-                )
-                if retry:
+                ):
                     time.sleep(backoff)
                     backoff *= 2
                     continue
-                outcome = AxisOutcome(axis, status, detail, time.monotonic() - started, None, attempts)
             else:
                 status = OUTCOME_FINDINGS if review else OUTCOME_EMPTY
                 outcome = AxisOutcome(
@@ -517,7 +522,10 @@ def run_axes(
     for axis in axes:
         outcome = outcomes.get(axis.name)
         if outcome is None:
-            outcome = AxisOutcome(axis, OUTCOME_ABANDONED, "", AXIS_RUN_DEADLINE_SECONDS, None, 0)
+            known = last_failure.get(axis.name)
+            detail = f"the last attempt ended with: {known.status}" if known else ""
+            attempts = known.attempts if known else 0
+            outcome = AxisOutcome(axis, OUTCOME_ABANDONED, detail, AXIS_RUN_DEADLINE_SECONDS, None, attempts)
         results.append(outcome)
     return results
 
@@ -602,7 +610,7 @@ def render_comment(
                 f"`{revision}` and produced none of its own, so they are kept rather than erased.\n"
             )
 
-    parts = [MARKER, "", "## LLM review", ""]
+    parts = ["## LLM review", ""]
     if run_url:
         parts.append(f"Reviewed `{revision}` — [the run]({run_url})")
     else:
@@ -626,7 +634,7 @@ def render_comment(
             "",
             FINDINGS_CLOSE,
         ]
-    return "\n".join(parts).strip() + "\n"
+    return comment_body("\n".join(parts))
 
 
 def _gh(arguments: list[str]) -> subprocess.CompletedProcess[str]:
@@ -661,13 +669,18 @@ def find_comment(repo: str, number: str) -> ExistingComment | None:
     return found[-1] if found else None
 
 
-def read_comment(repo: str, number: str) -> ExistingComment | None:
-    """The existing comment, or ``None`` when it cannot be read; a failed read must not lose the run."""
+def read_comment(repo: str, number: str) -> tuple[ExistingComment | None, bool]:
+    """The existing comment and whether reading it worked.
+
+    A failed read is not the absence of a comment: treating the two alike would let a findings-free run
+    replace a body it could not see, which is exactly the erasure this module exists to prevent. The
+    caller gets the flag so it can decline to overwrite what it could not read.
+    """
     try:
-        return find_comment(repo, number)
+        return find_comment(repo, number), True
     except Exception as error:  # Broad on purpose: the review is non-blocking by design.
         print(f"could not read the existing review comment: {error}", file=sys.stderr)
-        return None
+        return None, False
 
 
 def upsert_comment(repo: str, number: str, body: str, comment_id: str | None = None) -> None:
@@ -752,7 +765,7 @@ def main(argv: list[str] | None = None, opener=None) -> int:
     env = os.environ
     revision = reviewed_revision(env)
     run_url = (env.get("RUN_URL") or "").strip()
-    previous = read_comment(args.repo, args.pr_number)
+    previous, read_ok = read_comment(args.repo, args.pr_number)
 
     backend = resolve_backend(env)
     if backend is None:
@@ -778,6 +791,18 @@ def main(argv: list[str] | None = None, opener=None) -> int:
     for outcome in outcomes:
         if not outcome.findings:
             print(f"{outcome.axis.name} review call: {outcome.label}", file=sys.stderr)
+
+    if not read_ok and not any(outcome.findings for outcome in outcomes):
+        # Composing now would replace a body this run could not read with one that has no findings in
+        # it, and whatever findings it held would be gone. Not posting keeps the record; a run with
+        # findings of its own may still replace it, because those findings are worth more than the
+        # stale ones and the read failure cannot change that.
+        print(
+            "not posting: this run found nothing and the existing comment could not be read, "
+            "so replacing it could erase findings",
+            file=sys.stderr,
+        )
+        return 0
 
     post(
         args.repo,
