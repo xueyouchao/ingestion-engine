@@ -19,6 +19,8 @@ from finepdfs.infrastructure.compute import providers
 from finepdfs.infrastructure.compute.endpoint import GpuEndpoint, export_endpoint
 from finepdfs.infrastructure.compute.providers import (
     CommandGpuProvider,
+    GpuStartFailed,
+    MisconfiguredGpuProvider,
     NoGpuProvider,
     StaticGpuProvider,
     UnknownGpuProvider,
@@ -198,9 +200,23 @@ def test_a_start_command_that_prints_nothing_is_an_error() -> None:
         endpoint_from_start_output("nothing useful here", START)
 
 
-def test_a_command_provider_without_a_start_command_is_rejected() -> None:
-    with pytest.raises(UnknownGpuProvider):
+def test_a_failing_start_command_is_a_provider_failure_of_its_own() -> None:
+    """A provider that cannot start is reported by the CLI; an engine that fails later is not this."""
+    runner = RecordingRunner(returncode=1)
+    provider = CommandGpuProvider(start_command=START, stop_command=STOP, runner=runner)
+
+    with pytest.raises(GpuStartFailed), provider.lease():
+        pass
+
+    assert not issubclass(GpuStartFailed, CommandFailed)
+
+
+def test_a_known_provider_missing_its_start_command_is_misconfigured_not_unknown() -> None:
+    """'No such provider' and 'this provider is incomplete' send a reader to different places."""
+    with pytest.raises(MisconfiguredGpuProvider, match="FINEPDFS_GPU_START_COMMAND"):
         gpu_provider_from_environment({"FINEPDFS_GPU_PROVIDER": "command"})
+
+    assert not issubclass(MisconfiguredGpuProvider, UnknownGpuProvider)
 
 
 def test_a_new_provider_is_registered_in_one_place(monkeypatch) -> None:
@@ -307,3 +323,14 @@ def test_a_misconfigured_provider_fails_the_cli_cleanly(monkeypatch, capsys) -> 
 
     assert code == 2
     assert "FINEPDFS_GPU_START_COMMAND" in capsys.readouterr().err
+
+
+def test_a_start_command_that_cannot_run_fails_the_cli_cleanly(monkeypatch, capsys) -> None:
+    """A start command that exits nonzero cannot start the run, so the CLI reports it and exits 2."""
+    monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
+    monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", "/bin/false")
+
+    code = main(["dry-run", "--engine", "paddleocr-vl"])
+
+    assert code == 2
+    assert "GPU start command" in capsys.readouterr().err

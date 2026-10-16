@@ -15,6 +15,8 @@ from finepdfs.infrastructure.cocoindex.runtime import Runtime, runtime_from_envi
 from finepdfs.infrastructure.commoncrawl.source import CommonCrawlSource
 from finepdfs.infrastructure.compute.providers import (
     PROVIDERS,
+    GpuStartFailed,
+    MisconfiguredGpuProvider,
     UnknownGpuProvider,
     leased_environment,
 )
@@ -22,7 +24,6 @@ from finepdfs.infrastructure.corpus.fetch import fetch_corpus
 from finepdfs.infrastructure.corpus.index import CorpusIndex
 from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifest
 from finepdfs.infrastructure.engines.registry import KNOWN_ENGINES
-from finepdfs.infrastructure.engines.subprocess_support import CommandFailed
 from finepdfs.infrastructure.publishing.disk import PublishedCorpus
 
 DEFAULT_CORPUS = Path("corpus")
@@ -139,9 +140,11 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(message)s")
     try:
         return _dispatch(args)
-    except (UnknownGpuProvider, CommandFailed) as error:
-        # A run that cannot start is an operator problem, not a crash: say so and exit 2, the same way
-        # an empty corpus is refused rather than run.
+    except (UnknownGpuProvider, MisconfiguredGpuProvider, GpuStartFailed) as error:
+        # A run that cannot lease its GPU is an operator problem, not a crash: say so and exit 2, the
+        # same way an empty corpus is refused rather than run. Deliberately not CommandFailed: an engine
+        # whose own command fails is a run that started, and its traceback names the engine, not the
+        # provider (ADR-0007).
         print(error, file=sys.stderr)
         return 2
 

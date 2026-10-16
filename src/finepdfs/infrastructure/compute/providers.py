@@ -47,7 +47,25 @@ COMMAND = "command"
 
 
 class UnknownGpuProvider(ValueError):
-    """Raised when a run names a GPU provider that does not exist, or leaves one unusable."""
+    """Raised when a run names a GPU provider that does not exist."""
+
+
+class MisconfiguredGpuProvider(ValueError):
+    """Raised when a known GPU provider is missing what it needs to run.
+
+    A class of its own, not ``UnknownGpuProvider``: "there is no provider by that name" and "the
+    provider you named cannot run" are different failures with different fixes, and the CLI decides by
+    type. The unknown error stays for an actually unknown name.
+    """
+
+
+class GpuStartFailed(RuntimeError):
+    """Raised when a provider cannot start its worker, so the run cannot lease an endpoint.
+
+    A class of its own, not ``CommandFailed``: an engine raises that too when its own command fails, and
+    a run that cannot start is an operator problem the CLI reports, while an engine that started and
+    then failed keeps its traceback (ADR-0007).
+    """
 
 
 class NoGpuProvider:
@@ -95,9 +113,14 @@ class CommandGpuProvider:
 
     @contextmanager
     def lease(self) -> Iterator[GpuEndpoint]:
-        started = self.runner.run(shlex.split(self.start_command))
-        require_success(started)
-        endpoint = endpoint_from_start_output(started.stdout, self.start_command, self.model)
+        # The start command is the provider's own, so its failure is "this run cannot start", not an
+        # engine failure: wrap it in the error the CLI reports, and keep CommandFailed for engines.
+        try:
+            started = self.runner.run(shlex.split(self.start_command))
+            require_success(started)
+            endpoint = endpoint_from_start_output(started.stdout, self.start_command, self.model)
+        except CommandFailed as error:
+            raise GpuStartFailed(f"the GPU start command failed: {error}") from error
         try:
             yield endpoint
         finally:
@@ -180,7 +203,7 @@ def _static_provider(values: Mapping[str, str], _runner: CommandRunner | None) -
 def _command_provider(values: Mapping[str, str], runner: CommandRunner | None) -> GpuProvider:
     start_command = values.get(GPU_START_COMMAND, "").strip()
     if not start_command:
-        raise UnknownGpuProvider(f"{GPU_PROVIDER}={COMMAND} needs {GPU_START_COMMAND}")
+        raise MisconfiguredGpuProvider(f"{GPU_PROVIDER}={COMMAND} needs {GPU_START_COMMAND}")
     timeout = float(values.get(GPU_TIMEOUT, "1800"))
     return CommandGpuProvider(
         start_command=start_command,
