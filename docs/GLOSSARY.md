@@ -41,6 +41,9 @@ is cheap, so it runs on every change.
 **Page Language** — the language or script tag identified for one Page Text, with a confidence; the
 chosen adapter's vocabulary decides which (`Latn` under `script`, `eng` under `fasttext`).
 
+**Language Mode** — which language adapter a run wires (`script`, the default, or `fasttext`), and so
+whether a Page Language names a script or a language. `FINEPDFS_LANGUAGE` selects it.
+
 **Language Policy** — how Page Languages become the Document's language and which pages are dropped
 for being below the confidence threshold.
 
