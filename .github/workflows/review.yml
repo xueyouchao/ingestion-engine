@@ -40,12 +40,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
-          REVIEW_MODEL_STANDARDS: ${{ vars.REVIEW_MODEL_STANDARDS }}
-          REVIEW_MODEL_SPEC: ${{ vars.REVIEW_MODEL_SPEC }}
+          # Every repository variable at once, so this file never spells an axis name: the prompt's
+          # headings are the only spelling and the optional REVIEW_MODEL_<AXIS> override is read there.
+          REVIEW_VARIABLES: ${{ toJSON(vars) }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PR_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
         run: python3 .github/scripts/review.py --diff pr.diff --prompt .github/prompts/review.md

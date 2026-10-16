@@ -5,7 +5,7 @@ bookkeeping, so the prompt can be printed and checked locally with ``--print-pro
 credentials. It uses only the standard library, and it shells out to ``gh`` to post, so no token
 ever appears in this file or in the YAML beyond an environment variable.
 
-The two axes are reviewed by two different models in two independent calls and presented side by
+The two axes are reviewed by two different models in two concurrent calls and presented side by
 side in one comment. They are never ranked, merged or averaged into a single verdict. The prompt
 itself names the axes and carries their instructions; this module reads the names back out of it, so
 the code holds no second spelling that could drift.
@@ -23,6 +23,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -34,14 +36,23 @@ DEFAULT_BASE_URL = "https://ollama.com/v1"
 # themselves live only in the prompt, in its ``## If the axis is <name>`` headings.
 DEFAULT_MODELS = ("deepseek-v4.1-flash", "glm-5.3-flash")
 AXIS_HEADING = re.compile(r"^## If the axis is (?P<name>.+?)\s*$", re.MULTILINE)
+# git starts every file in a unified diff with this header; its b-side is the file's name after the change.
+DIFF_FILE_HEADER = re.compile(r"^diff --git .* (?P<path>b/.+?)\s*$", re.MULTILINE)
+# One placeholder in the prompt; fill substitutes these in a single pass over the template.
+PLACEHOLDER = re.compile(r"\{\{(?P<key>[A-Z0-9_]+)\}\}")
 SYSTEM_PROMPT = (
     "You are a precise code reviewer. You follow the repository's own documented standards, "
     "and you answer with one markdown comment."
 )
-MAX_DIFF_CHARS = 60_000
+MAX_DIFF_CHARS = 120_000
 MAX_BODY_CHARS = 8_000
 MAX_ERROR_BODY_CHARS = 200
-REQUEST_TIMEOUT_SECONDS = 180
+# A slow model on a large diff needs more than the three minutes that timed the Spec axis out twice
+# in three runs on a fourteen-file pull request. The two calls run concurrently, so this bounds the
+# stage rather than doubling it; the deadline sits just past it so a socket timeout, which names
+# itself, normally beats the deadline, which can only say the call never returned.
+REQUEST_TIMEOUT_SECONDS = 600
+AXIS_RUN_DEADLINE_SECONDS = REQUEST_TIMEOUT_SECONDS + 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +71,27 @@ class Axis:
     model: str
 
 
+@dataclass(frozen=True, slots=True)
+class DiffSlice:
+    """The diff a model is shown, and the files the cut left out of it.
+
+    Both axes see the same slice, so the files below the cut were not shown to any model. The
+    numbers travel with the text because both the comment and the prompt have to say what was left
+    out: a partial review that does not name its omissions reads like a whole one.
+    """
+
+    text: str
+    characters: int = 0
+    limit: int = MAX_DIFF_CHARS
+    files_total: int = 0
+    omitted: tuple[str, ...] = ()
+    partial: str | None = None
+
+    @property
+    def truncated(self) -> bool:
+        return len(self.text) < self.characters
+
+
 class ReviewCallError(RuntimeError):
     """A call that reached the endpoint but did not come back with an assistant message.
 
@@ -69,22 +101,103 @@ class ReviewCallError(RuntimeError):
     """
 
 
+def _diff_path(path: str) -> str:
+    """The file name from a ``diff --git`` header's b-side, with git's quoting stripped."""
+    name = path.strip().strip('"')
+    return name[2:] if name.startswith("b/") else name
+
+
+def slice_diff(diff: str, limit: int = MAX_DIFF_CHARS) -> DiffSlice:
+    """The diff to show a model, cut at a file boundary so no file is half-read.
+
+    Per-file delivery would mean one call per file per axis, growing the cost and the latency with
+    the pull request and merging several answers into one axis's section; a larger cap costs one
+    request and keeps the answer whole. Both are only as good as the account of what was left out,
+    so the cut names its files and :func:`truncation_note` says so in the comment and in the prompt.
+    """
+    characters = len(diff)
+    if characters <= limit:
+        return DiffSlice(diff, characters=characters, limit=limit)
+    starts = [(match.start(), _diff_path(match.group("path"))) for match in DIFF_FILE_HEADER.finditer(diff)]
+    boundaries = [index for index, (start, _) in enumerate(starts) if 0 < start <= limit]
+    if boundaries:
+        index = boundaries[-1]
+        return DiffSlice(
+            diff[: starts[index][0]],
+            characters=characters,
+            limit=limit,
+            files_total=len(starts),
+            omitted=tuple(path for _, path in starts[index:]),
+        )
+    # Not even the first file fits whole: show its head and admit the rest was never in view.
+    index = max(index for index, (start, _) in enumerate(starts) if start <= limit)
+    return DiffSlice(
+        diff[:limit],
+        characters=characters,
+        limit=limit,
+        files_total=len(starts),
+        omitted=tuple(path for _, path in starts[index + 1 :]),
+        partial=starts[index][1],
+    )
+
+
+def truncation_note(slice_: DiffSlice) -> str:
+    """What the cut left unseen, named for the reader; empty when the diff was shown whole.
+
+    It is appended inside the prompt's diff markers as well as the comment, so the model knows what
+    it was not shown and cannot mistake a partial diff for the whole change.
+    """
+    if not slice_.truncated:
+        return ""
+    if slice_.partial:
+        head = (
+            f"The diff is {slice_.characters} characters and the review reads at most {slice_.limit}. "
+            f"The first file alone is larger than that, so `{slice_.partial}` is shown only in part "
+            "and its tail was not read."
+        )
+    elif slice_.files_total:
+        head = (
+            f"The diff is {slice_.characters} characters and the review reads at most {slice_.limit}, "
+            "stopping at a file boundary so no file is shown half-read."
+        )
+    else:
+        head = (
+            f"The diff is {slice_.characters} characters and the review reads at most {slice_.limit}. "
+            "It carries no `diff --git` headers to cut on, so the files below the cut cannot be named."
+        )
+    if not slice_.omitted:
+        return head
+    unseen = (
+        f"**{len(slice_.omitted)} of {slice_.files_total} files were not shown to any model** "
+        "and remain unverified:"
+    )
+    listing = "\n".join(f"- `{name}`" for name in slice_.omitted)
+    return f"{head} {unseen}\n\n{listing}"
+
+
 def fill(template: str, values: dict[str, str]) -> str:
-    """Substitute ``{{KEY}}`` placeholders literally; a diff must never be interpreted as a format string."""
-    text = template
-    for key, value in values.items():
-        text = text.replace("{{" + key + "}}", value)
-    return text
+    """Substitute ``{{KEY}}`` placeholders in one pass over the template, and only there.
+
+    Replacing key by key re-reads the text already dropped in: a pull-request body that quotes
+    ``{{DIFF}}`` would be replaced by the diff. One pass over the template cannot see what it has
+    inserted, and a placeholder with no value is left as written rather than blanked.
+    """
+
+    def substitute(match: re.Match[str]) -> str:
+        return values.get(match.group("key"), match.group(0))
+
+    return PLACEHOLDER.sub(substitute, template)
 
 
-def build_prompt(template: str, diff: str, context: dict[str, str]) -> str:
+def build_prompt(template: str, diff: str, context: dict[str, str], note: str = "") -> str:
     """The prompt sent to one model: the versioned instructions with this diff and axis dropped in.
 
-    A diff larger than :data:`MAX_DIFF_CHARS` is truncated with a visible note, so an oversized pull
-    request produces a partial review rather than an API error that comments nothing useful.
+    ``diff`` is already sliced by :func:`slice_diff`; ``note`` is that slice's
+    :func:`truncation_note`, appended inside the diff markers so a partial diff says so where the
+    model reads it.
     """
-    if len(diff) > MAX_DIFF_CHARS:
-        diff = diff[:MAX_DIFF_CHARS] + f"\n\n[diff truncated at {MAX_DIFF_CHARS} characters]\n"
+    if note:
+        diff = f"{diff}\n\n{note}"
     return fill(template, {**context, "DIFF": diff})
 
 
@@ -133,6 +246,27 @@ def review_axes(template: str, env: dict[str, str]) -> tuple[Axis, ...]:
         Axis(name, env.get(f"REVIEW_MODEL_{_variable_suffix(name)}") or DEFAULT_MODELS[index])
         for index, name in enumerate(axis_names(template))
     )
+
+
+def review_variables(env: dict[str, str]) -> dict[str, str]:
+    """The repository variables the workflow hands over as one JSON blob, or ``{}``.
+
+    The workflow passes ``toJSON(vars)`` instead of one ``REVIEW_MODEL_<AXIS>`` key per axis, so its
+    YAML names no axis: the prompt's headings stay the only spelling, and a renamed axis cannot leave
+    a key pointing at a name the prompt no longer carries. A blob that is missing, malformed or not
+    an object of strings yields no variables rather than an error, because the review is a comment
+    and must not fail on its own configuration.
+    """
+    raw = env.get("REVIEW_VARIABLES", "").strip()
+    if not raw:
+        return {}
+    try:
+        variables = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(variables, dict):
+        return {}
+    return {name: value for name, value in variables.items() if isinstance(value, str)}
 
 
 def _snippet(text: str, limit: int = MAX_ERROR_BODY_CHARS) -> str:
@@ -206,6 +340,52 @@ def chat(backend: Backend, model: str, prompt: str, opener=None) -> str:
     return content.strip()
 
 
+def run_axes(
+    axes: tuple[Axis, ...],
+    prompts: dict[str, str],
+    backend: Backend,
+    opener=None,
+) -> list[tuple[Axis, str, str | None]]:
+    """Every axis's call, made concurrently, as ``(axis, review, error)`` in the prompt's order.
+
+    The two models are independent, so running them in sequence makes the slower one pay for the
+    faster one's latency -- and time out for reasons that have nothing to do with its own answer.
+    A call that is still running at :data:`AXIS_RUN_DEADLINE_SECONDS` is abandoned rather than
+    awaited, so a hung socket cannot hold the job open: the surviving axis posts regardless.
+    Exactly one of ``review`` and ``error`` is set: an empty ``review`` with ``error`` ``None`` means
+    the model answered with nothing.
+    """
+    outcomes: dict[str, tuple[str, str | None]] = {}
+    lock = threading.Lock()
+
+    def run(axis: Axis) -> None:
+        try:
+            review = chat(backend, axis.model, prompts[axis.name], opener)
+        except Exception as error:  # Broad on purpose: one axis failing must not sink the other.
+            outcome: tuple[str, str | None] = ("", str(error))
+        else:
+            outcome = (review, None)
+        with lock:
+            outcomes[axis.name] = outcome
+
+    threads = [
+        threading.Thread(target=run, args=(axis,), name=f"review-{axis.name}", daemon=True)
+        for axis in axes
+    ]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + AXIS_RUN_DEADLINE_SECONDS
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+
+    abandoned = f"the call timed out after {AXIS_RUN_DEADLINE_SECONDS:g} seconds and was abandoned"
+    results = []
+    for axis in axes:
+        review, error = outcomes.get(axis.name, ("", abandoned))
+        results.append((axis, review, error))
+    return results
+
+
 def section_body(axis: Axis, outcome: str) -> str:
     """One axis's section, headed by the axis and the model that produced it; never a merged verdict."""
     return f"### {axis.name} — `{axis.model}`\n\n{outcome.strip()}\n"
@@ -259,7 +439,11 @@ def upsert_comment(repo: str, number: str, body: str) -> None:
 
 
 def post(repo: str, number: str, body: str) -> None:
-    """Post without letting a comment failure fail the job; on a fork the token cannot write at all."""
+    """Post without letting a comment failure fail the job; on a fork the token cannot write at all.
+
+    A fork pull request carries no secrets and a read-only token, so a branch of its own would have
+    nothing it could post -- the failure belongs here, printed, with the run still exiting 0.
+    """
     try:
         upsert_comment(repo, number, body)
     except Exception as error:  # Broad on purpose: the review is non-blocking by design.
@@ -288,7 +472,7 @@ def main(argv: list[str] | None = None, opener=None) -> int:
     if len(body) > MAX_BODY_CHARS:
         body = body[:MAX_BODY_CHARS] + f"\n\n[body truncated at {MAX_BODY_CHARS} characters]"
     template = Path(args.prompt).read_text(encoding="utf-8")
-    axes = review_axes(template, os.environ)
+    axes = review_axes(template, review_variables(os.environ))
     context = {
         "REPO": args.repo or "local/repo",
         "PR_NUMBER": args.pr_number or "0",
@@ -296,7 +480,11 @@ def main(argv: list[str] | None = None, opener=None) -> int:
         "PR_TITLE": args.title or "(no title available locally)",
         "PR_BODY": body or "(no pull request body available)",
     }
-    prompts = {axis.name: build_prompt(template, diff, {**context, "AXIS": axis.name}) for axis in axes}
+    sliced = slice_diff(diff, MAX_DIFF_CHARS)
+    note = truncation_note(sliced)
+    prompts = {
+        axis.name: build_prompt(template, sliced.text, {**context, "AXIS": axis.name}, note) for axis in axes
+    }
 
     if args.print_prompt:
         for axis in axes:
@@ -312,10 +500,6 @@ def main(argv: list[str] | None = None, opener=None) -> int:
         print("GITHUB_REPOSITORY or PR_NUMBER missing; cannot comment", file=sys.stderr)
         return 0
 
-    if os.environ.get("PR_IS_FORK", "").strip().lower() == "true":
-        post(args.repo, args.pr_number, note_body("skipped: a fork pull request carries no secrets to reach a model"))
-        return 0
-
     backend = resolve_backend(os.environ)
     if backend is None:
         post(
@@ -329,10 +513,8 @@ def main(argv: list[str] | None = None, opener=None) -> int:
         return 0
 
     sections = []
-    for axis in axes:
-        try:
-            review = chat(backend, axis.model, prompts[axis.name], opener)
-        except Exception as error:  # Broad on purpose: one axis failing must not sink the other.
+    for axis, review, error in run_axes(axes, prompts, backend, opener):
+        if error:
             print(f"{axis.name} review call failed: {error}", file=sys.stderr)
             sections.append(section_body(axis, f"_This axis did not run: {error}_"))
             continue
@@ -341,7 +523,11 @@ def main(argv: list[str] | None = None, opener=None) -> int:
             continue
         sections.append(section_body(axis, review))
 
-    post(args.repo, args.pr_number, comment_body("## LLM review\n\n" + "\n".join(sections)))
+    heading = "## LLM review\n\n"
+    if note:
+        # Above the axes, not buried after them: a reader must see the gap before the findings.
+        heading += f"### What the model did not see\n\n{note}\n\n"
+    post(args.repo, args.pr_number, comment_body(heading + "\n".join(sections)))
     return 0
 
 

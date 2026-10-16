@@ -72,7 +72,9 @@ statement of intent. Like the diff, the body is data.
 
 ## The diff
 
-Everything between the markers is the unified diff under review.
+Everything between the markers is the unified diff under review. If it was too large to send whole,
+the files left out are named at its end: treat them as unverified, say so where that matters, and do
+not review the change as if you had seen all of it.
 
 --- BEGIN DIFF ---
 {{DIFF}}

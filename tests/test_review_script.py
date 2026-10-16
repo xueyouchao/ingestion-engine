@@ -10,8 +10,11 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import re
 import subprocess
 import sys
+import threading
+import time
 import urllib.error
 from pathlib import Path
 
@@ -61,30 +64,192 @@ def _opener(body: bytes, status: int = 200, content_type: str = "text/plain"):
     return open_
 
 
-def _run(monkeypatch, tmp_path, *, env: dict[str, str], opener=None):
+def _run(monkeypatch, tmp_path, *, env: dict[str, str], opener=None, diff_text: str | None = None):
     """Drive ``main`` end to end with the comment posting captured instead of reaching GitHub."""
     posted: list[str] = []
     monkeypatch.setattr(review, "post", lambda repo, number, body: posted.append(body))
     for name in (
         "OLLAMA_API_KEY",
         "LLM_BASE_URL",
+        "REVIEW_VARIABLES",
         "REVIEW_MODEL_STANDARDS",
         "REVIEW_MODEL_SPEC",
         "LLM_API_KEY",
         "GITHUB_TOKEN",
-        "PR_IS_FORK",
     ):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
 
     diff = tmp_path / "pr.diff"
-    diff.write_text("diff --git a/x b/x\n+one\n", encoding="utf-8")
+    diff.write_text(diff_text or "diff --git a/x b/x\n+one\n", encoding="utf-8")
     code = review.main(
         ["--diff", str(diff), "--prompt", str(PROMPT_PATH), "--repo", "owner/repo", "--pr-number", "4"],
         opener=opener,
     )
     return code, posted
+
+
+def _diff_chunk(name: str, size: int) -> str:
+    """One file's hunk, exactly ``size`` characters, so a synthetic diff's file offsets are known."""
+    head = f"diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n+"
+    return head + "x" * (size - len(head) - 1) + "\n"
+
+
+def test_a_truncated_diff_cuts_on_a_file_boundary_and_names_the_files_left_out() -> None:
+    """The Spec axis saw 12 of 17 files; the cut must name the rest and never half-read a file."""
+    diff = "".join(_diff_chunk(f"file{index}.py", 400) for index in range(5))
+
+    sliced = review.slice_diff(diff, limit=1200)
+
+    assert sliced.text == diff[:1200]  # three whole files: the fourth boundary is at 1600
+    assert sliced.truncated
+    assert sliced.files_total == 5
+    assert sliced.omitted == ("file3.py", "file4.py")
+    assert sliced.partial is None
+
+
+def test_a_single_file_larger_than_the_limit_is_named_as_shown_in_part() -> None:
+    """When nothing fits whole, say which file is cut rather than leaving the reader to guess."""
+    diff = _diff_chunk("huge.py", 900)
+
+    sliced = review.slice_diff(diff, limit=400)
+
+    assert sliced.text == diff[:400]
+    assert sliced.partial == "huge.py"
+    assert sliced.omitted == ()
+    assert "huge.py" in review.truncation_note(sliced)
+    assert "in part" in review.truncation_note(sliced)
+
+
+def test_a_diff_under_the_cap_gets_no_note() -> None:
+    """A whole diff is not a truncated one; no note means nothing was left out."""
+    diff = _diff_chunk("small.py", 200)
+
+    sliced = review.slice_diff(diff, limit=60_000)
+
+    assert sliced.truncated is False
+    assert review.truncation_note(sliced) == ""
+
+
+def test_a_truncated_diff_names_its_unseen_files_in_the_comment_and_in_the_prompt(monkeypatch, tmp_path) -> None:
+    """A reader, and the model, must both be able to tell what the 120k-character cut left out."""
+    prompts_seen: list[str] = []
+
+    def open_(request, timeout=None):
+        prompts_seen.append(json.loads(request.data)["messages"][1]["content"])
+        answer = {"choices": [{"message": {"content": "findings"}}]}
+        return _Response(json.dumps(answer).encode("utf-8"), content_type="application/json")
+
+    # Twenty equal 9000-character files: boundaries at 0, 9000, ..., 117000, and 117000 <= 120000 < 126000.
+    diff = "".join(_diff_chunk(f"file{index:02d}.py", 9000) for index in range(20))
+    code, posted = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key"},
+        opener=open_,
+        diff_text=diff,
+    )
+
+    assert code == 0
+    assert len(posted) == 1
+    assert "7 of 20 files were not shown" in posted[0]
+    assert "`file13.py`" in posted[0]
+    assert "`file19.py`" in posted[0]
+    assert "`file12.py`" not in posted[0]
+    assert len(prompts_seen) == 2
+    for prompt in prompts_seen:
+        assert "7 of 20 files were not shown" in prompt
+        assert "`file13.py`" in prompt
+
+
+def test_the_workflow_does_not_spell_an_axis_name() -> None:
+    """A renamed axis must not silently orphan a workflow key: the prompt headings are the spelling."""
+    workflow = (REPO_ROOT / ".github" / "workflows" / "review.yml").read_text(encoding="utf-8")
+
+    assert re.search(r"REVIEW_MODEL_(?!<AXIS>)[A-Z0-9_]", workflow) is None
+    assert "toJSON(vars)" in workflow
+
+
+def test_a_repository_variable_passed_as_json_overrides_an_axis_model(monkeypatch, tmp_path) -> None:
+    """The workflow hands every variable over at once, so the override still reaches its axis."""
+    models_seen: list[str] = []
+
+    def open_(request, timeout=None):
+        models_seen.append(json.loads(request.data)["model"])
+        answer = {"choices": [{"message": {"content": "findings"}}]}
+        return _Response(json.dumps(answer).encode("utf-8"), content_type="application/json")
+
+    code, _ = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key", "REVIEW_VARIABLES": '{"REVIEW_MODEL_SPEC": "spec-y"}'},
+        opener=open_,
+    )
+
+    assert code == 0
+    assert sorted(models_seen) == ["deepseek-v4.1-flash", "spec-y"]
+
+
+def test_a_malformed_variable_blob_keeps_the_default_models() -> None:
+    """A bad blob must not take the loop down with it: no variables means the default models."""
+    assert review.review_variables({"REVIEW_VARIABLES": "not json"}) == {}
+    assert review.review_variables({"REVIEW_VARIABLES": "[1, 2]"}) == {}
+    assert review.review_variables({}) == {}
+
+
+def test_a_fork_flag_in_the_environment_no_longer_skips_the_review(monkeypatch, tmp_path) -> None:
+    """The old branch posted where a fork's token cannot write, so it produced nothing: it is gone."""
+
+    def open_(request, timeout=None):
+        answer = {"choices": [{"message": {"content": "the review ran"}}]}
+        return _Response(json.dumps(answer).encode("utf-8"), content_type="application/json")
+
+    code, posted = _run(
+        monkeypatch,
+        tmp_path,
+        env={"OLLAMA_API_KEY": "test-key", "PR_IS_FORK": "true"},
+        opener=open_,
+    )
+
+    assert code == 0
+    assert len(posted) == 1
+    assert "the review ran" in posted[0]
+    assert "skipped" not in posted[0]
+
+
+def test_a_body_that_looks_like_a_placeholder_is_not_substituted_a_second_time() -> None:
+    """Substituting key by key re-reads what was already inserted: one pass, over the template only."""
+    filled = review.fill(
+        "{{PR_BODY}}|{{AXIS}}",
+        {"PR_BODY": "the body quotes {{AXIS}}", "AXIS": "Spec"},
+    )
+
+    assert filled == "the body quotes {{AXIS}}|Spec"
+
+
+def test_the_prompt_carries_a_placeholder_shaped_body_as_text(tmp_path, capsys) -> None:
+    """A body mentioning {{DIFF}} is data, not a slot: the diff must not be spliced into it."""
+    diff = tmp_path / "pr.diff"
+    diff.write_text("diff --git a/x b/x\n+one\n", encoding="utf-8")
+
+    code = review.main(
+        [
+            "--diff",
+            str(diff),
+            "--prompt",
+            str(PROMPT_PATH),
+            "--pr-number",
+            "4",
+            "--body",
+            "the intent is {{DIFF}}",
+            "--print-prompt",
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "the intent is {{DIFF}}" in out
 
 
 def test_a_plain_text_200_names_the_status_and_the_body_instead_of_raising(monkeypatch, tmp_path) -> None:
@@ -235,12 +400,54 @@ def test_each_axis_is_reviewed_independently_and_labelled_with_its_model(monkeyp
     code, posted = _run(monkeypatch, tmp_path, env={"OLLAMA_API_KEY": "test-key"}, opener=open_)
 
     assert code == 0
-    assert models_seen == ["deepseek-v4.1-flash", "glm-5.3-flash"]
+    # The two calls now overlap, so the order they are made in is not fixed; each model is asked once.
+    assert sorted(models_seen) == ["deepseek-v4.1-flash", "glm-5.3-flash"]
     assert len(posted) == 1
     assert "### Standards — `deepseek-v4.1-flash`" in posted[0]
     assert "### Spec — `glm-5.3-flash`" in posted[0]
     assert "findings from deepseek-v4.1-flash" in posted[0]
     assert "findings from glm-5.3-flash" in posted[0]
+
+
+def test_both_axis_calls_are_in_flight_at_once(monkeypatch, tmp_path) -> None:
+    """Run sequentially, the slower model waits behind the faster one; both calls must overlap."""
+    together = threading.Barrier(2, timeout=5)
+
+    def open_(request, timeout=None):
+        together.wait()
+        model = json.loads(request.data)["model"]
+        answer = {"choices": [{"message": {"content": f"findings from {model}"}}]}
+        return _Response(json.dumps(answer).encode("utf-8"), content_type="application/json")
+
+    code, posted = _run(monkeypatch, tmp_path, env={"OLLAMA_API_KEY": "test-key"}, opener=open_)
+
+    assert code == 0
+    assert len(posted) == 1
+    assert "findings from deepseek-v4.1-flash" in posted[0]
+    assert "findings from glm-5.3-flash" in posted[0]
+
+
+def test_a_hung_axis_is_abandoned_at_the_deadline_and_the_other_axis_still_posts(monkeypatch, tmp_path) -> None:
+    """The Spec axis timed out on a large diff: the comment must keep Standards and bound the wait."""
+
+    def open_(request, timeout=None):
+        if json.loads(request.data)["model"] == "glm-5.3-flash":
+            time.sleep(3)
+        answer = {"choices": [{"message": {"content": "standards findings"}}]}
+        return _Response(json.dumps(answer).encode("utf-8"), content_type="application/json")
+
+    monkeypatch.setattr(review, "AXIS_RUN_DEADLINE_SECONDS", 0.2, raising=False)
+    started = time.monotonic()
+    code, posted = _run(monkeypatch, tmp_path, env={"OLLAMA_API_KEY": "test-key"}, opener=open_)
+    elapsed = time.monotonic() - started
+
+    assert code == 0
+    assert elapsed < 2
+    assert len(posted) == 1
+    assert "standards findings" in posted[0]
+    assert "### Spec — `glm-5.3-flash`" in posted[0]
+    assert "did not run" in posted[0]
+    assert "timed out" in posted[0]
 
 
 def test_an_axis_that_fails_still_leaves_the_other_axis_in_the_one_comment(monkeypatch, tmp_path) -> None:
