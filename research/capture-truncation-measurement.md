@@ -67,7 +67,7 @@ Structural completeness, all 12 files:
 | Witness | Result |
 |---|---|
 | Starts with `%PDF` | 12 / 12 |
-| Ends with `%%EOF` | 12 / 12 (4–6 bytes follow it — the PDF's own trailing newline, not WARC framing) |
+| Ends with `%%EOF` | 12 / 12 (0–2 bytes follow it — nothing, `\r`, `\n`, or `\r\n`, the PDF's own line ending, not WARC framing) |
 | Opens in PyMuPDF without repair (`is_repaired == False`) | 12 / 12 |
 | Page count | 4, 10, 11, 11, 12, 15, 16, 18, 25, 41, 45, 84 |
 | Linearization dict `/L` equals payload size | 4 / 12 — **discarded as a witness**, see below |
