@@ -14,13 +14,26 @@ from finepdfs.interfaces.cli import build_parser
         (["inspect", "--corpus", "c"], "inspect"),
         (["dry-run", "--corpus", "c", "--engine", "mineru"], "dry-run"),
         (["run", "--corpus", "c", "--out", "o", "--engine", "paddleocr-vl"], "run"),
-        (["dedupe", "--out", "o", "--threshold", "0.7"], "dedupe"),
     ],
 )
 def test_every_command_keeps_its_own_name(argv, expected_command) -> None:
     args = build_parser().parse_args(argv)
 
     assert args.command == expected_command
+
+
+def test_the_similarity_threshold_reaches_the_runtime(monkeypatch) -> None:
+    from finepdfs.interfaces import cli
+
+    args = build_parser().parse_args(["run", "--similarity-threshold", "0.55"])
+    monkeypatch.setattr(cli, "runtime_from_environment", lambda: "a runtime")
+
+    cli._runtime_from_args(args)
+
+    assert args.similarity_threshold == 0.55
+    import os
+
+    assert os.environ["FINEPDFS_SIMILARITY_THRESHOLD"] == "0.55"
 
 
 def test_engine_flags_do_not_shadow_the_command_name() -> None:

@@ -48,8 +48,6 @@ class DocumentRecord:
     accepted_pages: int
     dropped_pages: int
     character_count: int
-    dedup_status: str = "unique"
-    duplicate_of: str = ""
 
     def as_json(self) -> dict:
         return asdict(self)

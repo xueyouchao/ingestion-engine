@@ -1,4 +1,4 @@
-"""The command line: fetch a real Common Crawl corpus, inspect it, curate it, deduplicate it."""
+"""The command line: fetch a real Common Crawl corpus, inspect it, and curate it."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from finepdfs.domain.crawl import CrawlQuery
-from finepdfs.domain.dedup import exact_duplicate_keepers, plan_deduplication
+from finepdfs.domain.dedup import PublishedDocumentView, exact_duplicate_keepers, plan_deduplication
 from finepdfs.domain.document import Document
 from finepdfs.infrastructure.cocoindex.runtime import Runtime, runtime_from_environment
 from finepdfs.infrastructure.commoncrawl.source import CommonCrawlSource
@@ -32,6 +32,7 @@ ENVIRONMENT_FOR_ENGINE = {
     "api_key": "FINEPDFS_ENGINE_API_KEY",
     "engine_command": "FINEPDFS_ENGINE_COMMAND",
     "dpi": "FINEPDFS_ENGINE_DPI",
+    "similarity_threshold": "FINEPDFS_SIMILARITY_THRESHOLD",
 }
 
 
@@ -54,12 +55,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = commands.add_parser("run", help="run the incremental CocoIndex pipeline")
     _add_engine_arguments(run, out=True)
-
-    dedupe = commands.add_parser("dedupe", help="drop near-duplicate documents from the published corpus")
-    dedupe.add_argument("--out", type=Path, default=DEFAULT_OUT)
-    dedupe.add_argument(
-        "--threshold", type=float, default=0.8, help="fingerprint similarity that counts as a duplicate"
-    )
 
     return parser
 
@@ -84,6 +79,12 @@ def _add_engine_arguments(parser: argparse.ArgumentParser, *, out: bool) -> None
         help="local command, for docling and mineru",
     )
     parser.add_argument("--dpi", type=int, default=200, help="resolution used to render pages for a vision model")
+    parser.add_argument(
+        "--similarity-threshold",
+        type=float,
+        default=0.8,
+        help="fingerprint similarity above which one document is a near-duplicate of another",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -97,8 +98,6 @@ def main(argv: list[str] | None = None) -> int:
         return _dry_run(args)
     if args.command == "run":
         return _run(args)
-    if args.command == "dedupe":
-        return _dedupe(args)
     raise AssertionError(f"unhandled command {args.command}")
 
 
@@ -154,29 +153,62 @@ def _dry_run(args: argparse.Namespace) -> int:
 
     keepers = exact_duplicate_keepers({document.url: document.digest for document in documents})
     use_case = runtime.curator()
-    print(f"{'status':<10} {'engine':<22} {'language':<9} {'pages':>5} {'chars':>7}  {'url':<45}  reason")
-    published = 0
+
+    curated = {}
+    for document in documents:
+        if keepers[document.url] != document.url:
+            continue
+        outcome = use_case.run(Document(name=document.url, content=document.path.read_bytes()))
+        curated[document.url] = (document, outcome)
+
+    plan = plan_deduplication(
+        [
+            PublishedDocumentView(url=document.url, digest=document.digest, text=outcome.markdown)
+            for document, outcome in curated.values()
+            if outcome.published
+        ],
+        similarity_threshold=args.similarity_threshold,
+    )
+    near_duplicate = {decision.url: decision for decision in plan.duplicates if decision.kind == "near"}
+
+    print(f"{'status':<14} {'engine':<22} {'language':<9} {'pages':>5} {'chars':>7}  {'url':<45}  reason")
     for document in documents:
         keeper = keepers[document.url]
         if keeper != document.url:
-            print(
-                f"{'duplicate':<10} {'-':<22} {'-':<9} {'-':>5} {'-':>7}  "
-                f"{document.url:<45}  identical bytes to {keeper}"
-            )
+            _print_row("exact-duplicate", "-", "-", 0, 0, document.url, f"identical bytes to {keeper}")
             continue
-        outcome = use_case.run(Document(name=document.url, content=document.path.read_bytes()))
+        outcome = curated[document.url][1]
         record = outcome.record
         engine = record.engine if record else "-"
         language = record.language if record else "-"
         pages = record.page_count if record else 0
         characters = record.character_count if record else 0
-        print(
-            f"{outcome.status:<10} {engine:<22} {language:<9} {pages:>5} {characters:>7}  "
-            f"{document.url:<45}  {outcome.reason}"
-        )
-        published += outcome.published
-    print(f"{published} of {len(documents)} documents would be published")
+        decision = near_duplicate.get(document.url)
+        if decision is not None:
+            _print_row(
+                "near-duplicate",
+                engine,
+                language,
+                pages,
+                characters,
+                document.url,
+                f"near-duplicate of {decision.duplicate_of}",
+            )
+            continue
+        _print_row(outcome.status, engine, language, pages, characters, document.url, outcome.reason)
+
+    byte_identical = len(documents) - len(curated)
+    print(
+        f"{len(plan.keepers)} of {len(documents)} documents would be published "
+        f"({len(near_duplicate)} near-duplicates of another, {byte_identical} byte-identical)"
+    )
     return 0
+
+
+def _print_row(
+    status: str, engine: str, language: str, pages: int, characters: int, url: str, reason: str
+) -> None:
+    print(f"{status:<14} {engine:<22} {language:<9} {pages:>5} {characters:>7}  {url:<45}  {reason}")
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -192,20 +224,6 @@ def _run(args: argparse.Namespace) -> int:
     records = published.read_records()
     exclusions = published.read_exclusions()
     print(f"recorded {len(records)} published documents and {len(exclusions)} exclusions under {args.out}")
-    return 0
-
-
-def _dedupe(args: argparse.Namespace) -> int:
-    published = PublishedCorpus(args.out)
-    documents = published.read_documents()
-    if not documents:
-        print(f"nothing published under {args.out}", file=sys.stderr)
-        return 2
-
-    plan = plan_deduplication(documents, similarity_threshold=args.threshold)
-    report = published.apply_dedup_plan(plan)
-    print(f"kept {report.kept}, marked {report.duplicates} duplicates (removed {report.removed_documents} documents)")
-    print(f"duplicate report: {report.report_path}")
     return 0
 
 

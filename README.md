@@ -21,9 +21,6 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev]"
 # 3. curate, incrementally
 .venv/bin/finepdfs run --corpus corpus --out out
 .venv/bin/finepdfs run --corpus corpus --out out    # second time: every extraction is "unchanged"
-
-# 4. drop near-duplicate documents from the published corpus
-.venv/bin/finepdfs dedupe --out out
 ~~~~
 
 The CocoIndex CLI works too, because the pipeline *is* a CocoIndex app:
@@ -46,8 +43,9 @@ The CocoIndex CLI works too, because the pipeline *is* a CocoIndex app:
 5. **Language** -- per-page language, then a document language; pages that disagree are dropped.
 6. **Judge** -- minimum pages, minimum characters, allowed languages (ADR-0004).
 7. **Publish** -- Markdown plus a JSON record; anything dropped or failed becomes a JSON exclusion.
-8. **Deduplicate** -- identical bytes are caught inside the flow from the manifest; near-duplicates are a
-   corpus-wide fingerprint pass (ADR-0006).
+8. **Decide** -- the second pass sees every cleaned text at once, so it can settle both kinds of
+   duplicate in one place: identical bytes from the manifest digests, near-duplicates from text
+   fingerprints. What it drops becomes an exclusion; what it keeps is declared (ADR-0006).
 
 ## Architecture
 
@@ -111,15 +109,17 @@ arguments of its own. The CLI flags above simply set them.
 | `FINEPDFS_LANGUAGE_CONFIDENCE` | `0.65` | per-page language floor |
 | `FINEPDFS_MIN_CHARACTERS` | `200` | publish minimum |
 | `FINEPDFS_LANGUAGES` | all | comma-separated allow-list, for example `Latn,Grek` |
+| `FINEPDFS_SIMILARITY_THRESHOLD` | `0.8` | fingerprint similarity above which one document is a near-duplicate of another |
 
 ## Output layout
 
 ~~~~
 out/
   docs/<key>.md          cleaned text of one published document
-  records/<key>.json     url, digest, engine, routing decision, language, counts, dedup status
-  excluded/<key>.json    kind (exact-duplicate | dropped | failed) and the reason
-  dedupe/duplicates.jsonl, dedupe/kept.jsonl
+  records/<key>.json     url, digest, engine, routing decision, language, counts
+  excluded/<key>.json    kind (exact-duplicate | near-duplicate | dropped | failed) and the reason
+  dedupe/kept.jsonl      the URLs this run decided to publish
+  dedupe/duplicates.jsonl  every duplicate, what it duplicates and how alike they are
 ~~~~
 
 `<key>` is the first 16 hex digits of the SHA-256 of the document URL, so a document never collides with
@@ -128,10 +128,22 @@ another and two runs write the same names.
 The corpus directory holds `manifest.json` (URL, digest, WARC location) and `pdfs/<sha256>.pdf` -- bytes
 named by their own digest, which is also what makes exact duplicates free to spot.
 
+## Two things worth knowing before you run it
+
+*The state database is disposable.* `cocoindex.db` holds the memo table and the target state. Deleting
+it costs a re-read of every document and nothing else, and you should delete it after changing the shape
+of the flow (as this branch did when the deciding pass was introduced): a state database written by an
+older component tree can leave declarations that no current component owns.
+
+*The first pass is concurrent, the second is one component.* Reading runs per document and is memoised;
+deciding runs once and holds every text in memory. That is what makes a corpus-wide duplicate decision
+possible, and it is the reason this pipeline is aimed at corpora of thousands of documents rather than
+the whole crawl.
+
 ## Tests
 
 ~~~~bash
-.venv/bin/python -m pytest              # 93 tests, no network
+.venv/bin/python -m pytest              # 94 tests, no network
 .venv/bin/python -m pytest -m network   # 4 more against the live Common Crawl (deselected above)
 ~~~~
 

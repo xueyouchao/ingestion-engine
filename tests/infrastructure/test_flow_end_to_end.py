@@ -6,7 +6,9 @@ changing a cheap rule must re-run only the cheap half.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import cocoindex as coco
@@ -221,3 +223,109 @@ def test_a_run_removes_outputs_for_documents_it_no_longer_has(monkeypatch, tmp_p
 
     assert not (out_dir / "docs" / f"{document_key(ONE)}.md").exists()
     assert not (out_dir / "records" / f"{document_key(ONE)}.json").exists()
+
+
+class NamedEngine:
+    """A stand-in engine whose text depends on which document it is reading."""
+
+    def __init__(self, pages_by_length: dict[int, tuple[str, ...]], detail: str = "named") -> None:
+        self._identity = EngineIdentity(name="paddleocr-vl", detail=detail)
+        self._pages = pages_by_length
+        self.calls = 0
+
+    @property
+    def identity(self) -> EngineIdentity:
+        return self._identity
+
+    def extract(self, document: Document) -> ExtractedDocument:
+        self.calls += 1
+        texts = self._pages[len(document.content)]
+        pages = tuple(PageText(number=index + 1, text=text) for index, text in enumerate(texts))
+        return ExtractedDocument(pages=pages, engine=self._identity)
+
+
+def _page_text(page: int, *, annex: str = "") -> str:
+    """A page of distinct Latin lines, with something extra on the last page of a near-duplicate."""
+    lines = [
+        f"Page {page}, paragraph {index}: the committee reviewed meteorological instrument {index} "
+        f"in geneva on day {index} of the session."
+        for index in range(1, 13)
+    ]
+    return "\n".join(lines) + annex
+
+
+@dataclass(frozen=True, slots=True)
+class _Entry:
+    url: str
+    body: bytes
+
+
+def _write_near_duplicate_corpus(corpus_dir: Path, entries: tuple[_Entry, ...]) -> None:
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    (corpus_dir / "pdfs").mkdir(exist_ok=True)
+    manifest_entries = []
+    for entry in entries:
+        digest = hashlib.sha256(entry.body).hexdigest()
+        (corpus_dir / relative_pdf_path(digest)).write_bytes(entry.body)
+        manifest_entries.append(
+            CorpusEntry(
+                url=entry.url,
+                digest=digest,
+                file=relative_pdf_path(digest),
+                bytes=len(entry.body),
+                crawl_id="CC-MAIN-2026-39",
+                warc_filename="crawl-data/CC-MAIN-2026-39/segments/x/warc/y.warc.gz",
+                offset=1,
+                length=len(entry.body),
+            )
+        )
+    CorpusManifest(crawl_id="CC-MAIN-2026-39", domain="a.example", entries=manifest_entries).save(
+        corpus_dir / "manifest.json"
+    )
+
+
+NEAR = "https://b.example/near.pdf"
+
+
+def test_a_near_duplicate_is_excluded_and_stays_excluded(monkeypatch, tmp_path) -> None:
+    corpus_dir = tmp_path / "corpus"
+    body_a = b"%PDF-1.5 first document body"
+    body_b = b"%PDF-1.5 second document body, different bytes"
+    _write_near_duplicate_corpus(
+        corpus_dir, (_Entry(url=ONE, body=body_a), _Entry(url=NEAR, body=body_b))
+    )
+    pages = tuple(_page_text(page) for page in range(1, 4))
+    engine = NamedEngine(
+        {
+            len(body_a): pages,
+            len(body_b): pages[:2] + (pages[2] + "\nAnnex: the instruments went back to the depot.",),
+        }
+    )
+    runtime = Runtime(
+        corpus_dir=corpus_dir,
+        out_dir=tmp_path / "out",
+        policy=CurationPolicy(engine_name="paddleocr-vl"),
+        extraction=ExtractionStep(ScanningProbe(), {"paddleocr-vl": engine}, CurationPolicy(engine_name="paddleocr-vl")),
+        curation=CurationStep(ScriptLanguageIdentifier(), CurationPolicy(engine_name="paddleocr-vl")),
+    )
+
+    _run(monkeypatch, tmp_path, runtime, "runs")
+
+    out_dir = tmp_path / "out"
+    assert (out_dir / "docs" / f"{document_key(ONE)}.md").exists()
+    assert not (out_dir / "docs" / f"{document_key(NEAR)}.md").exists()
+    assert not (out_dir / "records" / f"{document_key(NEAR)}.json").exists()
+    exclusion = _exclusion(out_dir, NEAR)
+    assert exclusion["kind"] == "near-duplicate"
+    assert ONE in exclusion["reason"]
+
+    kept = (out_dir / "dedupe" / "kept.jsonl").read_text()
+    duplicates = (out_dir / "dedupe" / "duplicates.jsonl").read_text()
+    assert ONE in kept and NEAR not in kept
+    assert NEAR in duplicates and '"kind": "near"' in duplicates
+
+    _run(monkeypatch, tmp_path, runtime, "runs")
+
+    assert engine.calls == 2, "one call per document, and none on the second run"
+    assert not (out_dir / "docs" / f"{document_key(NEAR)}.md").exists(), "a re-run must not resurrect it"
+    assert _exclusion(out_dir, NEAR)["kind"] == "near-duplicate"

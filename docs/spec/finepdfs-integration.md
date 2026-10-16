@@ -169,6 +169,13 @@ Outputs are declared through the localfs target so deletion propagates. Concurre
 failure accounting use CocoIndex's own facilities (map, exception handlers, stats) rather than a
 hand-rolled queue.
 
+**Duplicates are decided in the flow, not by a command.** An earlier version of this design had a
+`dedupe` command that rewrote records and deleted Markdown after the fact. That made target state a lie:
+the next `run` re-declared each record as unique and recreated each deleted file. The flow now reads
+every document in a concurrent first pass and decides the whole corpus in a second pass that sees every
+text at once, declaring either a document's outputs or its exclusion, plus the dedup report. Recorded in
+ADR-0006.
+
 **Outputs.** Per published document: `out/docs/<key>.md` (the cleaned text) and `out/records/<key>.json`
 (url, content digest, engine, routing decision and reason, language, page counts, character count, dedup
 status). Anything dropped or failed becomes `out/excluded/<key>.json` with its kind and reason. `<key>`
@@ -182,7 +189,7 @@ genuinely corpus-level, is JSONL under `out/dedupe/`.
 **Corpus on disk.** The corpus is a real directory of PDF files named by content digest, plus a
 manifest JSON. Fetching is a separate, resumable CLI step, so processing never depends on the network.
 
-**CLI.** fetch-corpus, inspect, dry-run, run, dedupe. `dry-run` curates the corpus in process and prints
+**CLI.** fetch-corpus, inspect, dry-run, run. `dry-run` curates the corpus in process and prints
 a table of what would happen without writing anything, which is the fastest way to see routing decisions
 on real documents. The CocoIndex application is also runnable directly through `cocoindex update main.py`.
 

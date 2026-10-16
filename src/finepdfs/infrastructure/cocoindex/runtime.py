@@ -35,6 +35,7 @@ class Runtime:
     policy: CurationPolicy
     extraction: ExtractionStep
     curation: CurationStep
+    similarity_threshold: float = 0.8
 
     @property
     def engines(self) -> Mapping[str, OcrEngine]:
@@ -87,6 +88,7 @@ def runtime_from_environment(environ: Mapping[str, str] | None = None) -> Runtim
         policy=policy,
         extraction=ExtractionStep(probe, engines, policy),
         curation=CurationStep(ScriptLanguageIdentifier(), policy),
+        similarity_threshold=float(values.get("FINEPDFS_SIMILARITY_THRESHOLD", "0.8")),
     )
 
 
