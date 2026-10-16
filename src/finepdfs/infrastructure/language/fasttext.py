@@ -106,10 +106,10 @@ class FastTextLanguageIdentifier:
     winner instead of silently disappearing, and the confidence is the winning language's average
     score over the pieces.
 
-    The confidence is the model's own score, passed through untouched: which pages are trusted is the
-    LanguagePolicy's, not the adapter's, so a page the model is unsure about is reported as unsure and
-    dropped above. The script adapter's floor is reused for the same reason it has one: below forty
-    letters neither model nor model-free rule has enough to go on.
+    The confidence above is averaged over every piece rather than passed through from one prediction:
+    which pages are trusted is the LanguagePolicy's, not the adapter's, so a page the model is unsure
+    about is reported as unsure and dropped above. The script adapter's floor is reused for the same
+    reason it has one: below forty letters neither model nor model-free rule has enough to go on.
     """
 
     def __init__(
