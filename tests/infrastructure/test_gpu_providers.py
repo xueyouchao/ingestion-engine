@@ -224,10 +224,10 @@ def test_an_empty_endpoint_leaves_the_environment_alone() -> None:
 def test_a_moving_address_does_not_move_the_memo_key() -> None:
     """The whole point of the layer: yesterday's worker and today's worker are the same worker."""
     first = build_engine(
-        EngineConfig(name="paddleocr-vl", base_url="https://a.example/v1", model="m", identity="modal:ocr:1.6")
+        EngineConfig(name="paddleocr-vl", base_url="https://a.example/v1", model="m", detail="modal:ocr:1.6")
     )
     second = build_engine(
-        EngineConfig(name="paddleocr-vl", base_url="https://b.example/v1", model="m", identity="modal:ocr:1.6")
+        EngineConfig(name="paddleocr-vl", base_url="https://b.example/v1", model="m", detail="modal:ocr:1.6")
     )
 
     assert str(first.identity) == str(second.identity) == "paddleocr-vl@modal:ocr:1.6"

@@ -33,20 +33,21 @@ class EngineConfig:
     page_dpi: int = 200
     timeout_seconds: float = 300.0
     work_dir: Path | None = None
-    identity: str = ""
-    """A stable name for the deployment, when the address the engine is reached at is not stable.
+    detail: str = ""
+    """The detail half of the engine's identity, when the address it is reached at is not stable.
 
     A rented GPU answers on a new host every run, so its address cannot be the memo key without
     re-reading the whole corpus each time (ADR-0005). Empty means the engine names itself, which is
-    right for anything reached at an address that does not move.
+    right for anything reached at an address that does not move. This is what ``StableIdentity`` and
+    ``EngineIdentity`` both call ``detail``: the name is the engine's, the detail is the deployment's.
     """
 
 
 def build_engine(config: EngineConfig) -> OcrEngine:
     """One engine, whichever kind it is. Imported lazily so unused engines cost nothing."""
     engine = _build_engine(config)
-    if config.identity:
-        return StableIdentity(engine, config.identity)
+    if config.detail:
+        return StableIdentity(engine, config.detail)
     return engine
 
 
