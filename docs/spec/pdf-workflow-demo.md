@@ -135,8 +135,8 @@ the selected adapter's thread/process safety has been checked.
   Report failures and limitations; do not reuse the historical synthetic benchmark as current
   pipeline performance evidence.
 - [ ] State the corpus size in the runbook, plainly, with what it does and does not demonstrate.
-  Roughly twenty Documents fit in a single context window, so the agent and search stages show the
-  architecture and the citations, not retrieval quality at corpus scale.
+  With this small corpus, the agent and search stages demonstrate the architecture and citations,
+  not retrieval quality at corpus scale.
 
 ## P1: a small browser explorer
 
