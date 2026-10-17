@@ -379,7 +379,7 @@ def _static_endpoint(values: Mapping[str, str]) -> GpuEndpoint:
     provider never reads ``FINEPDFS_ENGINE_DETAIL`` at all -- it takes its detail from the start
     command's payload or derives one -- so for that provider ``export_endpoint``'s keep-a-pin rule is
     the only place the precedence runs. That shared rule is pinned by
-    ``test_the_pinned_engine_detail_wins_the_static_providers_own_name``.
+    ``test_exporting_an_endpoint_moves_the_address_but_not_a_pinned_detail``.
     """
     base_url = values.get(GPU_BASE_URL, "").strip() or values.get(ENGINE_BASE_URL, "").strip()
     model = values.get(GPU_MODEL, "").strip() or values.get(ENGINE_MODEL, "").strip()
