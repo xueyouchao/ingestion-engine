@@ -154,18 +154,14 @@ class CommandGpuProvider:
         # stop that fails there is noted on the start error rather than replacing it: the failure the
         # operator has to act on is the start. A command that cannot even be split is not this case: it
         # never ran, so there is nothing to give back.
+        argv = _argv(self.start_command)
         try:
-            started = self.runner.run(_argv(self.start_command))
-            require_success(started)
-            endpoint = endpoint_from_start_output(started.stdout, self.start_command, self.model)
-        except CommandFailed as error:
-            failure = GpuStartFailed(f"the GPU start command failed: {error}")
-            self._release_reporting(failure)
-            raise failure from error
-        except GpuStartFailed as failure:
-            self._release_reporting(failure)
-            raise
-        try:
+            try:
+                started = self.runner.run(argv)
+                require_success(started)
+                endpoint = endpoint_from_start_output(started.stdout, self.start_command, self.model)
+            except CommandFailed as error:
+                raise GpuStartFailed(f"the GPU start command failed: {error}") from error
             yield endpoint
         finally:
             # The worker is given back however the run ended: a leaked GPU bills by the hour. The error

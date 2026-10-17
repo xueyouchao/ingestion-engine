@@ -372,6 +372,40 @@ def test_a_start_command_that_fails_after_launching_gives_the_worker_back() -> N
     assert [call[0] for call in runner.calls] == [START, STOP], "a failed start is still a billable worker"
 
 
+@pytest.mark.parametrize("stop_returncode", [0, 1])
+def test_an_interrupted_start_gives_the_worker_back(stop_returncode, caplog) -> None:
+    interruption = KeyboardInterrupt()
+
+    class InterruptedRunner(RecordingRunner):
+        def run(self, argv: Sequence[str], cwd: Path | None = None) -> CommandResult:
+            result = super().run(argv, cwd)
+            if argv[0] == START:
+                raise interruption
+            return result
+
+    runner = InterruptedRunner(stop_returncode=stop_returncode)
+    provider = CommandGpuProvider(start_command=START, stop_command=STOP, runner=runner)
+
+    with pytest.raises(KeyboardInterrupt) as caught, provider.lease():
+        pytest.fail("an interrupted start must not enter the lease body")
+
+    assert caught.value is interruption
+    assert [call[0] for call in runner.calls] == [START, STOP]
+    if stop_returncode:
+        assert "billing" in caplog.text
+        assert any("GPU stop command also failed" in note for note in interruption.__notes__)
+
+
+def test_a_malformed_start_does_not_attempt_cleanup() -> None:
+    runner = RecordingRunner()
+    provider = CommandGpuProvider(start_command="start-worker 'unclosed", stop_command=STOP, runner=runner)
+
+    with pytest.raises(MisconfiguredGpuProvider), provider.lease():
+        pytest.fail("a malformed start must not enter the lease body")
+
+    assert runner.calls == []
+
+
 def test_a_start_command_that_prints_no_endpoint_gives_the_worker_back() -> None:
     runner = RecordingRunner(stdout="nothing useful here")
     provider = CommandGpuProvider(start_command=START, stop_command=STOP, runner=runner)
