@@ -374,9 +374,12 @@ def _static_endpoint(values: Mapping[str, str]) -> GpuEndpoint:
     ``--engine-detail`` outlives the provider's default. ``FINEPDFS_GPU_DETAIL`` names the deployment when
     nothing is pinned; otherwise the model names it, which is what keeps the memo key still when the
     address moves. An empty ``FINEPDFS_ENGINE_DETAIL`` is not a pin -- it is the unset value every reader
-    here reads as absent -- so it falls through like the key is not there. This is the one place the two
-    names meet, so this is where the precedence is decided; ``export_endpoint`` publishes the answer
-    rather than deciding it a second time.
+    here reads as absent -- so it falls through like the key is not there. This provider decides the
+    precedence here, and ``export_endpoint`` merely agrees by keeping the value already set. The command
+    provider never reads ``FINEPDFS_ENGINE_DETAIL`` at all -- it takes its detail from the start
+    command's payload or derives one -- so for that provider ``export_endpoint``'s keep-a-pin rule is
+    the only place the precedence runs. That shared rule is pinned by
+    ``test_exporting_an_endpoint_moves_the_address_but_not_a_pinned_detail``.
     """
     base_url = values.get(GPU_BASE_URL, "").strip() or values.get(ENGINE_BASE_URL, "").strip()
     model = values.get(GPU_MODEL, "").strip() or values.get(ENGINE_MODEL, "").strip()

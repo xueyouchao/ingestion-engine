@@ -16,6 +16,13 @@ PADDLEOCR_VL_ENGINE = "paddleocr-vl"
 MINERU_ENGINE = "mineru"
 KNOWN_ENGINES = (NATIVE_ENGINE, DOCLING_ENGINE, PADDLEOCR_VL_ENGINE, MINERU_ENGINE)
 
+# The engines whose identity has to carry the page DPI they render at. ADR-0005 makes page DPI an
+# identity input, so ``_deployment_detail`` appends ``@dpi{dpi}`` to a pinned detail for these engines
+# and no others. An engine that renders at a DPI -- and so carries one in its own detail -- belongs in
+# this tuple; the registry test fails until it is added, because a pinned ``--engine-detail`` would
+# otherwise silently drop the DPI and a DPI change would be served the other DPI's text from the memo.
+DPI_CARRYING_ENGINES = (PADDLEOCR_VL_ENGINE,)
+
 
 class UnknownEngine(ValueError):
     """Raised when a run names an engine that does not exist."""
@@ -54,14 +61,15 @@ def build_engine(config: EngineConfig) -> OcrEngine:
 def _deployment_detail(config: EngineConfig) -> str:
     """The configured deployment detail, carrying whatever the run's engine renders at.
 
-    ``StableIdentity`` replaces the adapter's detail -- and with it the page DPI the adapter put there.
-    ADR-0005 makes the page DPI an identity input, so the name a provider pins has to carry it too, or
-    changing ``FINEPDFS_ENGINE_DPI`` on a leased worker would be served the other DPI's text. Only the
-    engine that renders at a DPI carries one; the others never read ``page_dpi``.
+    ``StableIdentity`` replaces the adapter's detail wholesale -- and with it any page DPI the adapter
+    put there. ADR-0005 makes the page DPI an identity input, so the name a provider pins has to carry
+    it too, or changing ``FINEPDFS_ENGINE_DPI`` on a leased worker would be served the other DPI's text.
+    Only the engines in ``DPI_CARRYING_ENGINES`` render at a DPI and carry one; a new engine that does
+    has to join that tuple and be handled here, which the registry test pins.
     """
     if not config.detail:
         return ""
-    if config.name == PADDLEOCR_VL_ENGINE:
+    if config.name in DPI_CARRYING_ENGINES:
         from finepdfs.infrastructure.engines.paddleocr_vl import paddleocr_detail
 
         return paddleocr_detail(config.detail, config.page_dpi)
