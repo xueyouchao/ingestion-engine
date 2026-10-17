@@ -15,9 +15,10 @@ exit) with status 0, because a model outage must not hold up a merge.
 
 Each axis's call leaves an :class:`AxisOutcome`: its failure class, its wall-clock seconds and its
 findings. The classes stay apart -- a read timeout, a connection the server closed without answering,
-and an HTTP status are three different things with three different fixes -- because collapsing them
-into one "did not run" told the reader nothing about which was owed. A dropped connection is retried
-with backoff; a read timeout is not, because the call already sat out the socket's own deadline.
+a response it began and cut short, and an HTTP status are different things with different fixes --
+because collapsing them into one "did not run" told the reader nothing about which was owed. A dropped
+connection and a truncated read are retried with backoff; a read timeout is not, because the call
+already sat out the socket's own deadline.
 
 The comment is also the record, not a snapshot of the latest run: it names the head it reviewed and
 the run URL, lists every axis's outcome, and when a run finds nothing it keeps the findings already
@@ -76,6 +77,7 @@ OUTCOME_FINDINGS = "findings posted"
 OUTCOME_EMPTY = "empty review"
 OUTCOME_READ_TIMEOUT = "read timed out"
 OUTCOME_CONNECTION_CLOSED = "connection closed without response"
+OUTCOME_TRUNCATED_RESPONSE = "truncated response"
 OUTCOME_HTTP_STATUS = "HTTP status"
 OUTCOME_UNUSABLE = "unusable response"
 OUTCOME_UNREACHABLE = "endpoint unreachable"
@@ -83,12 +85,14 @@ OUTCOME_CERTIFICATE = "certificate verification failed"
 OUTCOME_UNEXPECTED = "unexpected failure"
 OUTCOME_ABANDONED = "abandoned at the stage deadline"
 
-# A dropped connection is not a bad request: the server never read it, so sending it again can work.
-# A read timeout is the opposite -- the call sat out the socket's whole deadline -- and a second
-# attempt cannot fit inside AXIS_RUN_DEADLINE_SECONDS, so only the closed connection is retried.
+# A dropped connection and a truncated read are both safe to repeat: the request was valid, and any
+# partial response is discarded, so sending it again can work. A dropped connection never got an
+# answer; a truncated read -- the server hung up after part of the body, raising IncompleteRead --
+# began one and left it incomplete. A read timeout is the opposite: the call sat out the socket's whole
+# deadline, so a second attempt cannot fit inside AXIS_RUN_DEADLINE_SECONDS. Only these two are retried.
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = 2.0
-RETRYABLE_FAILURES = frozenset({OUTCOME_CONNECTION_CLOSED})
+RETRYABLE_FAILURES = frozenset({OUTCOME_CONNECTION_CLOSED, OUTCOME_TRUNCATED_RESPONSE})
 
 # The findings region inside the one comment, so a later run can keep it instead of replacing the whole
 # body. The revision rides in the opening marker: that is what lets a reader tell stale from current.
@@ -175,9 +179,9 @@ class AxisOutcome:
     interrupted, the status an HTTP call answered -- that sentence is the detail, so a reader is never
     told an attempt answered when it did not. ``seconds`` is the call's wall clock, or the stage
     deadline itself when the axis was abandoned at it. ``attempts`` is above one only when a dropped
-    connection was retried. The comment renders :attr:`label` for every axis of every run, so
-    a failure is never silent: the reader can tell a slow model from a dropped socket from a refused
-    request.
+    connection or a truncated read was retried. The comment renders :attr:`label` for every axis of
+    every run, so a failure is never silent: the reader can tell a slow model from a dropped socket
+    from a refused request.
     """
 
     axis: Axis
@@ -203,9 +207,10 @@ def classify_failure(error: BaseException) -> tuple[str, str]:
 
     The transport failures stay apart because the fix differs: a read timeout means the model was
     still thinking when our socket gave up, a closed connection means the server dropped us without
-    answering, an HTTP status is the endpoint refusing the request in its own words, and a DNS or
-    refused connection never reached it at all. A certificate failure needs the endpoint's trust
-    configuration fixed, so retrying the same request cannot help.
+    answering, a truncated read means it began answering and hung up mid-body, an HTTP status is the
+    endpoint refusing the request in its own words, and a DNS or refused connection never reached it
+    at all. A certificate failure needs the endpoint's trust configuration fixed, so retrying the same
+    request cannot help.
     """
     if isinstance(error, HttpStatusError):
         return OUTCOME_HTTP_STATUS, _snippet(str(error))
@@ -220,9 +225,16 @@ def classify_failure(error: BaseException) -> tuple[str, str]:
         return OUTCOME_CERTIFICATE, _snippet(str(reason))
     if isinstance(reason, (ConnectionRefusedError, socket.gaierror)):
         return OUTCOME_UNREACHABLE, _snippet(str(error))
+    if isinstance(reason, http.client.IncompleteRead):
+        return OUTCOME_TRUNCATED_RESPONSE, _snippet(str(reason) or str(error))
     if isinstance(
         reason,
-        (http.client.RemoteDisconnected, ConnectionResetError, ConnectionAbortedError, BrokenPipeError),
+        (
+            http.client.RemoteDisconnected,
+            ConnectionResetError,
+            ConnectionAbortedError,
+            BrokenPipeError,
+        ),
     ):
         return OUTCOME_CONNECTION_CLOSED, _snippet(str(reason) or str(error))
     return OUTCOME_UNEXPECTED, _snippet(f"{type(error).__name__}: {error}")

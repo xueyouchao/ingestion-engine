@@ -87,6 +87,19 @@ def test_other_os_errors_are_not_mislabeled_as_dropped_connections(error, wrappe
     assert str(error) in detail
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_a_truncated_read_has_its_own_retryable_outcome(wrapped) -> None:
+    """The server began a response and cut it short: its own class, retried like a dropped connection."""
+    error = http.client.IncompleteRead(b"partial", 100)
+    failure = urllib.error.URLError(error) if wrapped else error
+    status, detail = review.classify_failure(failure)
+
+    assert status == review.OUTCOME_TRUNCATED_RESPONSE
+    assert status != review.OUTCOME_CONNECTION_CLOSED
+    assert status in review.RETRYABLE_FAILURES
+    assert "IncompleteRead" in detail
+
+
 class _Response(io.BytesIO):
     """A stand-in for urllib's response, carrying the status and headers the script inspects."""
 

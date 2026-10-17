@@ -34,3 +34,14 @@ def test_mixed_script_text_reports_the_dominant_script() -> None:
 
     assert tag.language == "Latn"
     assert 0.5 < tag.confidence < 1.0
+
+
+def test_a_tie_between_scripts_is_unknown_not_an_order_dependent_winner() -> None:
+    """A tie has no winner; ``most_common(1)`` used to pick whichever script appeared first."""
+    identifier = ScriptLanguageIdentifier()
+
+    for text in ("α" * 25 + "a" * 25, "a" * 25 + "α" * 25):
+        tag = identifier.identify(text, page_number=1)
+
+        assert tag.language == UNKNOWN_LANGUAGE
+        assert tag.confidence == 0.0

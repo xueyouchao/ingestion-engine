@@ -68,7 +68,7 @@ def _load_model(path: str) -> LoadedModel:
 
 
 class FastTextModel:
-    """fastText's lid.176 model, loaded once for a run, answering in ISO 639-3.
+    """fastText's lid.176 model, loaded once for a run, answering in ISO 639-3 but for one collective.
 
     `fasttext` is imported here rather than at module import time, because it is an optional extra
     (`pip install "finepdfs[language]"`) and the model file is downloaded, not vendored. The model is
@@ -76,11 +76,13 @@ class FastTextModel:
     halfway through a corpus.
 
     lid.176 answers in whatever code its training data used -- `en`, `de`, `fr` -- but the seam it
-    implements promises ISO 639-3, so the two-letter labels are translated here, beside the model that
-    emits them, and every implementer of `TextLabeller` really does return `eng`/`deu`/`fra`. The model
-    is CC-BY-SA-3.0 licensed; lid.176.bin and lid.176.ftz are published by Meta at
-    dl.fbaipublicfiles.com/fasttext/supervised-models/. The loader is injectable so the translation is
-    tested with a fake model object, no `fasttext` package and no network.
+    implements promises an ISO 639-3 code, so the two-letter labels are translated here, beside the
+    model that emits them, and every implementer of `TextLabeller` really does return `eng`/`deu`/`fra`
+    -- the one exception being `bh`, which ISO 639-3 cannot replace and which therefore carries `bih`
+    (ISO 639-2/639-5), as ADR-0001 discloses. The model is CC-BY-SA-3.0 licensed; lid.176.bin and
+    lid.176.ftz are published by Meta at dl.fbaipublicfiles.com/fasttext/supervised-models/. The
+    loader is injectable so the translation is tested with a fake model object, no `fasttext` package
+    and no network.
     """
 
     def __init__(self, path: str | Path, loader: Callable[[str], LoadedModel] = _load_model) -> None:
@@ -104,9 +106,10 @@ class FastTextLanguageIdentifier:
 
     A page is labelled in paragraph-sized pieces rather than whole: lid.176 is trained on short text,
     and a five-thousand-character page is a bag of words in which the most frequent language wins
-    whatever the tail says. Each piece is one vote, so a piece the model cannot name dilutes the
-    winner instead of silently disappearing, and the confidence is the winning language's average
-    score over the pieces.
+    whatever the tail says. Each piece adds its model score to the language it names, so a confident
+    piece outweighs a hesitant one; a piece the model cannot name contributes no score but still
+    divides the total, so it dilutes the winner instead of silently disappearing, and the confidence
+    is the winning language's average score over the pieces.
 
     The confidence above is averaged over every piece rather than passed through from one prediction:
     which pages are trusted is the LanguagePolicy's, not the adapter's, so a page the model is unsure
