@@ -4,6 +4,9 @@
 - **Planning date:** 2026-10-17.
 - **Time budget:** two implementation days. Ingestion is the release gate; extensions are cut when it is at risk.
 - **Reviewed baseline:** `255ca7632e8d6cc4c3702890cf92ec24e6172952`.
+- **Cross-review:** 2026-10-17, a second pass. It confirmed the two code gaps below against the source,
+  moved the OCR hunt to the front of day one, named the record contract as the search seam and added a
+  same-contract fallback for search. The checkboxes carry the merged plan.
 - **Related specification:** [FinePDFs integration](finepdfs-integration.md).
 
 ## Outcome
@@ -51,12 +54,26 @@ export from accepted Page Texts; reconstructing page citations from the joined M
 | P3 | Agent search tools | Start only after P2 returns correct, fresh results |
 | Later | Handwired/WebGPU panel, hybrid search, reranking | Outside the two-day critical path |
 
-At the end of day one, freeze the ingestion path and working environment. Day two starts with the
+Freeze the ingestion path and working environment by the **middle** of day one, not its end, because
+the scan hunt and engine validation below are the highest-uncertainty work: learning at 9am that the
+chosen crawl slice has no genuine scan is worth far more than learning it at 5pm. If the hunt fails,
+widen the domain filter rather than substituting a synthetic or corrupted PDF. Day two starts with the
 browser view, then search if time permits. Reserve the final half-day for acceptance checks and
 rehearsal; cut optional work rather than leaving the core unrehearsed.
 
+If single-node Elasticsearch cannot be made stable inside the budget, fall back to a local full-text
+index behind the **same record contract** rather than dropping search. One shipped backend at a time,
+never two.
+
 ## P0: make the ingestion demo reproducible
 
+- [ ] **Start the highest-uncertainty work first.** Hunt a genuine scan from the chosen crawl slice
+  (image-only, no usable text layer) and time-box the hunt to half a day, naming an owner when the
+  work starts. If the slice has none, widen the domain filter; never substitute a corrupted
+  derivative or a synthetic PDF. This gates the whole real-OCR story, so a failure must surface early.
+- [ ] Land the two code findings above as separate reviewed changes, with focused regression checks
+  through published outputs, before demo work begins. Both are small, and both make the demo's
+  transparent-exclusion and deduplication claims true rather than merely intended.
 - [ ] Select a fixed corpus of approximately 15-25 real Common Crawl PDFs, including native-text
   Documents and at least one genuine scan with manually checked text on known pages. Commit the
   manifest and restoration instructions, not PDF bytes or model weights. Record Crawl Records,
@@ -75,8 +92,6 @@ rehearsal; cut optional work rather than leaving the core unrehearsed.
   authenticated provider or healthy service from this document.
 - [ ] Pin the working dependencies and stable Engine Identity. Keep secrets, temporary hostnames
   and lease IDs out of committed evidence and memo identities; follow ADR-0005 and ADR-0007.
-- [ ] Fix accepted-page publication and the exact-duplicate report gap above, with focused regression
-  checks through published outputs.
 - [ ] Select fastText when presenting language labels, or label the default script tags as scripts.
   Keep the allow-list in the vocabulary of the selected Language Mode.
 - [ ] Export accepted pages, and chunks when search is enabled, as declared target state. Include
@@ -119,6 +134,9 @@ the selected adapter's thread/process safety has been checked.
 - [ ] Store commands, versions, timings and a small set of inspected results in a demo runbook.
   Report failures and limitations; do not reuse the historical synthetic benchmark as current
   pipeline performance evidence.
+- [ ] State the corpus size in the runbook, plainly, with what it does and does not demonstrate.
+  Roughly twenty Documents fit in a single context window, so the agent and search stages show the
+  architecture and the citations, not retrieval quality at corpus scale.
 
 ## P1: a small browser explorer
 
@@ -149,6 +167,9 @@ Common Crawl PDFs -> CocoIndex curation -> accepted page/chunk records
 CocoIndex run summaries and exclusions ------------> browser explorer
 ```
 
+- [ ] Treat the record contract, not the backend, as the seam. `doc_id`, `chunk_id`, source URL, PDF
+  digest, original page references, text and Engine Identity are what the browser and the agent read;
+  any adapter must satisfy that shape unchanged.
 - [ ] Start with a pinned single-node Elasticsearch development deployment and lexical BM25 search,
   metadata filters and highlighted passages. No embeddings are required for this gate.
 - [ ] Implement a small CocoIndex target adapter with deterministic IDs, idempotent bulk upserts,
@@ -159,6 +180,9 @@ CocoIndex run summaries and exclusions ------------> browser explorer
   source URL, PDF digest, original page references, snippet/text and score.
 - [ ] Check results after updates become search-visible; retries and reruns must not create duplicate
   hits. Test add, replacement and removal through the search API, not only by counting index rows.
+- [ ] If Elasticsearch is cut for time, index the same contract in a local full-text store and keep
+  the browser and agent contract intact. Ship one backend, not two, and do not present the fallback as
+  a second permanent design.
 
 CPU/GPU are deployment choices for Extraction and optional embedding/reranking inference. Keep the
 record schema and search API the same. Elasticsearch's GPU feature accelerates HNSW graph construction
@@ -175,6 +199,9 @@ through the existing search contract.
 - [ ] Prepare five answerable questions with known supporting pages and one unanswerable question.
   Answers cite document/page evidence; the unanswerable case reports insufficient evidence.
 - [ ] Verify that a removed or replaced Document cannot supply stale evidence.
+- [ ] Verify the agent model can actually call tools before promising this stage: the kept
+  `OLLAMA_API_KEY` (or a local model) must emit real calls to `search_pdfs` and `read_pdf_page`.
+  Check it the way Machine state is always checked; a provider's model list is not evidence.
 
 ## Deferred work and Handwired fit
 
