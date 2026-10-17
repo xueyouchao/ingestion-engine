@@ -120,12 +120,12 @@ def test_a_static_provider_without_a_model_is_still_named_static() -> None:
 
 
 def test_the_pinned_engine_detail_wins_the_static_providers_own_name() -> None:
-    """The two names meet in one place, so one rule decides -- and it must be the rule the README states.
+    """The static provider decides the precedence, and the export must not take it back.
 
     ADR-0007 keeps an identity that is already set, so ``--engine-detail`` pins the memo name and
     outlives the provider's default. The static provider's own ``FINEPDFS_GPU_DETAIL`` is that
-    default, so a pinned ``FINEPDFS_ENGINE_DETAIL`` wins it; ``export_endpoint``'s setdefault then
-    agrees with the one decision instead of quietly taking it back.
+    default, so a pinned ``FINEPDFS_ENGINE_DETAIL`` wins it; ``export_endpoint`` then keeps that
+    already-set detail rather than deciding the precedence a second time.
     """
     environ = {
         "FINEPDFS_GPU_PROVIDER": "static",
