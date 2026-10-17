@@ -45,7 +45,7 @@ by unique prefix match (`eng_` → `eng_Latn`), and both languages here resolve 
 ## The corpus
 
 12 PDFs, `CC-MAIN-2026-39`, `noaa.gov`, extracted with the default `pymupdf` native text layer and the
-`for_native_text()` cleaning rules. 292 pages, 492,610 characters.
+`for_native_text()` cleaning rules. 292 pages, 481,407 characters.
 
 | | |
 |---|---|
