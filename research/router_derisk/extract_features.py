@@ -10,7 +10,6 @@ import json
 from pathlib import Path
 
 import pyarrow.parquet as pq
-
 from schema import FEATURES
 
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextLayerProbe
