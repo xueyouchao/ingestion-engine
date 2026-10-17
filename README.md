@@ -254,6 +254,7 @@ the whole crawl.
 ## Documents
 
 * `docs/spec/finepdfs-integration.md` -- the specification this was built from
+* [PDF workflow demo plan](docs/spec/pdf-workflow-demo.md) -- two-day priorities, acceptance criteria and optional search
 * `docs/GLOSSARY.md` -- the vocabulary, kept deliberately small
 * `docs/adr/0001..0006` -- the decisions, with the alternatives that lost
 * `research/` -- the research behind the design, including `paddleocr-vl-mineru-adapters.md`
