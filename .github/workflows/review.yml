@@ -13,7 +13,7 @@ on:
 
 concurrency:
   # One review at a time repository-wide. The endpoint degrades when calls queue behind each other:
-  # in the ticket-24 probe (raw table in PR #7, a durable location) a fixed 9k-character prompt
+  # in the probe (raw table in PR #7, a durable location) a fixed 9k-character prompt
   # answered in 15s alone, 41s with two calls in flight, and 57s with four -- where one
   # deepseek-v4.1-flash call ran past 300s and was cut off by the probe's own socket. The probe's own
   # run id is deliberately not cited: it expires, while the pull request does not. The old per-ref
