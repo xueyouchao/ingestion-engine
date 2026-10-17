@@ -108,9 +108,9 @@ model is CC-BY-SA-3.0. It answers in whatever code its training data used -- `en
 adapter normalises the two-letter codes to ISO 639-3 (`eng`, `deu`), so the recorded field,
 `FINEPDFS_LANGUAGES` and GlotLID's codes all agree -- with one exception: the Bihari collective `bh`
 has no ISO 639-3 code and is carried as `bih` (ISO 639-2/639-5), as ADR-0001 records. A page is
-labelled in paragraph-sized pieces and the pieces vote, because lid.176 is trained on short text and a
-whole page dilutes it. There is still one global confidence floor; per-language thresholds are not
-implemented.
+labelled in paragraph-sized pieces, each piece adding its model score to the language it names, so a
+confident piece outweighs a hesitant one, because lid.176 is trained on short text and a whole page
+dilutes it. There is still one global confidence floor; per-language thresholds are not implemented.
 
 The allow-list `FINEPDFS_LANGUAGES` is read in whichever code the selected adapter emits, so its
 vocabulary follows `FINEPDFS_LANGUAGE`: `Latn,Grek` matches under `script`, `eng,spa` under `fasttext`,
