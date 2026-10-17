@@ -87,6 +87,18 @@ def test_other_os_errors_are_not_mislabeled_as_dropped_connections(error, wrappe
     assert str(error) in detail
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_a_truncated_read_is_a_dropped_connection_and_is_retried(wrapped) -> None:
+    """The server hung up mid-body: the same dropped-connection hazard, so the same class and retry."""
+    error = http.client.IncompleteRead(b"partial", 100)
+    failure = urllib.error.URLError(error) if wrapped else error
+    status, detail = review.classify_failure(failure)
+
+    assert status == review.OUTCOME_CONNECTION_CLOSED
+    assert status in review.RETRYABLE_FAILURES
+    assert "IncompleteRead" in detail
+
+
 class _Response(io.BytesIO):
     """A stand-in for urllib's response, carrying the status and headers the script inspects."""
 

@@ -84,8 +84,10 @@ OUTCOME_UNEXPECTED = "unexpected failure"
 OUTCOME_ABANDONED = "abandoned at the stage deadline"
 
 # A dropped connection is not a bad request: the server never read it, so sending it again can work.
-# A read timeout is the opposite -- the call sat out the socket's whole deadline -- and a second
-# attempt cannot fit inside AXIS_RUN_DEADLINE_SECONDS, so only the closed connection is retried.
+# A truncated read -- the server hung up after part of the body, raising IncompleteRead -- is the same
+# hazard mid-exchange, so it is retried the same way. A read timeout is the opposite: the call sat out
+# the socket's whole deadline, so a second attempt cannot fit inside AXIS_RUN_DEADLINE_SECONDS, and
+# only the closed connection is retried.
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = 2.0
 RETRYABLE_FAILURES = frozenset({OUTCOME_CONNECTION_CLOSED})
@@ -203,9 +205,9 @@ def classify_failure(error: BaseException) -> tuple[str, str]:
 
     The transport failures stay apart because the fix differs: a read timeout means the model was
     still thinking when our socket gave up, a closed connection means the server dropped us without
-    answering, an HTTP status is the endpoint refusing the request in its own words, and a DNS or
-    refused connection never reached it at all. A certificate failure needs the endpoint's trust
-    configuration fixed, so retrying the same request cannot help.
+    answering or hung up mid-body, an HTTP status is the endpoint refusing the request in its own
+    words, and a DNS or refused connection never reached it at all. A certificate failure needs the
+    endpoint's trust configuration fixed, so retrying the same request cannot help.
     """
     if isinstance(error, HttpStatusError):
         return OUTCOME_HTTP_STATUS, _snippet(str(error))
@@ -222,7 +224,13 @@ def classify_failure(error: BaseException) -> tuple[str, str]:
         return OUTCOME_UNREACHABLE, _snippet(str(error))
     if isinstance(
         reason,
-        (http.client.RemoteDisconnected, ConnectionResetError, ConnectionAbortedError, BrokenPipeError),
+        (
+            http.client.RemoteDisconnected,
+            http.client.IncompleteRead,
+            ConnectionResetError,
+            ConnectionAbortedError,
+            BrokenPipeError,
+        ),
     ):
         return OUTCOME_CONNECTION_CLOSED, _snippet(str(reason) or str(error))
     return OUTCOME_UNEXPECTED, _snippet(f"{type(error).__name__}: {error}")
