@@ -120,6 +120,7 @@ dropped, nothing is published, and the run exits 1 with one exclusion per docume
 carried and the required list it did not match. A mode switch does not re-extract: language
 identification is not part of the extraction memo, so the next run re-runs the deciding pass and rewrites
 each record and exclusion against the new tag.
+
 ## GPU workers
 
 A GPU engine can be pointed at a server you run, or at one rented for the length of a run:
