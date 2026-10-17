@@ -1,0 +1,126 @@
+{
+  "crawl_id": "CC-MAIN-2026-39",
+  "domain": "noaa.gov",
+  "entries": [
+    {
+      "url": "https://www.noaa.gov/sites/default/files/2021-09/NOAA-in-the-Caribbean-2021-Summer-Newsletter-English.pdf",
+      "digest": "0cf0b893f7d9ae6094b91d224782bedde2cf2382954f65a4d4de69b8748e52f4",
+      "file": "pdfs/0cf0b893f7d9ae6094b91d224782bedde2cf2382954f65a4d4de69b8748e52f4.pdf",
+      "bytes": 1983254,
+      "crawl_id": "CC-MAIN-2026-39",
+      "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492996361.89/warc/CC-MAIN-20260915172500-20260915202500-00356.warc.gz",
+      "offset": 770388715,
+      "length": 1962965
+    },
+    {
+      "url": "https://www.noaa.gov/sites/default/files/2022-01/Additional-Information-NOAA-tribal-provisions-in-IIJA.pdf",
+      "digest": "c6e326f5a9291562b70cefbcf4b9d72d155b506fea59fb461bfb844c8c283da5",
+      "file": "pdfs/c6e326f5a9291562b70cefbcf4b9d72d155b506fea59fb461bfb844c8c283da5.pdf",
+      "bytes": 157647,
+      "crawl_id": "CC-MAIN-2026-39",
+      "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492996361.89/warc/CC-MAIN-20260915172500-20260915202500-00267.warc.gz",
+      "offset": 718630999,
+      "length": 122440
+    },
+    {
+      "url": "https://www.noaa.gov/sites/default/files/2022-01/NOAA-in-the-Caribbean-Fall-2021-Newsletter-English.pdf",
+      "digest": "c1615cbde4ed8c01e2d75212701c204d6a99bca9ec64a0e40e5f680cb7bd5064",
+      "file": "pdfs/c1615cbde4ed8c01e2d75212701c204d6a99bca9ec64a0e40e5f680cb7bd5064.pdf",
+      "bytes": 1979699,
+      "crawl_id": "CC-MAIN-2026-39",
+      "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492996361.89/warc/CC-MAIN-20260915172500-20260915202500-00781.warc.gz",
+      "offset": 761936577,
+      "length": 1958138
+    },
+    {
+      "url": "https://www.noaa.gov/sites/default/files/2022-03/AwardActionRequestGuidance_MAR2022B.pdf",
+      "digest": "0f5bc7a46eb9503f0c1bdb3a9e29bf40351df669aa7e322a4d2a1c57e722e8eb",
+      "file": "pdfs/0f5bc7a46eb9503f0c1bdb3a9e29bf40351df669aa7e322a4d2a1c57e722e8eb.pdf",
+      "bytes": 875711,
+      "crawl_id": "CC-MAIN-2026-39",
+      "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492996361.89/warc/CC-MAIN-20260915172500-20260915202500-00616.warc.gz",
+      "offset": 763319754,
+      "length": 814830
+    },
+    {
+      "url": "https://www.noaa.gov/sites/default/files/2022-09/NOAA_en_el_Caribe_Edicion_Verano_2022_Espanol.pdf",
+      "digest": "90c835de782a45c9d69349cd514d575c9111dccbaad60630caecf2f2f3b26382",
+      "file": "pdfs/90c835de782a45c9d69349cd514d575c9111dccbaad60630caecf2f2f3b26382.pdf",
+      "bytes": 1577332,
+      "crawl_id": "CC-MAIN-2026-39",
+      "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492996361.89/warc/CC-MAIN-20260915172500-20260915202500-00737.warc.gz",
+      "offset": 774868969,
+      "length": 1495320
+    },
+    {
+      "url": "https://www.noaa.gov/sites/default/files/2022-09/NOAA_in_the_Caribbean_Summer_2022_Newsletter_English.pdf",
+      "digest": "81a89f1c302d98ff5cbcdb5f6add35c6c4df767cc79b1f1396346718580dbf9e",
+      "file": "pdfs/81a89f1c302d98ff5cbcdb5f6add35c6c4df767cc79b1f1396346718580dbf9e.pdf",
+      "bytes": 1134780,
+      "crawl_id": "CC-MAIN-2026-39",
+      "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492996361.89/warc/CC-MAIN-20260915172500-20260915202500-00930.warc.gz",
+      "offset": 768443788,
+      "length": 1076456
+    },
+    {
+      "url": "https://www.noaa.gov/sites/default/files/2022-12/CELC_2022_Educators_Workshop-Summary_Report.pdf",
+      "digest": "a3ba26a4fe8a2601f3a080023cf789d6e2034350cfdf019c90717dda57806ecb",
+      "file": "pdfs/a3ba26a4fe8a2601f3a080023cf789d6e2034350cfdf019c90717dda57806ecb.pdf",
+      "bytes": 2178283,
+      "crawl_id": "CC-MAIN-2026-39",
+      "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492700124.88/warc/CC-MAIN-20260912100909-20260912130909-00806.warc.gz",
+      "offset": 686891714,
+      "length": 2157631
+    },
+    {
+      "url": "https://www.noaa.gov/sites/default/files/2023-02/Facilitators-Guide-to-MWEE-Training-2023.pdf",
+      "digest": "7a8e628778f1f44d94872ebe42ce45129b516d870ca2b18b776a6b3cade437fb",
+      "file": "pdfs/7a8e628778f1f44d94872ebe42ce45129b516d870ca2b18b776a6b3cade437fb.pdf",
+      "bytes": 3272112,
+      "crawl_id": "CC-MAIN-2026-39",
+      "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492995418.81/warc/CC-MAIN-20260915111957-20260915141957-00565.warc.gz",
+      "offset": 797142998,
+      "length": 2554377
+    },
+    {
+      "url": "https://www.noaa.gov/sites/default/files/2023-02/NOAA-in-the-Caribbean-Autumn-2022-Newsletter_English_Final.pdf",
+      "digest": "c6270b7e13f8afb5cdc3d8b8b9e729d7fd28511895570d4060c675999460503b",
+      "file": "pdfs/c6270b7e13f8afb5cdc3d8b8b9e729d7fd28511895570d4060c675999460503b.pdf",
+      "bytes": 1467791,
+      "crawl_id": "CC-MAIN-2026-39",
+      "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492700124.88/warc/CC-MAIN-20260912100909-20260912130909-00460.warc.gz",
+      "offset": 801449161,
+      "length": 1397794
+    },
+    {
+      "url": "https://www.noaa.gov/sites/default/files/2023-05/IIJATribalProvisionsNOAAExecutiveSummaryandResponse.pdf",
+      "digest": "ae1650f388881c9d39001f171731e9216f7bf36db0d9a35e500e6ede9fcd4124",
+      "file": "pdfs/ae1650f388881c9d39001f171731e9216f7bf36db0d9a35e500e6ede9fcd4124.pdf",
+      "bytes": 230857,
+      "crawl_id": "CC-MAIN-2026-39",
+      "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492996361.89/warc/CC-MAIN-20260915172500-20260915202500-00082.warc.gz",
+      "offset": 737676737,
+      "length": 223515
+    },
+    {
+      "url": "https://www.noaa.gov/sites/default/files/2023-06/IRATribalNOAAExecutiveSummaryandResponse_0.pdf",
+      "digest": "a3b0be2d1ffa0ab3dd4ea84d56616097d28a0248d908551628d6e8dda62a94bd",
+      "file": "pdfs/a3b0be2d1ffa0ab3dd4ea84d56616097d28a0248d908551628d6e8dda62a94bd.pdf",
+      "bytes": 314041,
+      "crawl_id": "CC-MAIN-2026-39",
+      "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492996361.89/warc/CC-MAIN-20260915172500-20260915202500-00823.warc.gz",
+      "offset": 704946460,
+      "length": 281832
+    },
+    {
+      "url": "https://www.noaa.gov/sites/default/files/2023-06/NOAA_Tribal_Consultation_Handbook%202023_FINAL.pdf",
+      "digest": "6dd89aa9c604a0538a062bc4e024dfe164ceb3ebb1120cc172fb18c307591e2f",
+      "file": "pdfs/6dd89aa9c604a0538a062bc4e024dfe164ceb3ebb1120cc172fb18c307591e2f.pdf",
+      "bytes": 478143,
+      "crawl_id": "CC-MAIN-2026-39",
+      "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492996361.89/warc/CC-MAIN-20260915172500-20260915202500-00481.warc.gz",
+      "offset": 735833944,
+      "length": 449771
+    }
+  ]
+}

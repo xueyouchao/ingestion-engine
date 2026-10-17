@@ -1,0 +1,36 @@
+Pinned rerun: 2026-10-17
+Source: cab56da77f6d7bb60845a382897648823a4a7568
+Python 3.12.14; Windows; PyMuPDF 1.28.2; fasttext-wheel 0.9.2; NumPy 1.26.4
+Manifest SHA-256: 242d4aaa8fdb569bd2ec31041f24ca01533498351d68529e35ac41a29a3c7aa8
+Model SHA-256: 8f3472cfe8738a7b6099e8e999c3cbfae0dcd15696aac7d7738a8039db603e83
+Threshold SHA-256: 2935c7adec19806b052fef4baa44bc366eaaba6b7aa3ca3cd3d98af38778c526
+PDF payloads: all 12 verified against manifest SHA-256 and byte count
+Pages: 292; cleaned characters: 481407
+
+manifest: CC-MAIN-2026-39 noaa.gov
+global floor: 0.65
+
+document                                                    pg     global   conf       key      T  G  P1  P2  trG  trP1   +   -
+NOAA-in-the-Caribbean-2021-Summer-Newsletter-English.pdf    11        eng  0.891  eng_Latn  0.395  P   P   P   11    11   0   0
+Additional-Information-NOAA-tribal-provisions-in-IIJA.pdf    4        eng  0.884  eng_Latn  0.395  P   P   P    4     4   0   0
+NOAA-in-the-Caribbean-Fall-2021-Newsletter-English.pdf      11        eng  0.926  eng_Latn  0.395  P   P   P   11    11   0   0
+AwardActionRequestGuidance_MAR2022B.pdf                     41        eng  0.904  eng_Latn  0.395  P   P   P   41    41   0   0
+NOAA_en_el_Caribe_Edicion_Verano_2022_Espanol.pdf           16        spa  0.948  spa_Latn  0.243  P   P   P   16    16   0   0
+NOAA_in_the_Caribbean_Summer_2022_Newsletter_English.pdf    15        eng  0.905  eng_Latn  0.395  P   P   P   15    15   0   0
+CELC_2022_Educators_Workshop-Summary_Report.pdf             25        eng  0.875  eng_Latn  0.395  P   P   P   24    24   0   0
+Facilitators-Guide-to-MWEE-Training-2023.pdf                84        eng  0.914  eng_Latn  0.395  P   P   P   80    84   4   0
+NOAA-in-the-Caribbean-Autumn-2022-Newsletter_English_Fina   18        eng  0.884  eng_Latn  0.395  P   P   P   18    18   0   0
+IIJATribalProvisionsNOAAExecutiveSummaryandResponse.pdf     12        eng  0.907  eng_Latn  0.395  P   P   P   12    12   0   0
+IRATribalNOAAExecutiveSummaryandResponse_0.pdf              10        eng  0.922  eng_Latn  0.395  P   P   P   10    10   0   0
+NOAA_Tribal_Consultation_Handbook%202023_FINAL.pdf          45        eng  0.917  eng_Latn  0.395  P   P   P   44    44   0   0
+
+documents: 12
+global decisions: published 12 dropped 0
+global-drop / per-language-keep: 0
+global-keep / per-language-drop: 0
+P2 disagreements with P1: 0
+page-level trust changes (accepted set differs): 4
+pages with no table entry (fell back to 0.65 ): 1
+
+table values <= global floor: 439 > global floor: 1106 > 0.9: 750
+eng_Latn 0.3949919939031138 spa_Latn 0.2427753023793234
