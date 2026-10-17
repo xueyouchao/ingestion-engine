@@ -747,20 +747,62 @@ def test_a_dropped_connection_is_retried_before_the_axis_is_given_up(monkeypatch
     assert "findings from glm-5.3-flash" in posted[0]
 
 
-def test_a_read_timeout_is_not_retried(monkeypatch, tmp_path) -> None:
-    """The call already sat out the read timeout; another attempt cannot fit the stage deadline."""
+def test_a_read_timeout_is_retried_and_the_retry_can_post(monkeypatch, tmp_path) -> None:
+    """Ticket 27: a timed-out call used to lose the axis outright.
+
+    A read timeout sits out the whole socket deadline, and the old stage deadline was that deadline
+    plus 30 seconds, so a second attempt could not fit and the class with the least resilience was the
+    one class that got no retry. The deadline is now the retry policy's own worst case; the second
+    attempt answers here.
+    """
     calls: list[str] = []
 
     def open_(request, timeout=None):
-        calls.append(json.loads(request.data)["model"])
-        raise TimeoutError("timed out")
+        model = json.loads(request.data)["model"]
+        calls.append(model)
+        if calls.count(model) < 2:
+            raise TimeoutError("timed out")
+        answer = {"choices": [{"message": {"content": f"findings from {model}"}}]}
+        return _Response(json.dumps(answer).encode("utf-8"), content_type="application/json")
 
     code, posted = _run(monkeypatch, tmp_path, env={"OLLAMA_API_KEY": "test-key"}, opener=open_)
 
     assert code == 0
-    assert calls.count("deepseek-v4.1-flash") == 1
-    assert calls.count("glm-5.3-flash") == 1
-    assert "read timed out" in posted[0]
+    assert calls.count("deepseek-v4.1-flash") == 2
+    assert calls.count("glm-5.3-flash") == 2
+    assert "findings from deepseek-v4.1-flash" in posted[0]
+    assert "findings from glm-5.3-flash" in posted[0]
+    assert "read timed out" not in posted[0]
+
+
+def test_a_retry_is_not_started_when_the_backoff_cannot_fit_the_deadline(monkeypatch) -> None:
+    """The guard the old code relied on stays: a retry is only started when it fits the deadline."""
+    calls: list[str] = []
+
+    def open_(_request, timeout=None):
+        calls.append("call")
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(review, "AXIS_RUN_DEADLINE_SECONDS", 0.5)
+    monkeypatch.setattr(review, "RETRY_BACKOFF_SECONDS", 5.0)
+    axis = review.Axis("Spec", "model")
+    outcomes = review.run_axes(
+        (axis,), {axis.name: "review this"}, review.Backend("https://example.com", "key"), open_
+    )
+
+    assert len(calls) == 1
+    assert outcomes[0].status == review.OUTCOME_READ_TIMEOUT
+    assert outcomes[0].attempts == 1
+
+
+def test_the_stage_deadline_covers_every_attempt_the_retry_policy_allows() -> None:
+    """Ticket 27: the deadline must not be the thing that decides how many attempts fit.
+
+    It was one read timeout plus a 30-second margin, which could not hold the retry a read timeout
+    needs and let three dropped connections burn the budget and land on `abandoned` anyway.
+    """
+    assert review.AXIS_RUN_DEADLINE_SECONDS >= review.RETRY_ATTEMPTS * review.REQUEST_TIMEOUT_SECONDS
+    assert review.OUTCOME_READ_TIMEOUT in review.RETRYABLE_FAILURES
 
 
 # --- Ticket 22: the comment is a durable record, not a snapshot of the last run -------------------
