@@ -19,11 +19,29 @@ deduplication is about.
 **Page Text** — the text of a single page, with its 1-based page number, as produced by a text layer or
 an engine.
 
-**Extraction** — turning Document bytes into an Extracted Document (Page Texts plus engine identity).
+**Extraction** — turning Document bytes into an Extracted Document (Page Texts plus Engine Identity).
 Extraction is the expensive step and is memoized.
 
 **Engine** — an adapter that performs Extraction. Four ship: pymupdf (native text layer), docling,
-paddleocr-vl, mineru. An Engine is selected per run; its identity is part of the memo key.
+paddleocr-vl, mineru. An Engine is selected per run; its Engine Identity is part of the memo key.
+
+**Engine Identity** — an engine's name and its detail, and what the memo key remembers about the Engine:
+the name says which Engine ran, the detail names the deployment behind it. A model, page DPI or tool
+version change moves the detail and re-reads the corpus; a rented worker's new address does not
+(ADR-0005, ADR-0007).
+
+**Provider** — what supplies the Endpoint an Engine is reached at for a run. Three ship: none (the
+offline default, which supplies nothing and rents nothing), static (a server that already exists and
+outlives the run) and command (a start command that rents a worker, a stop command that gives it back).
+Modal and RunPod are another Provider behind the same seam, and no Engine knows about either (ADR-0007).
+
+**Lease** — the hold a run takes on a Provider's Endpoint, released on the way out, including when the
+run fails: a rented worker is given back either way, because a leaked GPU bills by the hour.
+
+**Endpoint** — the bundle a Provider supplies for a run: the base URL, model and API key where the bytes
+go right now, and the detail the memo remembers about the deployment behind them. The address moves with
+a rented worker; the detail must not move with it. It is the detail half of the Engine Identity, whose
+name says which Engine ran (ADR-0007).
 
 **Text Layer Quality** — what the embedded text of a PDF looks like when measured: characters per page,
 fraction of pages carrying text, garbled-character ratio, image-dominated pages.

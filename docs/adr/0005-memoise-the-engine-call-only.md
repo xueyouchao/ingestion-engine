@@ -4,7 +4,17 @@ Date: 2026-10-16
 
 ## Status
 
-Accepted
+Accepted. Amended by ADR-0007: when a worker's address is not stable, the detail the provider reports
+names the deployment, so the base URL among the identity's inputs below no longer has to move the memo
+key. The key itself is unchanged by that amendment.
+
+The detail the engines put there did change in the same work. The Consequences below already list page
+DPI as an identity input and the PaddleOCR-VL adapter did not carry it, so both of that engine's details
+now end in `@dpi{dpi}`: `model@base_url` became `model@base_url@dpi200`, and `cli:command:v1.6` became
+`cli:command:v1.6@dpi200`. Every existing `paddleocr-vl` memo key therefore misses on the first run after
+that lands, and the documents that engine read are read once more before being memoised again. It is a
+one-time cost, not a per-run one, and the alternative -- leaving DPI out -- would serve a 300 DPI read
+from a 200 DPI setting.
 
 ## Context
 

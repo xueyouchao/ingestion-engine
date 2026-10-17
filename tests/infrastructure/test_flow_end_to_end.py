@@ -6,11 +6,15 @@ changing a cheap rule must re-run only the cheap half.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import os
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import cocoindex as coco
 import pytest
@@ -22,6 +26,7 @@ from finepdfs.domain.ocr import OcrRoutingPolicy
 from finepdfs.domain.publishing import PublishPolicy
 from finepdfs.infrastructure.cocoindex import flow
 from finepdfs.infrastructure.cocoindex.runtime import Runtime
+from finepdfs.infrastructure.compute.providers import GpuStopFailed
 from finepdfs.infrastructure.corpus.index import document_key
 from finepdfs.infrastructure.corpus.manifest import CorpusEntry, CorpusManifest, relative_pdf_path
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextEngine, PymupdfTextLayerProbe
@@ -122,6 +127,210 @@ def _record(out_dir: Path, url: str) -> dict:
 
 def _exclusion(out_dir: Path, url: str) -> dict:
     return json.loads((out_dir / "excluded" / f"{document_key(url)}.json").read_text())
+
+
+def test_a_failed_run_gives_the_worker_back_and_clears_the_endpoint(monkeypatch, tmp_path) -> None:
+    """ADR-0007: the lease wraps the run, so its effects must not outlive it either.
+
+    This drives the flow's own lifespan, not the provider: a run that fails after the lease was taken
+    must still hand the worker back, and must not leave the process naming a worker it has returned.
+    """
+    started = tmp_path / "worker.started"
+    stopped = tmp_path / "worker.stopped"
+    start_script = tmp_path / "start_worker.py"
+    start_script.write_text(
+        "import json\n"
+        f"open({str(started)!r}, 'w').write('up')\n"
+        "print(json.dumps({'base_url': 'http://127.0.0.1:9/v1', 'model': 'm', 'detail': 'flow:test'}))\n"
+    )
+    stop_script = tmp_path / "stop_worker.py"
+    stop_script.write_text(f"open({str(stopped)!r}, 'w').write('down')\n")
+
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    (corpus_dir / "manifest.json").write_text("{ this manifest is not JSON")
+
+    monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
+    monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", f"{sys.executable} {start_script}")
+    monkeypatch.setenv("FINEPDFS_GPU_STOP_COMMAND", f"{sys.executable} {stop_script}")
+    monkeypatch.setenv("FINEPDFS_DB", str(tmp_path / "flow.db"))
+    monkeypatch.setenv("FINEPDFS_CORPUS", str(corpus_dir))
+    monkeypatch.setenv("FINEPDFS_ENGINE", "paddleocr-vl")
+    monkeypatch.setenv("FINEPDFS_ENGINE_MODEL", "operator-pinned")
+    monkeypatch.delenv("FINEPDFS_ENGINE_BASE_URL", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_API_KEY", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_DETAIL", raising=False)
+    flow.configure_runtime(None)
+
+    async def failing_run() -> None:
+        async with coco.runtime():
+            await flow.build_app().update()
+
+    with pytest.raises(ValueError):
+        asyncio.run(failing_run())
+
+    assert started.exists(), "the flow's lifespan must have leased a worker"
+    assert stopped.exists(), "a leaked GPU bills by the hour"
+    assert "FINEPDFS_ENGINE_BASE_URL" not in os.environ, "the returned worker must not stay the engine"
+    assert "FINEPDFS_ENGINE_API_KEY" not in os.environ
+    assert "FINEPDFS_ENGINE_DETAIL" not in os.environ
+    assert os.environ["FINEPDFS_ENGINE_MODEL"] == "operator-pinned", "the lease's export must be undone"
+    with pytest.raises(RuntimeError):
+        flow.active_runtime()
+
+
+def test_a_stop_command_that_fails_after_a_good_run_reaches_the_flow(monkeypatch, tmp_path, corpus) -> None:
+    """The release runs at the flow's own lifespan, so a leak must reach the caller from there too.
+
+    The provider tests drive the lease directly; this drives the seam production actually takes --
+    `cocoindex update main.py` -- where the lease is taken inside the lifespan. The run publishes, then
+    the stop command fails: the work is done, the worker is not back, and that is a provider failure
+    rather than something CocoIndex's own teardown may swallow.
+    """
+    start_script = tmp_path / "start_worker.py"
+    start_script.write_text(
+        "import json\n"
+        "print(json.dumps({'base_url': 'http://127.0.0.1:9/v1', 'model': 'm', 'detail': 'flow:test'}))\n"
+    )
+    stop_script = tmp_path / "stop_worker.py"
+    stop_script.write_text("import sys\nsys.exit(3)\n")
+
+    monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
+    monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", f"{sys.executable} {start_script}")
+    monkeypatch.setenv("FINEPDFS_GPU_STOP_COMMAND", f"{sys.executable} {stop_script}")
+    monkeypatch.setenv("FINEPDFS_DB", str(tmp_path / "flow.db"))
+    monkeypatch.setenv("FINEPDFS_CORPUS", str(corpus))
+    monkeypatch.setenv("FINEPDFS_OUT", str(tmp_path / "out"))
+    monkeypatch.setenv("FINEPDFS_ENGINE", "pymupdf")
+    monkeypatch.delenv("FINEPDFS_ENGINE_BASE_URL", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_API_KEY", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_DETAIL", raising=False)
+    flow.configure_runtime(None)
+
+    async def good_run() -> None:
+        async with coco.runtime():
+            await flow.build_app().update()
+
+    with pytest.raises(GpuStopFailed, match="exited with 3"):
+        asyncio.run(good_run())
+
+    assert (tmp_path / "out" / "records" / f"{document_key(ONE)}.json").exists(), "the run did its work"
+    assert "FINEPDFS_ENGINE_BASE_URL" not in os.environ, "the returned worker must not stay the engine"
+    assert "FINEPDFS_ENGINE_API_KEY" not in os.environ
+
+
+def test_a_missing_stop_binary_after_a_good_run_reaches_the_flow(monkeypatch, tmp_path, corpus) -> None:
+    """A stop binary that is not installed fails before there is any exit code to read.
+
+    ``SubprocessRunner`` raises ``CommandFailed`` itself for a binary ``shutil.which`` cannot find,
+    which is not the same shape as ``require_success`` reading a nonzero exit. At the flow's own
+    lifespan that still has to be the provider's failure -- ``GpuStopFailed``, which the CLI reports
+    -- rather than a bare ``CommandFailed`` escaping as the run ends.
+    """
+    start_script = tmp_path / "start_worker.py"
+    start_script.write_text(
+        "import json\n"
+        "print(json.dumps({'base_url': 'http://127.0.0.1:9/v1', 'model': 'm', 'detail': 'flow:test'}))\n"
+    )
+
+    monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
+    monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", f"{sys.executable} {start_script}")
+    monkeypatch.setenv("FINEPDFS_GPU_STOP_COMMAND", "/no/such/stop-worker")
+    monkeypatch.setenv("FINEPDFS_DB", str(tmp_path / "flow.db"))
+    monkeypatch.setenv("FINEPDFS_CORPUS", str(corpus))
+    monkeypatch.setenv("FINEPDFS_OUT", str(tmp_path / "out"))
+    monkeypatch.setenv("FINEPDFS_ENGINE", "pymupdf")
+    monkeypatch.delenv("FINEPDFS_ENGINE_BASE_URL", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_API_KEY", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_DETAIL", raising=False)
+    flow.configure_runtime(None)
+
+    async def good_run() -> None:
+        async with coco.runtime():
+            await flow.build_app().update()
+
+    with pytest.raises(GpuStopFailed, match="not installed"):
+        asyncio.run(good_run())
+
+    assert (tmp_path / "out" / "records" / f"{document_key(ONE)}.json").exists(), "the run did its work"
+
+
+def test_a_missing_stop_binary_does_not_mask_the_error_that_ended_the_run(monkeypatch, tmp_path) -> None:
+    """CocoIndex resumes the lifespan generator, so the run's error is never thrown into the lease.
+
+    The provider tests deliver the run's failure to ``lease`` by raising inside its ``with``; under
+    ``cocoindex update`` that never happens, because the environment closes the generator with
+    ``next()``. The stop leak must still be reported beside the error that ended the run rather than
+    in its place, because that error is the one the operator has to act on (ADR-0007).
+    """
+    start_script = tmp_path / "start_worker.py"
+    start_script.write_text(
+        "import json\n"
+        "print(json.dumps({'base_url': 'http://127.0.0.1:9/v1', 'model': 'm', 'detail': 'flow:test'}))\n"
+    )
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    (corpus_dir / "manifest.json").write_text("{ this manifest is not JSON")
+
+    monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
+    monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", f"{sys.executable} {start_script}")
+    monkeypatch.setenv("FINEPDFS_GPU_STOP_COMMAND", "/no/such/stop-worker")
+    monkeypatch.setenv("FINEPDFS_DB", str(tmp_path / "flow.db"))
+    monkeypatch.setenv("FINEPDFS_CORPUS", str(corpus_dir))
+    monkeypatch.setenv("FINEPDFS_ENGINE", "paddleocr-vl")
+    monkeypatch.setenv("FINEPDFS_ENGINE_MODEL", "operator-pinned")
+    monkeypatch.delenv("FINEPDFS_ENGINE_BASE_URL", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_API_KEY", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_DETAIL", raising=False)
+    flow.configure_runtime(None)
+
+    async def failing_run() -> None:
+        async with coco.runtime():
+            await flow.build_app().update()
+
+    with pytest.raises(ValueError) as raised:
+        asyncio.run(failing_run())
+
+    notes = " ".join(getattr(raised.value, "__notes__", []))
+    assert "GPU stop command" in notes, "the leak is reported on the run's traceback, not in its place"
+    assert "not installed" in notes, "the note says what the stop attempt actually did"
+
+
+def test_the_flow_builds_its_runtime_inside_the_lease(monkeypatch, tmp_path) -> None:
+    """The run path must not build an engine at the address it had before the lease.
+
+    `_run` reads a runtime from the flags before `update_blocking`, but it never hands that runtime to
+    the flow: with none configured, `coco_lifespan` leases, exports the endpoint, and only then builds
+    the runtime the flow uses. Had it built one first, the engine would be reached at the pre-lease
+    address while the leased worker sat unused. The detail the start command printed can only appear in
+    the engine's identity if the runtime was built after the lease exported it, so this pins the
+    ordering without a full update. (The address itself never shows up: `StableIdentity` replaces the
+    detail precisely so the memo key does not move with it.)
+    """
+    start_script = tmp_path / "start_worker.py"
+    start_script.write_text(
+        "import json\n"
+        "print(json.dumps({'base_url': 'http://leased.example:1/v1', 'model': 'm', 'detail': 'flow:test'}))\n"
+    )
+    monkeypatch.setenv("FINEPDFS_GPU_PROVIDER", "command")
+    monkeypatch.setenv("FINEPDFS_GPU_START_COMMAND", f"{sys.executable} {start_script}")
+    monkeypatch.setenv("FINEPDFS_ENGINE", "paddleocr-vl")
+    monkeypatch.setenv("FINEPDFS_ENGINE_MODEL", "m")
+    monkeypatch.delenv("FINEPDFS_ENGINE_BASE_URL", raising=False)
+    monkeypatch.delenv("FINEPDFS_ENGINE_DETAIL", raising=False)
+    flow.configure_runtime(None)
+
+    builder = SimpleNamespace(settings=SimpleNamespace(db_path=None))
+    lifespan = flow.coco_lifespan(builder)
+    next(lifespan)
+    try:
+        identity = str(flow.active_runtime().engines["paddleocr-vl"].identity)
+    finally:
+        lifespan.close()
+
+    assert "flow:test" in identity, "the runtime was built after the lease exported the worker's detail"
+    with pytest.raises(RuntimeError):
+        flow.active_runtime()
 
 
 def test_a_run_publishes_real_text_records_and_exclusions(monkeypatch, tmp_path, corpus) -> None:

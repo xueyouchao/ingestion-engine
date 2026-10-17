@@ -7,6 +7,7 @@ from pathlib import Path
 
 from finepdfs.domain.ports import OcrEngine
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextEngine
+from finepdfs.infrastructure.engines.stable_identity import StableIdentity
 from finepdfs.infrastructure.engines.subprocess_support import SubprocessRunner
 
 NATIVE_ENGINE = "pymupdf"
@@ -32,10 +33,42 @@ class EngineConfig:
     page_dpi: int = 200
     timeout_seconds: float = 300.0
     work_dir: Path | None = None
+    detail: str = ""
+    # The detail half of the engine's identity, when the address it is reached at is not stable.
+    #
+    # A rented GPU answers on a new host every run, so its address cannot be the memo key without
+    # re-reading the whole corpus each time (ADR-0005). Empty means the engine names itself, which is
+    # right for anything reached at an address that does not move. This is what ``StableIdentity`` and
+    # ``EngineIdentity`` both call ``detail``: the name is the engine's, the detail is the deployment's.
 
 
 def build_engine(config: EngineConfig) -> OcrEngine:
     """One engine, whichever kind it is. Imported lazily so unused engines cost nothing."""
+    engine = _build_engine(config)
+    detail = _deployment_detail(config)
+    if detail:
+        return StableIdentity(engine, detail)
+    return engine
+
+
+def _deployment_detail(config: EngineConfig) -> str:
+    """The configured deployment detail, carrying whatever the run's engine renders at.
+
+    ``StableIdentity`` replaces the adapter's detail -- and with it the page DPI the adapter put there.
+    ADR-0005 makes the page DPI an identity input, so the name a provider pins has to carry it too, or
+    changing ``FINEPDFS_ENGINE_DPI`` on a leased worker would be served the other DPI's text. Only the
+    engine that renders at a DPI carries one; the others never read ``page_dpi``.
+    """
+    if not config.detail:
+        return ""
+    if config.name == PADDLEOCR_VL_ENGINE:
+        from finepdfs.infrastructure.engines.paddleocr_vl import paddleocr_detail
+
+        return paddleocr_detail(config.detail, config.page_dpi)
+    return config.detail
+
+
+def _build_engine(config: EngineConfig) -> OcrEngine:
     if config.name == NATIVE_ENGINE:
         return PymupdfTextEngine()
     if config.name == DOCLING_ENGINE:

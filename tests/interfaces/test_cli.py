@@ -97,3 +97,17 @@ def test_out_comes_from_the_runtime_so_the_environment_can_set_it() -> None:
 
     assert args.out.name == "somewhere"
     assert not hasattr(build_parser().parse_args(["run"]), "out"), "an untyped flag must not appear at all"
+
+
+def test_an_engine_command_failure_reaches_the_traceback(monkeypatch) -> None:
+    """Only a run that cannot start is exit 2; an engine that fails mid-run keeps its traceback."""
+    from finepdfs.infrastructure.engines.subprocess_support import CommandFailed
+    from finepdfs.interfaces import cli
+
+    def failing_engine(args):
+        raise CommandFailed("the engine command failed")
+
+    monkeypatch.setattr(cli, "_dispatch", failing_engine)
+
+    with pytest.raises(CommandFailed):
+        cli.main(["inspect"])

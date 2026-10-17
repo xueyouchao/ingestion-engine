@@ -13,6 +13,23 @@ from finepdfs.domain.dedup import PublishedDocumentView, exact_duplicate_keepers
 from finepdfs.domain.document import Document
 from finepdfs.infrastructure.cocoindex.runtime import Runtime, runtime_from_environment
 from finepdfs.infrastructure.commoncrawl.source import CommonCrawlSource
+from finepdfs.infrastructure.compute.endpoint import (
+    ENGINE_API_KEY,
+    ENGINE_BASE_URL,
+    ENGINE_DETAIL,
+    ENGINE_MODEL,
+)
+from finepdfs.infrastructure.compute.providers import (
+    GPU_PROVIDER,
+    GPU_START_COMMAND,
+    GPU_STOP_COMMAND,
+    PROVIDERS,
+    GpuStartFailed,
+    GpuStopFailed,
+    MisconfiguredGpuProvider,
+    UnknownGpuProvider,
+    leased_environment,
+)
 from finepdfs.infrastructure.corpus.fetch import fetch_corpus
 from finepdfs.infrastructure.corpus.index import CorpusIndex
 from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifest
@@ -23,17 +40,24 @@ DEFAULT_CORPUS = Path("corpus")
 DEFAULT_OUT = Path("out")
 
 # Flag name to environment variable. "engine_command" is deliberately not called "command": a
-# subparser argument with that name would overwrite the name of the chosen subcommand.
+# subparser argument with that name would overwrite the name of the chosen subcommand. The names the GPU
+# seam introduced are read from their owners -- compute.endpoint writes the FINEPDFS_ENGINE_* four and
+# compute.providers owns the GPU_* -- so a rename is one edit there, not one here as well. The older
+# names below have no constant yet and are spelled where they are read.
 ENVIRONMENT_FOR_ENGINE = {
     "corpus": "FINEPDFS_CORPUS",
     "out": "FINEPDFS_OUT",
     "engine": "FINEPDFS_ENGINE",
-    "base_url": "FINEPDFS_ENGINE_BASE_URL",
-    "model": "FINEPDFS_ENGINE_MODEL",
-    "api_key": "FINEPDFS_ENGINE_API_KEY",
+    "base_url": ENGINE_BASE_URL,
+    "model": ENGINE_MODEL,
+    "api_key": ENGINE_API_KEY,
     "engine_command": "FINEPDFS_ENGINE_COMMAND",
+    "engine_detail": ENGINE_DETAIL,
     "dpi": "FINEPDFS_ENGINE_DPI",
     "similarity_threshold": "FINEPDFS_SIMILARITY_THRESHOLD",
+    "gpu_provider": GPU_PROVIDER,
+    "gpu_start_command": GPU_START_COMMAND,
+    "gpu_stop_command": GPU_STOP_COMMAND,
 }
 
 
@@ -97,11 +121,49 @@ def _add_engine_arguments(parser: argparse.ArgumentParser, *, out: bool) -> None
         default=argparse.SUPPRESS,
         help="fingerprint similarity above which one document is a near-duplicate of another",
     )
+    parser.add_argument(
+        "--engine-detail",
+        dest="engine_detail",
+        default=argparse.SUPPRESS,
+        help="the deployment detail in the engine's memo key, for a worker whose address changes every run",
+    )
+    parser.add_argument(
+        "--gpu-provider",
+        dest="gpu_provider",
+        default=argparse.SUPPRESS,
+        choices=list(PROVIDERS),
+        help="where a GPU engine runs: " + ", ".join(PROVIDERS),
+    )
+    parser.add_argument(
+        "--gpu-start-command",
+        dest="gpu_start_command",
+        default=argparse.SUPPRESS,
+        help="with --gpu-provider command: starts a worker and prints its endpoint",
+    )
+    parser.add_argument(
+        "--gpu-stop-command",
+        dest="gpu_stop_command",
+        default=argparse.SUPPRESS,
+        help="with --gpu-provider command: gives the worker back",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(message)s")
+    try:
+        return _dispatch(args)
+    except (UnknownGpuProvider, MisconfiguredGpuProvider, GpuStartFailed, GpuStopFailed) as error:
+        # A run that cannot lease its GPU is an operator problem, not a crash: say so and exit 2, the
+        # same way an empty corpus is refused rather than run. A worker the stop command could not give
+        # back is the same kind of message for the same reason -- it is still billing (ADR-0007).
+        # Deliberately not CommandFailed: an engine whose own command fails is a run that started, and
+        # its traceback names the engine, not the provider.
+        print(error, file=sys.stderr)
+        return 2
+
+
+def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "fetch-corpus":
         return _fetch_corpus(args)
     if args.command == "inspect":
@@ -148,17 +210,31 @@ def _inspect(args: argparse.Namespace) -> int:
     return 0
 
 
-def _runtime_from_args(args: argparse.Namespace) -> Runtime:
+def _export_flags(args: argparse.Namespace) -> None:
     """The flags a run was given, expressed as the environment the flow reads."""
     for attribute, variable in ENVIRONMENT_FOR_ENGINE.items():
         value = getattr(args, attribute, None)
         if value is not None:
             os.environ[variable] = str(value)
+
+
+def _runtime_from_args(args: argparse.Namespace) -> Runtime:
+    _export_flags(args)
     return runtime_from_environment()
 
 
 def _dry_run(args: argparse.Namespace) -> int:
-    runtime = _runtime_from_args(args)
+    """Curate in process, on whatever GPU this run was told to rent.
+
+    A dry run does not go through the CocoIndex flow, so the flow's lifespan cannot lease for it: it
+    leases here, exports the endpoint, and only then builds the runtime that holds the engine.
+    """
+    _export_flags(args)
+    with leased_environment(os.environ):
+        return _dry_run_in_process(runtime_from_environment())
+
+
+def _dry_run_in_process(runtime: Runtime) -> int:
     index = CorpusIndex(runtime.corpus_dir)
     documents = index.documents()
     if not documents:

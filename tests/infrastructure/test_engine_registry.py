@@ -33,6 +33,24 @@ def test_a_different_model_is_a_different_engine_identity() -> None:
     assert str(first.identity) != str(second.identity)
 
 
+def test_a_page_dpi_change_moves_the_engine_identity() -> None:
+    """ADR-0005 and the spec list page DPI among the identity's inputs, because the text depends on it.
+
+    A vision model reads the page at this DPI, so the same bytes at 300 DPI can produce different text
+    than at 200. Both ways the detail is decided must carry it: the adapter's own default, and the
+    deployment name a lease pins, which replaces that default and would otherwise drop the DPI.
+    """
+    served = {"name": "paddleocr-vl", "base_url": "http://host:8000/v1", "model": "m"}
+    assert str(build_engine(EngineConfig(**served)).identity) != str(
+        build_engine(EngineConfig(**served, page_dpi=300)).identity
+    )
+
+    pinned = dict(served, detail="modal:ocr:1.6")
+    assert str(build_engine(EngineConfig(**pinned)).identity) != str(
+        build_engine(EngineConfig(**pinned, page_dpi=300)).identity
+    )
+
+
 def test_an_unknown_engine_is_rejected() -> None:
     with pytest.raises(UnknownEngine):
         build_engine(EngineConfig(name="magic-ocr"))
