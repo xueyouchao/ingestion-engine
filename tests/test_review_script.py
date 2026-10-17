@@ -19,6 +19,8 @@ import time
 import urllib.error
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REVIEW_PATH = REPO_ROOT / ".github" / "scripts" / "review.py"
 PROMPT_PATH = REPO_ROOT / ".github" / "prompts" / "review.md"
@@ -858,7 +860,8 @@ def test_fresh_findings_are_handed_to_post_when_the_old_comment_cannot_be_read(m
     assert "fresh findings" in posted[0]
 
 
-def test_an_axis_abandoned_mid_retry_still_names_the_class_it_reached(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("hung_attempt", [2, 3])
+def test_an_axis_abandoned_mid_retry_still_names_the_class_it_reached(monkeypatch, tmp_path, hung_attempt) -> None:
     """A retry must not hide why the axis was in trouble when the deadline takes the retry too."""
     calls: list[str] = []
 
@@ -866,7 +869,7 @@ def test_an_axis_abandoned_mid_retry_still_names_the_class_it_reached(monkeypatc
         model = json.loads(request.data)["model"]
         calls.append(model)
         if model == "glm-5.3-flash":
-            if calls.count(model) == 1:
+            if calls.count(model) < hung_attempt:
                 raise urllib.error.URLError(
                     http.client.RemoteDisconnected("Remote end closed connection without response")
                 )
@@ -883,6 +886,7 @@ def test_an_axis_abandoned_mid_retry_still_names_the_class_it_reached(monkeypatc
     assert elapsed < 3
     assert "abandoned at the stage deadline" in posted[0]
     assert "the last attempt that ended was: connection closed without response" in posted[0]
+    assert f"({hung_attempt} attempts)" in posted[0]
     assert "standards findings" in posted[0]
 
 
@@ -1059,3 +1063,4 @@ def test_an_empty_answer_is_its_own_class_and_keeps_the_findings(monkeypatch, tm
     assert "empty review" in posted[0]
     assert "findings kept" in posted[0]
     assert "they are kept rather than erased" in posted[0]
+

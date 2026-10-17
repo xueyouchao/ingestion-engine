@@ -491,6 +491,7 @@ def run_axes(
     """
     outcomes: dict[str, AxisOutcome] = {}
     last_failure: dict[str, AxisOutcome] = {}
+    started_attempts: dict[str, int] = {}
     lock = threading.Lock()
     deadline = time.monotonic() + AXIS_RUN_DEADLINE_SECONDS
 
@@ -500,6 +501,8 @@ def run_axes(
         attempts = 0
         while True:
             attempts += 1
+            with lock:
+                started_attempts[axis.name] = attempts
             try:
                 review = chat(backend, axis.model, prompts[axis.name], opener)
             except Exception as error:  # Broad on purpose: one axis failing must not sink the other.
@@ -535,11 +538,12 @@ def run_axes(
 
     results = []
     for axis in axes:
-        outcome = outcomes.get(axis.name)
-        if outcome is None:
+        with lock:
+            outcome = outcomes.get(axis.name)
             known = last_failure.get(axis.name)
+            attempts = started_attempts.get(axis.name, 0)
+        if outcome is None:
             detail = f"the last attempt that ended was: {known.status}" if known else ""
-            attempts = known.attempts if known else 0
             outcome = AxisOutcome(axis, OUTCOME_ABANDONED, detail, AXIS_RUN_DEADLINE_SECONDS, None, attempts)
         results.append(outcome)
     return results
@@ -860,3 +864,4 @@ def main(argv: list[str] | None = None, opener=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
