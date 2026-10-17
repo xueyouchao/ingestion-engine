@@ -73,28 +73,31 @@ class CommonCrawlSource(CrawlSource):
         last_error: Exception | None = None
         for attempt in range(1, self._attempts + 1):
             try:
-                with self._opener(request, timeout=self._timeout) as response:
-                    body = response.read()
-                    if byte_range is not None:
-                        _check_range_response(response, byte_range, len(body))
-                    return body
-            except urllib.error.HTTPError as error:
-                body = error.read()
-                if error.code == 404 and _mentions_no_captures(body):
-                    # The index answers 404 with a JSON message when a domain has no matching captures.
-                    logger.info("the index holds no captures for %s", url)
-                    if tolerate_no_captures:
+                try:
+                    response = self._opener(request, timeout=self._timeout)
+                except urllib.error.HTTPError as error:
+                    with error:
+                        body = error.read()
+                    if error.code == 404 and _mentions_no_captures(body):
+                        # The index answers 404 with a JSON message when a domain has no matching captures.
+                        logger.info("the index holds no captures for %s", url)
+                        if tolerate_no_captures:
+                            return body
+                        raise CommonCrawlError(f"no captures for {url}") from error
+                    last_error = error
+                    if not _is_worth_retrying(error.code):
+                        logger.warning("giving up on %s: HTTP %s", url, error.code)
+                        break
+                    logger.warning("attempt %d/%d failed for %s: %s", attempt, self._attempts, url, error)
+                else:
+                    with response:
+                        body = response.read()
+                        if byte_range is not None:
+                            _check_range_response(response, byte_range, len(body))
                         return body
-                    raise CommonCrawlError(f"no captures for {url}") from error
-                last_error = error
-                if not _is_worth_retrying(error.code):
-                    logger.warning("giving up on %s: HTTP %s", url, error.code)
-                    break
-                logger.warning("attempt %d/%d failed for %s: %s", attempt, self._attempts, url, error)
             except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead) as error:
                 # IncompleteRead derives from HTTPException, not OSError, so it needs naming: a body cut
-                # mid-transfer is a transport failure like the rest, and unhandled it costs a whole
-                # document on the first attempt instead of a retry.
+                # mid-transfer is a transport failure, including while reading an HTTPError's body.
                 last_error = error
                 logger.warning("attempt %d/%d failed for %s: %s", attempt, self._attempts, url, error)
             if attempt < self._attempts:

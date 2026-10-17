@@ -162,16 +162,17 @@ class _StubHost:
     would prove only that the retry tuple catches the class; a real socket proves the failure mode.
     """
 
-    def __init__(self, body: bytes, *, cut_after: int | None = None) -> None:
+    def __init__(self, body: bytes, *, cut_after: int | None = None, status: int = 200) -> None:
         self._body = body
         self._cut_after = cut_after
+        self._status = status
         self.requests: list[str] = []
         host = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 host.requests.append(self.path)
-                self.send_response(200)
+                self.send_response(host._status)
                 self.send_header("Content-Length", str(len(host._body)))
                 self.end_headers()
                 self.wfile.write(host._body[: host._cut_after])
@@ -227,6 +228,38 @@ def test_a_cut_that_persists_is_a_reason_not_a_partial_document() -> None:
     assert len(host.requests) == 2
     assert "could not read" in str(raised.value)
     assert isinstance(raised.value.__cause__, http.client.IncompleteRead)
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "cut_after"),
+    [(503, b"service unavailable", 8), (404, b"No Captures found for: example.com", 11)],
+)
+def test_a_cut_error_response_is_retried_and_never_used_as_a_complete_body(status, body, cut_after) -> None:
+    with (
+        _StubHost(body, status=status, cut_after=cut_after) as host,
+        pytest.raises(CommonCrawlError) as raised,
+    ):
+        _source(_to_stub(host.url), attempts=3).list_records(QUERY)
+
+    assert len(host.requests) == 3
+    assert isinstance(raised.value.__cause__, http.client.IncompleteRead)
+
+
+def test_a_cut_error_response_can_recover_on_the_next_attempt() -> None:
+    body = (
+        b'{"url": "https://example.com/a.pdf", "filename": "crawl-data/CC-MAIN-2026-39/x.warc.gz", '
+        b'"offset": "100", "length": "51"}\n'
+    )
+    with _StubHost(b"service unavailable", status=503, cut_after=8) as failed, _StubHost(body) as recovered:
+
+        def opener(request, timeout=None):
+            url = recovered.url if failed.requests else failed.url
+            return _to_stub(url)(request, timeout=timeout)
+
+        records = _source(opener, attempts=3).list_records(QUERY)
+
+    assert [record.url for record in records] == ["https://example.com/a.pdf"]
+    assert len(failed.requests) == len(recovered.requests) == 1
 
 
 def test_a_whole_answer_over_a_real_socket_is_read_exactly_once() -> None:
