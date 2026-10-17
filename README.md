@@ -65,7 +65,7 @@ Seams you can replace without touching the pipeline:
 | `CrawlSource` | `CommonCrawlSource` (index API + ranged WARC reads) | a hand-written fake |
 | `TextLayerProbe` | `PymupdfTextLayerProbe` | a fake quality |
 | `OcrEngine` | PyMuPDF, Docling, PaddleOCR-VL, MinerU | counting engines |
-| `LanguageIdentifier` | `ScriptLanguageIdentifier` | a fixed tag |
+| `LanguageIdentifier` | `ScriptLanguageIdentifier` (script tags, nothing installed) or `FastTextLanguageIdentifier` (language tags, needs a model) | a fixed tag |
 
 ## Engines
 
@@ -85,6 +85,40 @@ vllm serve PaddlePaddle/PaddleOCR-VL-1.6 --trust-remote-code
 vllm serve opendatalab/MinerU2.5-Pro-2605-1.2B --logits-processors mineru_vl_utils:MinerULogitsProcessor
 .venv/bin/finepdfs run --engine mineru --base-url http://127.0.0.1:8000
 ~~~~
+
+## Language identification
+
+Which language a page is in is decided behind `LanguageIdentifier`, and the two adapters answer
+different questions.
+
+`script` (the default) names the *script* and needs nothing installed. Latn covers English and German
+alike, so it cannot tell them apart; it says so rather than guessing.
+
+`fasttext` names the *language*, which is what a language-tagged corpus needs. Install the optional
+extra, download the model once, and point the pipeline at it:
+
+~~~~bash
+.venv/bin/pip install -e ".[language]"
+curl -LO https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz
+FINEPDFS_LANGUAGE=fasttext FINEPDFS_LANGUAGE_MODEL=$PWD/lid.176.ftz .venv/bin/finepdfs dry-run
+~~~~
+
+The model is downloaded, never vendored: the library (`fasttext-numpy2-wheel`) is MIT, the `lid.176`
+model is CC-BY-SA-3.0. It answers in whatever code its training data used -- `en`, `de` -- and the
+adapter normalises the two-letter codes to ISO 639-3 (`eng`, `deu`), so the recorded field,
+`FINEPDFS_LANGUAGES` and GlotLID's codes all agree. A page is labelled in paragraph-sized pieces and the
+pieces vote, because lid.176 is trained on short text and a whole page dilutes it. There is still one
+global confidence floor; per-language thresholds are not implemented.
+
+The allow-list `FINEPDFS_LANGUAGES` is read in whichever code the selected adapter emits, so its
+vocabulary follows `FINEPDFS_LANGUAGE`: `Latn,Grek` matches under `script`, `eng,spa` under `fasttext`,
+never both. That is intended -- the list filters the recorded language field, and the adapter defines
+that field -- but it makes the pair mode-dependent: switching adapters means revisiting the list in the
+same change. A `script`-era list left in place under `fasttext` matches no page, so every document is
+dropped, nothing is published, and the run exits 1 with one exclusion per document, naming the tag it
+carried and the required list it did not match. A mode switch does not re-extract: language
+identification is not part of the extraction memo, so the next run re-runs the deciding pass and rewrites
+each record and exclusion against the new tag.
 
 ## Configuration
 
@@ -111,9 +145,11 @@ nothing was published, so an operator or a CI can tell "engine is down" from "no
 | `FINEPDFS_MIN_CHARACTERS_PER_PAGE` | `200` | routing floor |
 | `FINEPDFS_MIN_TEXT_COVERAGE` | `0.5` | routing floor |
 | `FINEPDFS_MAX_GARBLED_RATIO` | `0.05` | routing ceiling |
+| `FINEPDFS_LANGUAGE` | `script` | `script` names the script (`Latn`), `fasttext` names the language (`eng`) |
+| `FINEPDFS_LANGUAGE_MODEL` | -- | path to a downloaded fastText `lid.176` model, required by `fasttext` |
 | `FINEPDFS_LANGUAGE_CONFIDENCE` | `0.65` | per-page language floor |
 | `FINEPDFS_MIN_CHARACTERS` | `200` | publish minimum |
-| `FINEPDFS_LANGUAGES` | all | comma-separated allow-list, for example `Latn,Grek` |
+| `FINEPDFS_LANGUAGES` | all | comma-separated allow-list in the codes the chosen adapter emits: `eng,spa` under `fasttext`, `Latn,Grek` under `script` |
 | `FINEPDFS_SIMILARITY_THRESHOLD` | `0.8` | fingerprint similarity above which one document is a near-duplicate of another |
 
 ## Output layout
@@ -149,7 +185,8 @@ the whole crawl.
 
 ~~~~bash
 .venv/bin/python -m pytest              # the default suite: offline, no model and no network
-.venv/bin/python -m pytest -m network   # the tests the default run deselects: they reach live hosts
+.venv/bin/python -m pytest -m network   # the live Common Crawl reads the default run deselects
+.venv/bin/python -m pytest -m model     # the real-model test the default run deselects too
 ~~~~
 
 ## What is verified, and how
@@ -159,10 +196,11 @@ the whole crawl.
   here. The WARC parser is checked against a real 15 KB ranged record whose payload length matches the
   `Content-Length` the origin server sent, and against the metadata recorded beside that capture.
 * **Bad answers from the host are errors, not documents**: a host that ignores `Range`, a gzip member
-  that stops in the middle, two members in one answer, a body shorter than its own `Content-Length`, an
-  index answer that is not an index and a permanent client error that must not be retried all have
-  tests. A range that came back wrong, a truncated or missing PDF on disk and a disk that fills up
-  leave the corpus resumable rather than silently different.
+  that stops in the middle, two members in one answer, a body shorter than its own `Content-Length`, a
+  transfer cut mid-body, an index answer that is not an index and a permanent client error that must not
+  be retried all have tests. A cut that persists past the attempts is that record's `FetchFailure` with
+  a reason, never a partial document. A range that came back wrong, a truncated or missing PDF on disk
+  and a disk that fills up leave the corpus resumable rather than silently different.
 * **Model servers**: the PaddleOCR-VL and MinerU HTTP adapters are exercised against a real stub HTTP
   server on localhost, which proves the wire format, the multipart body and the response parsing.
 * **Command-line engines**: Docling, MinerU and PaddleOCR-VL CLI adapters are exercised with a recording
@@ -170,9 +208,12 @@ the whole crawl.
 * **Not executed here**: real Docling, PaddleOCR-VL and MinerU weights. This machine has no GPU and none
   of those tools installed, so their adapters are written to the tools' documented interfaces and tested
   against recorded shapes rather than live runs.
-* **Language**: the default adapter names the *script* (Latn, Grek, Cyrl), not the language. It cannot
-  tell English from German. Swapping in a fastText or GlotLID adapter behind `LanguageIdentifier` is
-  the intended upgrade.
+* **Language**: `ScriptLanguageIdentifier` names the script with no dependency at all, and reports
+  `Latn` for English and German alike. `FINEPDFS_LANGUAGE=fasttext` against a downloaded `lid.176.ftz`
+  tagged the 12 real NOAA PDFs here as 11 `eng` and one `spa` -- the Spanish edition of the Caribbean
+  newsletter, which the script adapter calls `Latn` like everything else. The real model is also
+  exercised by a marked test that skips cleanly when it is not on the machine, and the rest of the
+  adapter is tested against a hand-written labeller, so the everyday suite needs no model and no extra.
 
 ## Documents
 

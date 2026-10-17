@@ -18,7 +18,11 @@ from finepdfs.domain.publishing import PublishPolicy
 from finepdfs.infrastructure.corpus.index import CorpusIndex
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextLayerProbe
 from finepdfs.infrastructure.engines.registry import EngineConfig, build_engines
-from finepdfs.infrastructure.language.script import ScriptLanguageIdentifier
+from finepdfs.infrastructure.language.registry import (
+    DEFAULT_LANGUAGE_MODE,
+    LanguageConfig,
+    build_language_identifier,
+)
 from finepdfs.infrastructure.publishing.disk import PublishedCorpus
 
 DEFAULT_CORPUS_DIR = "corpus"
@@ -60,6 +64,10 @@ def runtime_from_environment(environ: Mapping[str, str] | None = None) -> Runtim
     corpus_dir = pathlib.Path(values.get("FINEPDFS_CORPUS", DEFAULT_CORPUS_DIR))
     out_dir = pathlib.Path(values.get("FINEPDFS_OUT", DEFAULT_OUT_DIR))
     engine_name = values.get("FINEPDFS_ENGINE", "pymupdf")
+    language_config = LanguageConfig(
+        mode=values.get("FINEPDFS_LANGUAGE", DEFAULT_LANGUAGE_MODE),
+        model_path=values.get("FINEPDFS_LANGUAGE_MODEL", ""),
+    )
 
     engine_config = EngineConfig(
         name=engine_name,
@@ -88,7 +96,7 @@ def runtime_from_environment(environ: Mapping[str, str] | None = None) -> Runtim
         out_dir=out_dir,
         policy=policy,
         extraction=ExtractionStep(probe, engines, policy),
-        curation=CurationStep(ScriptLanguageIdentifier(), policy),
+        curation=CurationStep(build_language_identifier(language_config), policy),
         similarity_threshold=float(values.get("FINEPDFS_SIMILARITY_THRESHOLD", "0.8")),
     )
 
