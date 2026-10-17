@@ -27,10 +27,12 @@ posted rather than erasing them, labelling them with the revision they reviewed.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -77,6 +79,7 @@ OUTCOME_CONNECTION_CLOSED = "connection closed without response"
 OUTCOME_HTTP_STATUS = "HTTP status"
 OUTCOME_UNUSABLE = "unusable response"
 OUTCOME_UNREACHABLE = "endpoint unreachable"
+OUTCOME_CERTIFICATE = "certificate verification failed"
 OUTCOME_UNEXPECTED = "unexpected failure"
 OUTCOME_ABANDONED = "abandoned at the stage deadline"
 
@@ -201,7 +204,8 @@ def classify_failure(error: BaseException) -> tuple[str, str]:
     The transport failures stay apart because the fix differs: a read timeout means the model was
     still thinking when our socket gave up, a closed connection means the server dropped us without
     answering, an HTTP status is the endpoint refusing the request in its own words, and a DNS or
-    refused connection never reached it at all.
+    refused connection never reached it at all. A certificate failure needs the endpoint's trust
+    configuration fixed, so retrying the same request cannot help.
     """
     if isinstance(error, HttpStatusError):
         return OUTCOME_HTTP_STATUS, _snippet(str(error))
@@ -212,9 +216,14 @@ def classify_failure(error: BaseException) -> tuple[str, str]:
     reason = error.reason if isinstance(error, urllib.error.URLError) else error
     if isinstance(reason, TimeoutError):
         return OUTCOME_READ_TIMEOUT, ""
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return OUTCOME_CERTIFICATE, _snippet(str(reason))
     if isinstance(reason, (ConnectionRefusedError, socket.gaierror)):
         return OUTCOME_UNREACHABLE, _snippet(str(error))
-    if isinstance(reason, OSError):
+    if isinstance(
+        reason,
+        (http.client.RemoteDisconnected, ConnectionResetError, ConnectionAbortedError, BrokenPipeError),
+    ):
         return OUTCOME_CONNECTION_CLOSED, _snippet(str(reason) or str(error))
     return OUTCOME_UNEXPECTED, _snippet(f"{type(error).__name__}: {error}")
 
@@ -864,4 +873,3 @@ def main(argv: list[str] | None = None, opener=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
