@@ -1,32 +1,38 @@
-# Would a per-language publish threshold change any decision? — historical measurement
+# Would a per-language publish threshold change any decision? — measured on pinned inputs
 
 *Ticket 14, first checkbox: "on the committed corpus, how many documents does the global threshold
 exclude whose own language's FinePDFs threshold would keep, and vice versa? If that set is empty, park
-the ticket and let the measurement be the deliverable." Measured against the corpus on this machine
+the ticket and let the measurement be the deliverable." Remeasured against the pinned corpus
 (12 files, `CC-MAIN-2026-39`, `noaa.gov`, 292 pages) with the shipped `lid.176` adapter and FinePDFs'
 own `thresholds/th_values.json`, not inferred from either table alone.*
 
-## Input provenance — unresolved
+## Pinned inputs and rerun
 
-**The original inputs are not pinned.** The phrase “committed corpus” in the ticket quoted above
-was inaccurate: neither the PDFs nor their measured `corpus/manifest.json` is tracked. The crawl ID,
-domain, filenames and page counts below do not identify the PDF bytes. No immutable copy of that
-manifest has been located, so the reported results are historical observations, not a reproducible
-baseline. A fresh query of the same crawl must not be presented as recovery of the measured inputs.
+The original run's manifest was not preserved. **The results below now come from a fresh fetch and
+measurement on 2026-10-17**, replacing the unverified historical baseline. The same crawl/domain
+query returned the same 12 document names, and the new run reproduced the reported totals and
+decisions; this does not establish byte identity with the original run.
 
-To resolve this gap, recover the manifest from the original measurement run and preserve it as
-`research/per-language-thresholds-corpus-manifest.json` (or link an immutable copy). It must include
-all 12 entries with `url`, PDF SHA-256 `digest`, `file`, `bytes`, `crawl_id`, `warc_filename`,
-`offset` and `length`, matching the existing `CorpusManifest` schema. Recover each PDF from its
-Common Crawl WARC byte range, then verify the extracted payload's SHA-256 and byte count before
-running the probe. This follows [ADR-0002](../docs/adr/0002-real-common-crawl-corpus.md); PDFs need
-not be committed, but the measured manifest must be preserved.
+The measured [corpus manifest](per-language-thresholds-corpus-manifest.json) is tracked with this
+note. Its SHA-256 is `242d4aaa8fdb569bd2ec31041f24ca01533498351d68529e35ac41a29a3c7aa8`.
+Each entry records the URL, PDF SHA-256 `digest`, relative `file`, byte count, crawl ID, WARC
+filename, offset and compressed record length. All 12 payload digests and byte counts were verified
+before measurement. PDFs remain outside Git, as [ADR-0002](../docs/adr/0002-real-common-crawl-corpus.md)
+requires. The “committed corpus” wording in the ticket quoted above refers here to the committed
+manifest, not committed PDF files.
 
-If the original manifest cannot be recovered, run a new measurement and commit its manifest together
-with the replacement results. Do not assign newly fetched digests or locations to the old numbers.
-Until either happens, the zero-change result below cannot independently justify parking ticket 14.
+Restore those exact inputs with [restore_threshold_corpus.py](restore_threshold_corpus.py); it uses
+the recorded WARC ranges without querying the index and rejects payloads whose size or SHA-256
+differs. HTTP failures require retrying; they must not lead to substituting a live-origin PDF.
 
-## The reported answer (unverified)
+The rerun used source revision `cab56da77f6d7bb60845a382897648823a4a7568` (the documentation-only
+successor to `1d8c9ce4d44c6decd9c864f8399ea175afbce3c7`), Python 3.12.14, PyMuPDF 1.28.2,
+`fasttext-wheel` 0.9.2 and NumPy 1.26.4 on Windows. The NumPy 1 build avoids the original fastText
+wrapper's NumPy 2 incompatibility. The model and threshold-table SHA-256 values below were verified
+and match the earlier run. The [rerun output](per-language-thresholds-results.txt) records the manifest
+digest, runtime versions and comparison results.
+
+## The answer, up front
 
 **0 documents change decision in either direction.** The global floor of 0.65 excluded 0 of the 12
 documents, so there is no exclusion for a per-language threshold to reverse; and both languages the
@@ -39,7 +45,7 @@ per-language rule is strictly more permissive here and also excludes nothing the
 | Global keeps, per-language would drop | **0** |
 | Total documents whose verdict changes | **0** |
 
-**The original run parked ticket 14; that conclusion awaits input provenance or a new pinned run.**
+**Ticket 14 is parked on the pinned rerun. This note is the deliverable.**
 Nothing is built: no ADR, no threshold table in
 the repo, no change to `PublishPolicy` or `LanguagePolicy`. The caveat that matters is in "N = 12, two
 languages" below: this measures *this* corpus, and the table's own distribution says a corpus with
@@ -189,10 +195,17 @@ checkboxes were read and are recorded here so a future build starts from them:
 
 ## Reproducing the measurement
 
-The original run cannot currently be reproduced: its corpus manifest is missing (see input provenance
-above). The procedure below is a probe for a supplied local corpus, not a way to recover the original
-12 inputs. For a new run, preserve the exact manifest alongside its results and verify every PDF
-against its manifest digest and byte count before measuring.
+First restore the pinned manifest and PDFs, from the checkout root:
+
+```sh
+PYTHONPATH=src python research/restore_threshold_corpus.py corpus
+```
+
+The rest of the probe is read-only. It checks the pinned manifest SHA-256, both downloaded artifact
+hashes, and each PDF digest and byte count before processing. The commands below use a Unix-style
+temporary directory. On Windows, install `fasttext-wheel==0.9.2` with `numpy==1.26.4` instead of the
+NumPy 2 build, and set `INGESTION_ENGINE_MODEL` and `INGESTION_ENGINE_THRESHOLDS` to the downloaded
+artifact paths. The rerun used that Windows setup.
 
 Read-only over the corpus; no writes to the checkout. Two artifacts are fetched
 **outside the repo** and never vendored:
@@ -202,8 +215,8 @@ Read-only over the corpus; no writes to the checkout. Two artifacts are fetched
 | `lid.176.ftz` | `https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz` | CC-BY-SA-3.0 (per `FastTextModel`'s docstring) | `8f3472cfe8738a7b6099e8e999c3cbfae0dcd15696aac7d7738a8039db603e83` |
 | `th_values.json` | `https://raw.githubusercontent.com/huggingface/finepdfs/main/thresholds/th_values.json` | repo AGPL-3.0; dataset ODC-By 1.0 | `2935c7adec19806b052fef4baa44bc366eaaba6b7aa3ca3cd3d98af38778c526` |
 
-The optional `fasttext` extra was installed into a throwaway `--target` directory and put on
-`PYTHONPATH`; `pyproject.toml` and the project's dependencies are unchanged. The script below is
+The rerun installed PyMuPDF, `fasttext-wheel==0.9.2` and `numpy==1.26.4` into a throwaway
+`--target` directory and put it on `PYTHONPATH`; `pyproject.toml` and the project's dependencies are unchanged. The script below is
 `/tmp/measure_per_language_thresholds.py` (outside the repo); it prints the corpus inventory, the global
 verdicts, the per-language comparison, the page-level changes, and the two counts.
 
@@ -220,7 +233,7 @@ curl -o /tmp/fp_th_values.json https://raw.githubusercontent.com/huggingface/fin
 PYTHONPATH=/tmp/lidlibs .venv/bin/python /tmp/measure_per_language_thresholds.py
 ```
 
-Historical tail (only expected for the original, currently unpinned inputs):
+Expected tail for the pinned inputs:
 `global decisions: published 12 dropped 0`, `global-drop / per-language-keep: 0`,
 `global-keep / per-language-drop: 0`, `P2 disagreements with P1: 0`, `page-level trust changes … 4`,
 `table values <= global floor: 439 > global floor: 1106 > 0.9: 750`.
@@ -258,9 +271,16 @@ from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextEngine
 from finepdfs.infrastructure.language.fasttext import FastTextLanguageIdentifier, FastTextModel
 
 CORPUS = Path(os.environ.get("INGESTION_ENGINE_CORPUS", str(CHECKOUT / "corpus"))).expanduser().resolve()
-MODEL = "/tmp/lid176.ftz"
-TABLE_PATH = "/tmp/fp_th_values.json"
+MODEL = os.environ.get("INGESTION_ENGINE_MODEL", "/tmp/lid176.ftz")
+TABLE_PATH = os.environ.get("INGESTION_ENGINE_THRESHOLDS", "/tmp/fp_th_values.json")
 GLOBAL_FLOOR = 0.65
+
+for artifact, expected in (
+    (MODEL, "8f3472cfe8738a7b6099e8e999c3cbfae0dcd15696aac7d7738a8039db603e83"),
+    (TABLE_PATH, "2935c7adec19806b052fef4baa44bc366eaaba6b7aa3ca3cd3d98af38778c526"),
+):
+    if hashlib.sha256(Path(artifact).read_bytes()).hexdigest() != expected:
+        raise ValueError("artifact SHA-256 mismatch: " + artifact)
 
 TABLE = json.load(open(TABLE_PATH))
 engine = PymupdfTextEngine()
@@ -319,9 +339,16 @@ def main() -> None:
     fallback_pages = 0
     rows = []
 
-    manifest = json.load(open(os.path.join(CORPUS, "manifest.json")))
+    manifest_bytes = (CORPUS / "manifest.json").read_bytes()
+    if hashlib.sha256(manifest_bytes).hexdigest() != (
+        "242d4aaa8fdb569bd2ec31041f24ca01533498351d68529e35ac41a29a3c7aa8"
+    ):
+        raise ValueError("manifest SHA-256 mismatch: restore the pinned manifest first")
+    manifest = json.loads(manifest_bytes)
     for entry in manifest["entries"]:
         content = open(os.path.join(CORPUS, entry["file"]), "rb").read()
+        if len(content) != entry["bytes"] or hashlib.sha256(content).hexdigest() != entry["digest"]:
+            raise ValueError("PDF digest or size mismatch: " + entry["file"])
         extracted = engine.extract(Document(name=entry["url"], content=content))
         pages = text_rules.CleaningRules.for_native_text().clean(extracted.pages)
         tags = [identifier.identify(p.text, p.number) for p in pages]
