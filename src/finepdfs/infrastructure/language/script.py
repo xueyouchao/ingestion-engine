@@ -1,9 +1,9 @@
 """A dependency-free language identifier: it names the script, not the language.
 
 Latn covers English and German alike, so this adapter cannot tell them apart. It is honest about that:
-the confidence is the share of characters in the winning script, and text that belongs to more than
-one script with no clear winner is reported as unknown. A fastText or GlotLID adapter can replace it
-behind the same port when real language naming is needed. See ADR-0001.
+the confidence is the share of characters in the winning script, and a page whose largest scripts are
+tied is reported as unknown. A fastText or GlotLID adapter can replace it behind the same port when
+real language naming is needed. See ADR-0001.
 """
 
 from __future__ import annotations
@@ -43,7 +43,13 @@ class ScriptLanguageIdentifier:
         if not counts:
             return unknown_page(page_number)
 
-        script, count = counts.most_common(1)[0]
+        ranked = counts.most_common()
+        # A tie for the largest share has no winner: most_common(1) would return whichever script the
+        # text happened to mention first, making the tag depend on character order rather than on the
+        # page. The adapter's promise is that it does not guess, so an ambiguous page is unknown.
+        if len(ranked) > 1 and ranked[1][1] == ranked[0][1]:
+            return unknown_page(page_number)
+        script, count = ranked[0]
         return PageLanguage(page_number=page_number, language=script, confidence=count / len(letters))
 
 
