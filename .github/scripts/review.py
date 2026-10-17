@@ -17,8 +17,9 @@ Each axis's call leaves an :class:`AxisOutcome`: its failure class, its wall-clo
 findings. The classes stay apart -- a read timeout, a connection the server closed without answering,
 a response it began and cut short, and an HTTP status are different things with different fixes --
 because collapsing them into one "did not run" told the reader nothing about which was owed. A dropped
-connection and a truncated read are retried with backoff; a read timeout is not, because the call
-already sat out the socket's own deadline.
+connection, a truncated read and a read timeout are all retried with backoff, for as many attempts as
+:data:`AXIS_RUN_DEADLINE_SECONDS` can hold; that deadline covers the calculated retry budget plus
+a margin for connection setup and scheduling overhead.
 
 The comment is also the record, not a snapshot of the latest run: it names the head it reviewed and
 the run URL, lists every axis's outcome, and when a run finds nothing it keeps the findings already
@@ -65,11 +66,9 @@ MAX_BODY_CHARS = 8_000
 MAX_ERROR_BODY_CHARS = 200
 # A slow model on a large diff needs more than the three minutes that timed the Spec axis out in
 # three of the last four reviews: the review comments on PRs #2, #3 and #4 each report "The read
-# operation timed out", and only #5 answered. The two calls run concurrently, so this bounds the
-# stage rather than doubling it; the deadline sits just past it so a socket timeout, which names
-# itself, normally beats the deadline, which can only say the call never returned.
+# operation timed out", and only #5 answered. The two calls run concurrently, so this bounds a call
+# rather than doubling the stage.
 REQUEST_TIMEOUT_SECONDS = 600
-AXIS_RUN_DEADLINE_SECONDS = REQUEST_TIMEOUT_SECONDS + 30
 
 # The failure classes the comment keeps apart. The first is not a failure; the rest are named for the
 # thing that failed, not for the branch that noticed it.
@@ -85,14 +84,34 @@ OUTCOME_CERTIFICATE = "certificate verification failed"
 OUTCOME_UNEXPECTED = "unexpected failure"
 OUTCOME_ABANDONED = "abandoned at the stage deadline"
 
-# A dropped connection and a truncated read are both safe to repeat: the request was valid, and any
-# partial response is discarded, so sending it again can work. A dropped connection never got an
-# answer; a truncated read -- the server hung up after part of the body, raising IncompleteRead --
-# began one and left it incomplete. A read timeout is the opposite: the call sat out the socket's whole
-# deadline, so a second attempt cannot fit inside AXIS_RUN_DEADLINE_SECONDS. Only these two are retried.
+# A dropped connection, a truncated read and a read timeout are all safe to repeat: the request was
+# valid, and any partial response is discarded, so sending it again can work. A dropped connection
+# never got an answer; a truncated read -- the server hung up after part of the body, raising
+# IncompleteRead -- began one and left it incomplete; a read timeout means the socket sat out its whole
+# deadline without one. The read timeout used to be the exception, because a second attempt could not
+# fit AXIS_RUN_DEADLINE_SECONDS; the deadline below now covers the retry budget plus overhead, so the
+# class with the least resilience is retried like the others.
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = 2.0
-RETRYABLE_FAILURES = frozenset({OUTCOME_CONNECTION_CLOSED, OUTCOME_TRUNCATED_RESPONSE})
+RETRYABLE_FAILURES = frozenset(
+    {OUTCOME_READ_TIMEOUT, OUTCOME_CONNECTION_CLOSED, OUTCOME_TRUNCATED_RESPONSE}
+)
+
+# The calculated retry budget: each socket read allows REQUEST_TIMEOUT_SECONDS, and the
+# backoff before each retry starts at RETRY_BACKOFF_SECONDS and doubles. Deriving the stage deadline
+# from the policy, rather than setting it by hand, is what stops the deadline from deciding how many
+# attempts fit. It used to be one read timeout plus 30 seconds, so a single 600-second call left no
+# room for the retry that class needs, and three dropped connections could spend the whole budget and
+# still land on `abandoned`. Socket timeouts do not include thread startup, connection setup or late
+# backoff wakeups, so keep a 30-second margin above that budget. The stage deadline remains a finite
+# ceiling for a hung call; the margin lets ordinary timeout failures finish and report their class.
+RETRY_BACKOFF_TOTAL_SECONDS = RETRY_BACKOFF_SECONDS * (2 ** (RETRY_ATTEMPTS - 1) - 1)
+AXIS_RUN_DEADLINE_MARGIN_SECONDS = 30
+AXIS_RUN_DEADLINE_SECONDS = (
+    RETRY_ATTEMPTS * REQUEST_TIMEOUT_SECONDS
+    + RETRY_BACKOFF_TOTAL_SECONDS
+    + AXIS_RUN_DEADLINE_MARGIN_SECONDS
+)
 
 # The findings region inside the one comment, so a later run can keep it instead of replacing the whole
 # body. The revision rides in the opening marker: that is what lets a reader tell stale from current.
@@ -178,8 +197,8 @@ class AxisOutcome:
     sent any and may be empty; where this module has something to add -- the class an abandonment
     interrupted, the status an HTTP call answered -- that sentence is the detail, so a reader is never
     told an attempt answered when it did not. ``seconds`` is the call's wall clock, or the stage
-    deadline itself when the axis was abandoned at it. ``attempts`` is above one only when a dropped
-    connection or a truncated read was retried. The comment renders :attr:`label` for every axis of
+    deadline itself when the axis was abandoned at it. ``attempts`` is above one when a read timeout, a
+    dropped connection or a truncated read was retried. The comment renders :attr:`label` for every axis of
     every run, so a failure is never silent: the reader can tell a slow model from a dropped socket
     from a refused request.
     """
@@ -505,10 +524,10 @@ def run_axes(
     A call that is still running at :data:`AXIS_RUN_DEADLINE_SECONDS` is abandoned rather than
     awaited, so a hung socket cannot hold the job open: the surviving axis posts regardless.
 
-    A connection the server closed without answering is retried, with backoff, up to
-    :data:`RETRY_ATTEMPTS`. The guard only keeps the next attempt's *start* inside the stage deadline;
-    an attempt that then runs long is abandoned like any other, and the class the axis last reached
-    travels with the abandonment so a retry does not hide why the axis was in trouble.
+    A read timeout, a connection the server closed without answering and a truncated read are retried,
+    with backoff, up to :data:`RETRY_ATTEMPTS`. The guard only keeps the next attempt's *start* inside
+    the stage deadline; an attempt that then runs long is abandoned like any other, and the class the
+    axis last reached travels with the abandonment so a retry does not hide why the axis was in trouble.
     """
     outcomes: dict[str, AxisOutcome] = {}
     last_failure: dict[str, AxisOutcome] = {}
@@ -885,3 +904,4 @@ def main(argv: list[str] | None = None, opener=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
