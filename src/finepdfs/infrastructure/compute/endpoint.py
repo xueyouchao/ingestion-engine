@@ -67,6 +67,10 @@ def export_endpoint(endpoint: GpuEndpoint, environ: MutableMapping[str, str]) ->
     ):
         if value:
             environ[variable] = value
+    # Credentials belong to the leased address, never to the server it replaced.
+    # The empty endpoint from NoGpuProvider must leave the environment untouched.
+    if endpoint.base_url and not endpoint.api_key:
+        environ.pop(ENGINE_API_KEY, None)
     # An empty value is not a pin. Every other reader of FINEPDFS_ENGINE_DETAIL treats empty as unset,
     # and so does the provider that derived this one, so a present-but-empty key has to be overwritten
     # rather than kept: `setdefault` would leave "" here, `build_engine` would skip `StableIdentity`,
