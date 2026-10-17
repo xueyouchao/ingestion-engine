@@ -447,7 +447,10 @@ def test_an_unknown_provider_is_rejected() -> None:
 
 
 def test_exporting_an_endpoint_moves_the_address_but_not_a_pinned_detail() -> None:
-    environ = {"FINEPDFS_ENGINE_DETAIL": "pinned:v1"}
+    environ = {
+        "FINEPDFS_ENGINE_DETAIL": "pinned:v1",
+        "FINEPDFS_ENGINE_API_KEY": "previous-secret",
+    }
 
     export_endpoint(
         GpuEndpoint(base_url="https://new.example/v1", model="m", api_key="k", detail="provider-derived"),
@@ -461,11 +464,16 @@ def test_exporting_an_endpoint_moves_the_address_but_not_a_pinned_detail() -> No
 
 
 def test_an_empty_endpoint_leaves_the_environment_alone() -> None:
-    environ = {"FINEPDFS_ENGINE_BASE_URL": "http://kept:8000/v1"}
+    environ = {
+        "FINEPDFS_ENGINE_BASE_URL": "http://kept:8000/v1",
+        "FINEPDFS_ENGINE_API_KEY": "kept-key",
+    }
+    original = environ.copy()
 
-    export_endpoint(GpuEndpoint(), environ)
+    with NoGpuProvider().lease() as endpoint:
+        export_endpoint(endpoint, environ)
 
-    assert environ == {"FINEPDFS_ENGINE_BASE_URL": "http://kept:8000/v1"}
+    assert environ == original
 
 
 def test_a_moving_address_does_not_move_the_memo_key() -> None:
@@ -630,3 +638,22 @@ def test_a_stop_command_that_is_not_installed_fails_the_cli_cleanly(monkeypatch,
 
     assert code == 2
     assert "GPU stop command failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    ["https://rented.example/v1", '{"base_url": "https://rented.example/v1"}'],
+)
+def test_a_new_worker_without_a_key_does_not_inherit_the_previous_servers_secret(stdout: str) -> None:
+    runner = RecordingRunner(stdout=stdout)
+    provider = CommandGpuProvider(start_command=START, stop_command=STOP, runner=runner)
+    environ = {
+        "FINEPDFS_ENGINE_BASE_URL": "https://previous.example/v1",
+        "FINEPDFS_ENGINE_API_KEY": "previous-secret",
+    }
+
+    with provider.lease() as endpoint:
+        export_endpoint(endpoint, environ)
+
+    assert environ["FINEPDFS_ENGINE_BASE_URL"] == "https://rented.example/v1"
+    assert "FINEPDFS_ENGINE_API_KEY" not in environ
