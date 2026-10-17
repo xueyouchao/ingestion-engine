@@ -12,8 +12,17 @@ on:
     types: [opened, synchronize, reopened]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # One review at a time repository-wide. The endpoint degrades when calls queue behind each other:
+  # in the ticket-24 probe (run 38962574202, raw table in PR #7) a fixed 9k-character prompt answered
+  # in 15s alone, 41s with two calls in flight, and 57s with four -- where one deepseek-v4.1-flash
+  # call ran past 300s and was cut off by the probe's own socket. The old per-ref group serialised one pull request and nothing else, so
+  # pushes to two pull requests put up to four long requests against the one OLLAMA_API_KEY. This
+  # group caps it at the two axes of a single review, which the probe measured at 6/6 answering.
+  group: ${{ github.workflow }}
+  # Preserve pending reviews across pull requests instead of replacing the single default pending
+  # run. GitHub allows up to 100 pending runs with queue: max; further arrivals are canceled.
+  queue: max
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -35,6 +44,12 @@ jobs:
         run: |
           git diff --unified=3 "origin/${BASE_REF}...HEAD" > pr.diff
           wc -c < pr.diff
+          # A queued run may start after a later push has moved the merge ref this job checks out, and
+          # queue: max preserves pending runs. Stamp the head actually
+          # diffed -- the merge commit's second parent -- not the SHA the event carried, or the revision
+          # the comment names would not be the revision it read.
+          REVIEWED_SHA=$(git rev-parse --verify -q HEAD^2 || git rev-parse HEAD)
+          echo "REVIEWED_SHA=$REVIEWED_SHA" >> "$GITHUB_ENV"
       - name: Review
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -48,4 +63,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          # What the comment stamps itself with: the revision this run actually diffed, and its run URL.
+          HEAD_SHA: ${{ env.REVIEWED_SHA }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python3 .github/scripts/review.py --diff pr.diff --prompt .github/prompts/review.md

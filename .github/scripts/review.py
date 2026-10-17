@@ -12,14 +12,27 @@ the code holds no second spelling that could drift.
 
 The review is a comment, never a gate. Every failure below ends in a short comment (or a quiet
 exit) with status 0, because a model outage must not hold up a merge.
+
+Each axis's call leaves an :class:`AxisOutcome`: its failure class, its wall-clock seconds and its
+findings. The classes stay apart -- a read timeout, a connection the server closed without answering,
+and an HTTP status are three different things with three different fixes -- because collapsing them
+into one "did not run" told the reader nothing about which was owed. A dropped connection is retried
+with backoff; a read timeout is not, because the call already sat out the socket's own deadline.
+
+The comment is also the record, not a snapshot of the latest run: it names the head it reviewed and
+the run URL, lists every axis's outcome, and when a run finds nothing it keeps the findings already
+posted rather than erasing them, labelling them with the revision they reviewed.
 """
 
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -56,6 +69,44 @@ MAX_ERROR_BODY_CHARS = 200
 # itself, normally beats the deadline, which can only say the call never returned.
 REQUEST_TIMEOUT_SECONDS = 600
 AXIS_RUN_DEADLINE_SECONDS = REQUEST_TIMEOUT_SECONDS + 30
+
+# The failure classes the comment keeps apart. The first is not a failure; the rest are named for the
+# thing that failed, not for the branch that noticed it.
+OUTCOME_FINDINGS = "findings posted"
+OUTCOME_EMPTY = "empty review"
+OUTCOME_READ_TIMEOUT = "read timed out"
+OUTCOME_CONNECTION_CLOSED = "connection closed without response"
+OUTCOME_HTTP_STATUS = "HTTP status"
+OUTCOME_UNUSABLE = "unusable response"
+OUTCOME_UNREACHABLE = "endpoint unreachable"
+OUTCOME_CERTIFICATE = "certificate verification failed"
+OUTCOME_UNEXPECTED = "unexpected failure"
+OUTCOME_ABANDONED = "abandoned at the stage deadline"
+
+# A dropped connection is not a bad request: the server never read it, so sending it again can work.
+# A read timeout is the opposite -- the call sat out the socket's whole deadline -- and a second
+# attempt cannot fit inside AXIS_RUN_DEADLINE_SECONDS, so only the closed connection is retried.
+RETRY_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = 2.0
+RETRYABLE_FAILURES = frozenset({OUTCOME_CONNECTION_CLOSED})
+
+# The findings region inside the one comment, so a later run can keep it instead of replacing the whole
+# body. The revision rides in the opening marker: that is what lets a reader tell stale from current.
+# The token is any non-space run, not just a hex SHA, so the ``unknown`` stamp written when no revision
+# is available still round-trips instead of silently making the findings unkeepable. The pattern is
+# derived from the template the writer uses, so the two spellings cannot drift apart.
+FINDINGS_OPEN_TEMPLATE = "<!-- finepdfs-findings revision={revision} -->"
+FINDINGS_OPEN = re.compile(
+    re.escape(FINDINGS_OPEN_TEMPLATE).replace(r"\{revision\}", r"(?P<revision>[^\s>]{1,64})")
+)
+FINDINGS_CLOSE = "<!-- /finepdfs-findings -->"
+# A comment the old code posted: findings under `### <axis> -- model` headings, no markers. Read back
+# once, at the upgrade, so the first findings-free run afterwards does not erase them. The old code
+# wrote a section for every axis, failures included, so a section's own text has to be checked too: a
+# run note kept as findings would outlive the findings it displaced.
+LEGACY_AXIS_SECTION = re.compile(r"^### (?P<axis>.+?) — (?P<model>`[^`]+`)\s*$", re.MULTILINE)
+LEGACY_RUN_NOTE = re.compile(r"^_(?:This axis did not run:.*|The model returned an empty review\.)_$", re.DOTALL)
+LEGACY_REVISION = "pre-marker"
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +156,76 @@ class ReviewCallError(RuntimeError):
     comment shows what the endpoint actually answered instead of a bare ``JSONDecodeError`` -- which
     reads as a credential problem even when the endpoint is a tombstone.
     """
+
+
+class HttpStatusError(ReviewCallError):
+    """The endpoint answered a status outside 2xx; its own words are the evidence to post."""
+
+
+class UnusableResponseError(ReviewCallError):
+    """A 2xx body this call cannot read: not JSON, or JSON of a shape without an assistant message."""
+
+
+@dataclass(frozen=True, slots=True)
+class AxisOutcome:
+    """One axis's call: how it ended, how long it took, and what it found.
+
+    ``status`` is one of the ``OUTCOME_*`` classes. ``detail`` carries the endpoint's own words when it
+    sent any and may be empty; where this module has something to add -- the class an abandonment
+    interrupted, the status an HTTP call answered -- that sentence is the detail, so a reader is never
+    told an attempt answered when it did not. ``seconds`` is the call's wall clock, or the stage
+    deadline itself when the axis was abandoned at it. ``attempts`` is above one only when a dropped
+    connection was retried. The comment renders :attr:`label` for every axis of every run, so
+    a failure is never silent: the reader can tell a slow model from a dropped socket from a refused
+    request.
+    """
+
+    axis: Axis
+    status: str
+    detail: str
+    seconds: float
+    findings: str | None
+    attempts: int = 1
+
+    @property
+    def label(self) -> str:
+        """The per-axis line: class, wall-clock seconds, the endpoint's words, and retry count."""
+        line = f"{self.status} after {self.seconds:.1f}s"
+        if self.detail:
+            line += f" — {self.detail}"
+        if self.attempts > 1:
+            line += f" ({self.attempts} attempts)"
+        return line
+
+
+def classify_failure(error: BaseException) -> tuple[str, str]:
+    """The class of a failed call and the one-line detail a reader can act on.
+
+    The transport failures stay apart because the fix differs: a read timeout means the model was
+    still thinking when our socket gave up, a closed connection means the server dropped us without
+    answering, an HTTP status is the endpoint refusing the request in its own words, and a DNS or
+    refused connection never reached it at all. A certificate failure needs the endpoint's trust
+    configuration fixed, so retrying the same request cannot help.
+    """
+    if isinstance(error, HttpStatusError):
+        return OUTCOME_HTTP_STATUS, _snippet(str(error))
+    if isinstance(error, UnusableResponseError):
+        return OUTCOME_UNUSABLE, _snippet(str(error))
+    if isinstance(error, TimeoutError):
+        return OUTCOME_READ_TIMEOUT, ""
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, TimeoutError):
+        return OUTCOME_READ_TIMEOUT, ""
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return OUTCOME_CERTIFICATE, _snippet(str(reason))
+    if isinstance(reason, (ConnectionRefusedError, socket.gaierror)):
+        return OUTCOME_UNREACHABLE, _snippet(str(error))
+    if isinstance(
+        reason,
+        (http.client.RemoteDisconnected, ConnectionResetError, ConnectionAbortedError, BrokenPipeError),
+    ):
+        return OUTCOME_CONNECTION_CLOSED, _snippet(str(reason) or str(error))
+    return OUTCOME_UNEXPECTED, _snippet(f"{type(error).__name__}: {error}")
 
 
 def _diff_path(path: str) -> str:
@@ -339,12 +460,12 @@ def chat(backend: Backend, model: str, prompt: str, opener=None) -> str:
     except urllib.error.HTTPError as error:
         # A rejected model id or a wrong endpoint answers 4xx; its body is the useful part.
         body = error.read().decode("utf-8", errors="replace")
-        raise ReviewCallError(f"the endpoint answered {_where(error)}: {_snippet(body)}") from None
+        raise HttpStatusError(f"the endpoint answered {_where(error)}: {_snippet(body)}") from None
 
     try:
         answer = json.loads(body)
     except json.JSONDecodeError:
-        raise ReviewCallError(
+        raise UnusableResponseError(
             f"the endpoint answered {where} but the body is not JSON: {_snippet(body)}"
         ) from None
 
@@ -353,7 +474,7 @@ def chat(backend: Backend, model: str, prompt: str, opener=None) -> str:
     except (KeyError, IndexError, TypeError):
         content = None
     if not isinstance(content, str):
-        raise ReviewCallError(
+        raise UnusableResponseError(
             f"the endpoint answered {where} but the JSON carries no assistant message: {_snippet(body)}"
         )
     return content.strip()
@@ -364,28 +485,56 @@ def run_axes(
     prompts: dict[str, str],
     backend: Backend,
     opener=None,
-) -> list[tuple[Axis, str, str | None]]:
-    """Every axis's call, made concurrently, as ``(axis, review, error)`` in the prompt's order.
+) -> list[AxisOutcome]:
+    """Every axis's call, made concurrently, as one :class:`AxisOutcome` per axis in prompt order.
 
     The two models are independent, so running them in sequence makes the slower one pay for the
     faster one's latency -- and time out for reasons that have nothing to do with its own answer.
     A call that is still running at :data:`AXIS_RUN_DEADLINE_SECONDS` is abandoned rather than
     awaited, so a hung socket cannot hold the job open: the surviving axis posts regardless.
-    Exactly one of ``review`` and ``error`` is set: an empty ``review`` with ``error`` ``None`` means
-    the model answered with nothing.
+
+    A connection the server closed without answering is retried, with backoff, up to
+    :data:`RETRY_ATTEMPTS`. The guard only keeps the next attempt's *start* inside the stage deadline;
+    an attempt that then runs long is abandoned like any other, and the class the axis last reached
+    travels with the abandonment so a retry does not hide why the axis was in trouble.
     """
-    outcomes: dict[str, tuple[str, str | None]] = {}
+    outcomes: dict[str, AxisOutcome] = {}
+    last_failure: dict[str, AxisOutcome] = {}
+    started_attempts: dict[str, int] = {}
     lock = threading.Lock()
+    deadline = time.monotonic() + AXIS_RUN_DEADLINE_SECONDS
 
     def run(axis: Axis) -> None:
-        try:
-            review = chat(backend, axis.model, prompts[axis.name], opener)
-        except Exception as error:  # Broad on purpose: one axis failing must not sink the other.
-            outcome: tuple[str, str | None] = ("", str(error))
-        else:
-            outcome = (review, None)
-        with lock:
-            outcomes[axis.name] = outcome
+        started = time.monotonic()
+        backoff = RETRY_BACKOFF_SECONDS
+        attempts = 0
+        while True:
+            attempts += 1
+            with lock:
+                started_attempts[axis.name] = attempts
+            try:
+                review = chat(backend, axis.model, prompts[axis.name], opener)
+            except Exception as error:  # Broad on purpose: one axis failing must not sink the other.
+                status, detail = classify_failure(error)
+                outcome = AxisOutcome(axis, status, detail, time.monotonic() - started, None, attempts)
+                with lock:
+                    last_failure[axis.name] = outcome
+                if (
+                    status in RETRYABLE_FAILURES
+                    and attempts < RETRY_ATTEMPTS
+                    and time.monotonic() + backoff < deadline
+                ):
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+            else:
+                status = OUTCOME_FINDINGS if review else OUTCOME_EMPTY
+                outcome = AxisOutcome(
+                    axis, status, "", time.monotonic() - started, review or None, attempts
+                )
+            with lock:
+                outcomes[axis.name] = outcome
+            return
 
     threads = [
         threading.Thread(target=run, args=(axis,), name=f"review-{axis.name}", daemon=True)
@@ -393,21 +542,25 @@ def run_axes(
     ]
     for thread in threads:
         thread.start()
-    deadline = time.monotonic() + AXIS_RUN_DEADLINE_SECONDS
     for thread in threads:
         thread.join(max(0.0, deadline - time.monotonic()))
 
-    abandoned = f"the call timed out after {AXIS_RUN_DEADLINE_SECONDS:g} seconds and was abandoned"
     results = []
     for axis in axes:
-        review, error = outcomes.get(axis.name, ("", abandoned))
-        results.append((axis, review, error))
+        with lock:
+            outcome = outcomes.get(axis.name)
+            known = last_failure.get(axis.name)
+            attempts = started_attempts.get(axis.name, 0)
+        if outcome is None:
+            detail = f"the last attempt that ended was: {known.status}" if known else ""
+            outcome = AxisOutcome(axis, OUTCOME_ABANDONED, detail, AXIS_RUN_DEADLINE_SECONDS, None, attempts)
+        results.append(outcome)
     return results
 
 
-def section_body(axis: Axis, outcome: str) -> str:
-    """One axis's section, headed by the axis and the model that produced it; never a merged verdict."""
-    return f"### {axis.name} — `{axis.model}`\n\n{outcome.strip()}\n"
+def section_body(axis: Axis, findings: str) -> str:
+    """One axis's findings, headed by the axis and the model that produced them; never a merged verdict."""
+    return f"### {axis.name} — `{axis.model}`\n\n{findings.strip()}\n"
 
 
 def comment_body(markdown: str) -> str:
@@ -415,40 +568,183 @@ def comment_body(markdown: str) -> str:
     return f"{MARKER}\n\n{markdown.strip()}\n"
 
 
-def note_body(reason: str) -> str:
-    """The comment posted when no review happened. It still carries the marker, so a later run updates it."""
-    return comment_body(
-        "## LLM review\n\n"
-        f"{reason}. This is a comment, not a gate: the pull request can merge on the CI checks alone."
-    )
+@dataclass(frozen=True, slots=True)
+class ExistingComment:
+    """The one comment this workflow owns: the id it is patched by, and the body it already holds."""
+
+    id: str
+    body: str
+
+
+@dataclass(frozen=True, slots=True)
+class RetainedFindings:
+    """Findings kept from an earlier run, and the revision they were written against."""
+
+    revision: str
+    markdown: str
+
+
+def findings_marker(revision: str) -> str:
+    """The opening marker, from the same template the reader parses: one spelling, so they cannot drift."""
+    return FINDINGS_OPEN_TEMPLATE.format(revision=revision)
+
+
+def extract_findings(body: str) -> RetainedFindings | None:
+    """The findings region of a previously posted comment, or ``None`` when it holds none.
+
+    The region is delimited by its own markers rather than re-derived from the headings, so a run
+    keeps exactly what the last run found and nothing it said about how the run went.
+
+    A comment posted before this branch exists has no markers: it carries its findings as plain
+    ``### <axis> -- model`` sections, the way the old code wrote them. Those are still findings, and
+    the first findings-free run after the upgrade is exactly when a reader would miss them, so they
+    are read back and stamped as ``pre-marker`` rather than dropped -- but only the sections that
+    actually found something. The old code wrote a section for a failed axis too, and its body there is
+    a single run note in italics; keeping that would let one failed run's "did not run" line outlive
+    the findings it displaced.
+    """
+    opening = FINDINGS_OPEN.search(body)
+    if opening is not None:
+        # The last closing marker, not the first: the review prompt asks a model for lines from the
+        # diff, and this branch's own diff contains the closing marker, so findings that quote it must
+        # not have their tail silently cut off.
+        end = body.rfind(FINDINGS_CLOSE)
+        if end <= opening.end():
+            return None
+        markdown = body[opening.end() : end].strip()
+        return RetainedFindings(opening.group("revision"), markdown) if markdown else None
+
+    headings = list(LEGACY_AXIS_SECTION.finditer(body))
+    kept = []
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
+        markdown = body[heading.end() : end].split(FINDINGS_CLOSE)[0].strip()
+        if not markdown or LEGACY_RUN_NOTE.match(markdown):
+            continue
+        kept.append(f"### {heading.group('axis')} — {heading.group('model')}\n\n{markdown}\n")
+    if not kept:
+        return None
+    return RetainedFindings(LEGACY_REVISION, "\n".join(kept).strip())
+
+
+def reviewed_revision(env: dict[str, str]) -> str:
+    """The short head SHA this run reviewed; the workflow passes it, and ``GITHUB_SHA`` is a fallback."""
+    raw = (env.get("HEAD_SHA") or env.get("GITHUB_SHA") or "").strip()
+    return raw[:7] if raw else "unknown"
+
+
+def render_comment(
+    revision: str,
+    run_url: str,
+    outcomes: list[AxisOutcome],
+    previous_body: str | None = None,
+    preamble: str = "",
+    note: str = "",
+) -> str:
+    """The one comment: this run's per-axis record, then the findings of record.
+
+    A run that found something is the current record and replaces the previous findings. A run that
+    found nothing keeps them, names the revision they are from, and still records its own attempt
+    above them -- a failure may not erase a success, and stale findings may not read as current.
+    """
+    current = [outcome for outcome in outcomes if outcome.findings]
+    retention = ""
+    if current:
+        findings_revision: str | None = revision
+        findings = "\n\n".join(section_body(outcome.axis, outcome.findings or "") for outcome in current)
+    else:
+        retained = extract_findings(previous_body) if previous_body else None
+        if retained is None:
+            findings_revision, findings = None, ""
+        else:
+            findings_revision, findings = retained.revision, retained.markdown
+            retention = (
+                f"The findings below are from `{retained.revision}`; the run above reviewed "
+                f"`{revision}` and produced none of its own, so they are kept rather than erased.\n"
+            )
+
+    parts = ["## LLM review", ""]
+    if run_url:
+        parts.append(f"Reviewed `{revision}` — [the run]({run_url})")
+    else:
+        parts.append(f"Reviewed `{revision}` (no run URL is available here)")
+    parts.append("")
+
+    record = [f"- {preamble}"] if preamble else []
+    record += [f"- **{o.axis.name}** — `{o.axis.model}` — {o.label}" for o in outcomes]
+    if record:
+        parts += ["### This run", "", *record, ""]
+    if note:
+        parts += ["#### What the model did not see", "", note, ""]
+    if findings_revision:
+        parts += [f"## Findings from `{findings_revision}`", ""]
+        if retention:
+            parts.append(retention)
+        parts += [
+            findings_marker(findings_revision),
+            "",
+            findings,
+            "",
+            FINDINGS_CLOSE,
+        ]
+    return comment_body("\n".join(parts))
 
 
 def _gh(arguments: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["gh", *arguments], text=True, capture_output=True, check=True)
 
 
-def find_comment_id(repo: str, number: str) -> str | None:
-    """The id of this workflow's existing comment, if it posted one on an earlier push."""
+def find_comment(repo: str, number: str) -> ExistingComment | None:
+    """The id and body of this workflow's existing comment, if an earlier push posted one.
+
+    One API call carries both, because the body is what decides whether this run may replace the
+    comment or must keep what is there. Each result is a compact JSON ``[id, body]`` on its own line,
+    so a body full of newlines cannot be mistaken for the end of the record.
+    """
     result = _gh(
         [
             "api",
             f"repos/{repo}/issues/{number}/comments",
             "--paginate",
             "--jq",
-            f'.[] | select(.body | contains("{MARKER}")) | .id',
+            f'.[] | select(.body | contains("{MARKER}")) | [.id, .body] | @json',
         ]
     )
-    ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    return ids[-1] if ids else None
+    found: list[ExistingComment] = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            identifier, body = json.loads(line)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            continue
+        found.append(ExistingComment(str(identifier), body if isinstance(body, str) else ""))
+    return found[-1] if found else None
 
 
-def upsert_comment(repo: str, number: str, body: str) -> None:
+def read_comment(repo: str, number: str) -> tuple[ExistingComment | None, bool]:
+    """The existing comment and whether reading it worked.
+
+    A failed read is not the absence of a comment: treating the two alike would let a findings-free run
+    replace a body it could not see, which is exactly the erasure this module exists to prevent. The
+    caller gets the flag so it can decline to overwrite what it could not read.
+    """
+    try:
+        return find_comment(repo, number), True
+    except Exception as error:  # Broad on purpose: the review is non-blocking by design.
+        print(f"could not read the existing review comment: {error}", file=sys.stderr)
+        return None, False
+
+
+def upsert_comment(repo: str, number: str, body: str, comment_id: str | None = None) -> None:
     """Create the review comment, or update the one this workflow posted before."""
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as handle:
         handle.write(body)
         path = handle.name
     try:
-        comment_id = find_comment_id(repo, number)
+        if comment_id is None:
+            existing = find_comment(repo, number)
+            comment_id = existing.id if existing else None
         if comment_id:
             _gh(["api", "-X", "PATCH", f"repos/{repo}/issues/comments/{comment_id}", "-F", f"body=@{path}"])
         else:
@@ -457,14 +753,14 @@ def upsert_comment(repo: str, number: str, body: str) -> None:
         os.unlink(path)
 
 
-def post(repo: str, number: str, body: str) -> None:
+def post(repo: str, number: str, body: str, comment_id: str | None = None) -> None:
     """Post without letting a comment failure fail the job; on a fork the token cannot write at all.
 
     A fork pull request carries no secrets and a read-only token, so a branch of its own would have
     nothing it could post -- the failure belongs here, printed, with the run still exiting 0.
     """
     try:
-        upsert_comment(repo, number, body)
+        upsert_comment(repo, number, body, comment_id)
     except Exception as error:  # Broad on purpose: the review is non-blocking by design.
         print(f"could not post the review comment: {error}", file=sys.stderr)
 
@@ -519,34 +815,59 @@ def main(argv: list[str] | None = None, opener=None) -> int:
         print("GITHUB_REPOSITORY or PR_NUMBER missing; cannot comment", file=sys.stderr)
         return 0
 
-    backend = resolve_backend(os.environ)
+    env = os.environ
+    revision = reviewed_revision(env)
+    run_url = (env.get("RUN_URL") or "").strip()
+    previous, read_ok = read_comment(args.repo, args.pr_number)
+
+    def deliver(body: str) -> None:
+        """One rule for every path out of ``main``, so no path can be the one that erases findings.
+
+        A body this run could not read the comment for may only be replaced by one that carries
+        findings of its own; a body with no findings region would take whatever the old comment held
+        with it, which is the erasure this module exists to prevent. The rule is here rather than at
+        each call site because the missing-secret path posts too, and it is findings-free.
+        """
+        if not read_ok and FINDINGS_OPEN.search(body) is None:
+            print(
+                "not posting: this run found nothing and the existing comment could not be read, "
+                "so replacing it could erase findings",
+                file=sys.stderr,
+            )
+            return
+        post(args.repo, args.pr_number, body, previous.id if previous else None)
+
+    backend = resolve_backend(env)
     if backend is None:
-        post(
-            args.repo,
-            args.pr_number,
-            note_body(
-                "the review needs the `OLLAMA_API_KEY` repository secret to reach a model; "
-                f"set it with `gh secret set OLLAMA_API_KEY --repo {args.repo}`"
-            ),
+        deliver(
+            render_comment(
+                revision,
+                run_url,
+                [],
+                previous.body if previous else None,
+                preamble=(
+                    "no model was called: the review needs the `OLLAMA_API_KEY` repository secret; "
+                    f"set it with `gh secret set OLLAMA_API_KEY --repo {args.repo}`. This comment is not "
+                    "a gate: the pull request can merge on the CI checks alone."
+                ),
+            )
         )
         return 0
 
-    sections = []
-    for axis, review, error in run_axes(axes, prompts, backend, opener):
-        if error:
-            print(f"{axis.name} review call failed: {error}", file=sys.stderr)
-            sections.append(section_body(axis, f"_This axis did not run: {error}_"))
-            continue
-        if not review:
-            sections.append(section_body(axis, "_The model returned an empty review._"))
-            continue
-        sections.append(section_body(axis, review))
+    outcomes = run_axes(axes, prompts, backend, opener)
+    for outcome in outcomes:
+        if not outcome.findings:
+            print(f"{outcome.axis.name} review call: {outcome.label}", file=sys.stderr)
 
-    heading = "## LLM review\n\n"
-    if note:
-        # Above the axes, not buried after them: a reader must see the gap before the findings.
-        heading += f"### What the model did not see\n\n{note}\n\n"
-    post(args.repo, args.pr_number, comment_body(heading + "\n".join(sections)))
+    deliver(
+        render_comment(
+            revision,
+            run_url,
+            outcomes,
+            previous.body if previous else None,
+            note=note,
+        )
+    )
     return 0
 
 
