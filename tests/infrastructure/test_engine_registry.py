@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 
 from finepdfs.infrastructure.engines.paddleocr_vl import PaddleOcrVlCliEngine, PaddleOcrVlEngine
-from finepdfs.infrastructure.engines.registry import EngineConfig, UnknownEngine, build_engine
+from finepdfs.infrastructure.engines.registry import (
+    DPI_CARRYING_ENGINES,
+    KNOWN_ENGINES,
+    EngineConfig,
+    UnknownEngine,
+    build_engine,
+)
 
 
 def test_paddleocr_vl_is_reached_over_http_by_default() -> None:
@@ -54,3 +60,41 @@ def test_a_page_dpi_change_moves_the_engine_identity() -> None:
 def test_an_unknown_engine_is_rejected() -> None:
     with pytest.raises(UnknownEngine):
         build_engine(EngineConfig(name="magic-ocr"))
+
+
+def _reachable_config(name: str, *, page_dpi: int, detail: str = "") -> EngineConfig:
+    """A configuration that builds each engine without running anything: a URL for the HTTP ones."""
+    if name == "paddleocr-vl":
+        return EngineConfig(name=name, base_url="http://host:8000/v1", model="m", page_dpi=page_dpi, detail=detail)
+    if name == "mineru":
+        return EngineConfig(name=name, base_url="http://host:8001", page_dpi=page_dpi, detail=detail)
+    return EngineConfig(name=name, page_dpi=page_dpi, detail=detail)
+
+
+def test_only_the_engines_that_render_at_a_dpi_carry_one() -> None:
+    """``DPI_CARRYING_ENGINES`` lists every engine whose identity carries a page DPI, and nothing else does.
+
+    ADR-0005 makes page DPI an identity input, and ``_deployment_detail`` can append ``@dpi{dpi}`` to a
+    pinned detail only for an engine it knows renders at a DPI. An engine that starts carrying a DPI in
+    its own detail without joining that tuple would have the DPI silently dropped from a pinned
+    ``--engine-detail``, and a change to ``FINEPDFS_ENGINE_DPI`` on it would be served the other DPI's
+    text from the memo. So every engine is checked on two observable signals -- whether its detail
+    carries a ``@dpi`` marker, and whether a ``page_dpi`` change moves its identity, pinned or not --
+    and both have to match the registry's list.
+    """
+    for name in KNOWN_ENGINES:
+        carries = name in DPI_CARRYING_ENGINES
+        low = build_engine(_reachable_config(name, page_dpi=200))
+        high = build_engine(_reachable_config(name, page_dpi=300))
+        pinned_low = build_engine(_reachable_config(name, page_dpi=200, detail="pinned:v1"))
+        pinned_high = build_engine(_reachable_config(name, page_dpi=300, detail="pinned:v1"))
+        observed = {
+            "the adapter's detail carries @dpi": "@dpi" in low.identity.detail,
+            "a page_dpi change moves the adapter's identity": low.identity != high.identity,
+            "a page_dpi change moves a pinned identity": pinned_low.identity != pinned_high.identity,
+        }
+        assert all(value == carries for value in observed.values()), (
+            f"{name!r}: DPI_CARRYING_ENGINES says it carries a page DPI is {carries}, but "
+            f"{ {signal: value for signal, value in observed.items() if value != carries} }; an engine "
+            f"that renders at a DPI has to join that tuple and be handled by _deployment_detail"
+        )
