@@ -1,4 +1,4 @@
-# Would a per-language publish threshold change any decision? — measured, and the answer is no
+# Would a per-language publish threshold change any decision? — historical measurement
 
 *Ticket 14, first checkbox: "on the committed corpus, how many documents does the global threshold
 exclude whose own language's FinePDFs threshold would keep, and vice versa? If that set is empty, park
@@ -6,7 +6,27 @@ the ticket and let the measurement be the deliverable." Measured against the cor
 (12 files, `CC-MAIN-2026-39`, `noaa.gov`, 292 pages) with the shipped `lid.176` adapter and FinePDFs'
 own `thresholds/th_values.json`, not inferred from either table alone.*
 
-## The answer, up front
+## Input provenance — unresolved
+
+**The original inputs are not pinned.** The phrase “committed corpus” in the ticket quoted above
+was inaccurate: neither the PDFs nor their measured `corpus/manifest.json` is tracked. The crawl ID,
+domain, filenames and page counts below do not identify the PDF bytes. No immutable copy of that
+manifest has been located, so the reported results are historical observations, not a reproducible
+baseline. A fresh query of the same crawl must not be presented as recovery of the measured inputs.
+
+To resolve this gap, recover the manifest from the original measurement run and preserve it as
+`research/per-language-thresholds-corpus-manifest.json` (or link an immutable copy). It must include
+all 12 entries with `url`, PDF SHA-256 `digest`, `file`, `bytes`, `crawl_id`, `warc_filename`,
+`offset` and `length`, matching the existing `CorpusManifest` schema. Recover each PDF from its
+Common Crawl WARC byte range, then verify the extracted payload's SHA-256 and byte count before
+running the probe. This follows [ADR-0002](../docs/adr/0002-real-common-crawl-corpus.md); PDFs need
+not be committed, but the measured manifest must be preserved.
+
+If the original manifest cannot be recovered, run a new measurement and commit its manifest together
+with the replacement results. Do not assign newly fetched digests or locations to the old numbers.
+Until either happens, the zero-change result below cannot independently justify parking ticket 14.
+
+## The reported answer (unverified)
 
 **0 documents change decision in either direction.** The global floor of 0.65 excluded 0 of the 12
 documents, so there is no exclusion for a per-language threshold to reverse; and both languages the
@@ -19,7 +39,8 @@ per-language rule is strictly more permissive here and also excludes nothing the
 | Global keeps, per-language would drop | **0** |
 | Total documents whose verdict changes | **0** |
 
-**Ticket 14 is parked. This note is the deliverable.** Nothing is built: no ADR, no threshold table in
+**The original run parked ticket 14; that conclusion awaits input provenance or a new pinned run.**
+Nothing is built: no ADR, no threshold table in
 the repo, no change to `PublishPolicy` or `LanguagePolicy`. The caveat that matters is in "N = 12, two
 languages" below: this measures *this* corpus, and the table's own distribution says a corpus with
 different languages could well flip the other way.
@@ -110,9 +131,9 @@ The number is 0 for a structural reason, not a lucky one:
 The table says that second condition is common in general: of 1,545 entries, **1,106 are above 0.65 and
 750 are above 0.9** (439 at or below 0.65; range 0.100 to 1.000). On a corpus carrying those languages
 the per-language rule would very often be *stricter*, dropping documents the global floor keeps. The
-committed corpus simply does not contain one.
+measured local corpus simply does not contain one.
 
-## N = 12, two languages: this parks the ticket, it does not retire the concern
+## N = 12, two languages: limits of the reported result
 
 - 12 documents, 292 pages, 2 languages (`eng`, `spa`), one domain (`noaa.gov`), one crawl. It cannot say
   what happens on a language whose threshold is above 0.65.
@@ -168,6 +189,11 @@ checkboxes were read and are recorded here so a future build starts from them:
 
 ## Reproducing the measurement
 
+The original run cannot currently be reproduced: its corpus manifest is missing (see input provenance
+above). The procedure below is a probe for a supplied local corpus, not a way to recover the original
+12 inputs. For a new run, preserve the exact manifest alongside its results and verify every PDF
+against its manifest digest and byte count before measuring.
+
 Read-only over the corpus; no writes to the checkout. Two artifacts are fetched
 **outside the repo** and never vendored:
 
@@ -194,7 +220,8 @@ curl -o /tmp/fp_th_values.json https://raw.githubusercontent.com/huggingface/fin
 PYTHONPATH=/tmp/lidlibs .venv/bin/python /tmp/measure_per_language_thresholds.py
 ```
 
-Expected tail: `global decisions: published 12 dropped 0`, `global-drop / per-language-keep: 0`,
+Historical tail (only expected for the original, currently unpinned inputs):
+`global decisions: published 12 dropped 0`, `global-drop / per-language-keep: 0`,
 `global-keep / per-language-drop: 0`, `P2 disagreements with P1: 0`, `page-level trust changes … 4`,
 `table values <= global floor: 439 > global floor: 1106 > 0.9: 750`.
 
@@ -203,8 +230,8 @@ Expected tail: `global decisions: published 12 dropped 0`, `global-drop / per-la
 ```python
 """Ticket 14, first checklist item: does a per-language publish threshold change any decision?
 
-Read-only over the committed corpus. Measures two decision functions over the same per-page lid.176
-tags and counts how many documents they decide differently:
+Read-only over a local corpus with a preserved manifest. Measures two decision functions over the
+same per-page lid.176 tags and counts how many documents they decide differently:
 
   GLOBAL   LanguagePolicy(min_confidence=0.65) -> PublishPolicy.judge
   PER-LANG a per-page floor keyed on the page's predicted language, falling back to the global floor
