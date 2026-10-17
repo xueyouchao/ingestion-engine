@@ -168,7 +168,7 @@ checkboxes were read and are recorded here so a future build starts from them:
 
 ## Reproducing the measurement
 
-Read-only over the corpus; no writes to `/home/ubuntu/ingestion-engine`. Two artifacts are fetched
+Read-only over the corpus; no writes to the checkout. Two artifacts are fetched
 **outside the repo** and never vendored:
 
 | artifact | source | licence | sha256 |
@@ -181,11 +181,17 @@ The optional `fasttext` extra was installed into a throwaway `--target` director
 `/tmp/measure_per_language_thresholds.py` (outside the repo); it prints the corpus inventory, the global
 verdicts, the per-language comparison, the page-level changes, and the two counts.
 
-```
+Save the Python block below as `/tmp/measure_per_language_thresholds.py`, then run these commands
+from the checkout root (with the project dependencies installed in `.venv`). By default, the script
+imports from `./src` and reads `./corpus`. To use a different checkout or corpus, set
+`INGESTION_ENGINE_ROOT` or `INGESTION_ENGINE_CORPUS` to its path; relative paths are resolved from the
+current working directory.
+
+```sh
 python -m pip install --target /tmp/lidlibs "fasttext-numpy2-wheel>=0.9.2"
 curl -o /tmp/lid176.ftz https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz
 curl -o /tmp/fp_th_values.json https://raw.githubusercontent.com/huggingface/finepdfs/main/thresholds/th_values.json
-PYTHONPATH=/tmp/lidlibs .venv/bin/python measure_per_language_thresholds.py
+PYTHONPATH=/tmp/lidlibs .venv/bin/python /tmp/measure_per_language_thresholds.py
 ```
 
 Expected tail: `global decisions: published 12 dropped 0`, `global-drop / per-language-keep: 0`,
@@ -212,8 +218,10 @@ import json
 import os
 import sys
 from collections import Counter
+from pathlib import Path
 
-sys.path.insert(0, "/home/ubuntu/wt/lang-thresholds/src")
+CHECKOUT = Path(os.environ.get("INGESTION_ENGINE_ROOT", ".")).expanduser().resolve()
+sys.path.insert(0, str(CHECKOUT / "src"))
 
 from finepdfs.domain import text as text_rules
 from finepdfs.domain.document import Document
@@ -222,7 +230,7 @@ from finepdfs.domain.publishing import PublishPolicy
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextEngine
 from finepdfs.infrastructure.language.fasttext import FastTextLanguageIdentifier, FastTextModel
 
-CORPUS = "/home/ubuntu/ingestion-engine/corpus"
+CORPUS = Path(os.environ.get("INGESTION_ENGINE_CORPUS", str(CHECKOUT / "corpus"))).expanduser().resolve()
 MODEL = "/tmp/lid176.ftz"
 TABLE_PATH = "/tmp/fp_th_values.json"
 GLOBAL_FLOOR = 0.65
