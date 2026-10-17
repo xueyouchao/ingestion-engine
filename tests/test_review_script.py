@@ -12,6 +12,7 @@ import importlib.util
 import io
 import json
 import re
+import ssl
 import subprocess
 import sys
 import threading
@@ -41,6 +42,49 @@ def _load_review():
 
 
 review = _load_review()
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_certificate_failures_are_labelled_and_never_retried(wrapped) -> None:
+    error = ssl.SSLCertVerificationError(1, "certificate verify failed: untrusted issuer")
+    failure = urllib.error.URLError(error) if wrapped else error
+    calls = []
+
+    def open_(_request, timeout=None):
+        calls.append(_request)
+        raise failure
+
+    axis = review.Axis("Spec", "model")
+    outcomes = review.run_axes(
+        (axis,), {axis.name: "review this"}, review.Backend("https://example.com", "key"), open_
+    )
+
+    assert len(calls) == 1
+    assert outcomes[0].attempts == 1
+    assert outcomes[0].status == review.OUTCOME_CERTIFICATE
+    assert "untrusted issuer" in outcomes[0].label
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize(
+    "error",
+    [ConnectionResetError("reset"), ConnectionAbortedError("aborted"), BrokenPipeError("pipe")],
+)
+def test_dropped_connections_remain_retryable(error, wrapped) -> None:
+    failure = urllib.error.URLError(error) if wrapped else error
+    status, _ = review.classify_failure(failure)
+    assert status == review.OUTCOME_CONNECTION_CLOSED
+    assert status in review.RETRYABLE_FAILURES
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("error", [OSError("other OS failure"), ssl.SSLError("TLS protocol error")])
+def test_other_os_errors_are_not_mislabeled_as_dropped_connections(error, wrapped) -> None:
+    failure = urllib.error.URLError(error) if wrapped else error
+    status, detail = review.classify_failure(failure)
+    assert status == review.OUTCOME_UNEXPECTED
+    assert status not in review.RETRYABLE_FAILURES
+    assert str(error) in detail
 
 
 class _Response(io.BytesIO):
@@ -1063,4 +1107,3 @@ def test_an_empty_answer_is_its_own_class_and_keeps_the_findings(monkeypatch, tm
     assert "empty review" in posted[0]
     assert "findings kept" in posted[0]
     assert "they are kept rather than erased" in posted[0]
-
