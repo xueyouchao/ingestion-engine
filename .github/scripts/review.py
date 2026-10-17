@@ -18,8 +18,8 @@ findings. The classes stay apart -- a read timeout, a connection the server clos
 a response it began and cut short, and an HTTP status are different things with different fixes --
 because collapsing them into one "did not run" told the reader nothing about which was owed. A dropped
 connection, a truncated read and a read timeout are all retried with backoff, for as many attempts as
-:data:`AXIS_RUN_DEADLINE_SECONDS` can hold; that deadline is the retry policy's own worst case, so it
-cannot cut a retry short.
+:data:`AXIS_RUN_DEADLINE_SECONDS` can hold; that deadline covers the calculated retry budget plus
+a margin for connection setup and scheduling overhead.
 
 The comment is also the record, not a snapshot of the latest run: it names the head it reviewed and
 the run URL, lists every axis's outcome, and when a run finds nothing it keeps the findings already
@@ -89,7 +89,7 @@ OUTCOME_ABANDONED = "abandoned at the stage deadline"
 # never got an answer; a truncated read -- the server hung up after part of the body, raising
 # IncompleteRead -- began one and left it incomplete; a read timeout means the socket sat out its whole
 # deadline without one. The read timeout used to be the exception, because a second attempt could not
-# fit AXIS_RUN_DEADLINE_SECONDS; the deadline below is now the retry policy's own worst case, so the
+# fit AXIS_RUN_DEADLINE_SECONDS; the deadline below now covers the retry budget plus overhead, so the
 # class with the least resilience is retried like the others.
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = 2.0
@@ -97,15 +97,21 @@ RETRYABLE_FAILURES = frozenset(
     {OUTCOME_READ_TIMEOUT, OUTCOME_CONNECTION_CLOSED, OUTCOME_TRUNCATED_RESPONSE}
 )
 
-# The retry policy's own worst case: every attempt is bounded by REQUEST_TIMEOUT_SECONDS, and the
+# The calculated retry budget: each socket read allows REQUEST_TIMEOUT_SECONDS, and the
 # backoff before each retry starts at RETRY_BACKOFF_SECONDS and doubles. Deriving the stage deadline
 # from the policy, rather than setting it by hand, is what stops the deadline from deciding how many
 # attempts fit. It used to be one read timeout plus 30 seconds, so a single 600-second call left no
 # room for the retry that class needs, and three dropped connections could spend the whole budget and
-# still land on `abandoned`. Now every attempt the policy allows can finish, and `abandoned` is left
-# for an attempt that outlives its own socket timeout.
+# still land on `abandoned`. Socket timeouts do not include thread startup, connection setup or late
+# backoff wakeups, so keep a 30-second margin above that budget. The stage deadline remains a finite
+# ceiling for a hung call; the margin lets ordinary timeout failures finish and report their class.
 RETRY_BACKOFF_TOTAL_SECONDS = RETRY_BACKOFF_SECONDS * (2 ** (RETRY_ATTEMPTS - 1) - 1)
-AXIS_RUN_DEADLINE_SECONDS = RETRY_ATTEMPTS * REQUEST_TIMEOUT_SECONDS + RETRY_BACKOFF_TOTAL_SECONDS
+AXIS_RUN_DEADLINE_MARGIN_SECONDS = 30
+AXIS_RUN_DEADLINE_SECONDS = (
+    RETRY_ATTEMPTS * REQUEST_TIMEOUT_SECONDS
+    + RETRY_BACKOFF_TOTAL_SECONDS
+    + AXIS_RUN_DEADLINE_MARGIN_SECONDS
+)
 
 # The findings region inside the one comment, so a later run can keep it instead of replacing the whole
 # body. The revision rides in the opening marker: that is what lets a reader tell stale from current.
@@ -898,3 +904,4 @@ def main(argv: list[str] | None = None, opener=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

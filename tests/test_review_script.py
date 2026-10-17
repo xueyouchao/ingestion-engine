@@ -18,7 +18,9 @@ import sys
 import threading
 import time
 import urllib.error
+from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -805,6 +807,66 @@ def test_the_stage_deadline_covers_every_attempt_the_retry_policy_allows() -> No
     assert review.OUTCOME_READ_TIMEOUT in review.RETRYABLE_FAILURES
 
 
+def test_three_full_read_timeouts_with_overhead_report_the_final_timeout(monkeypatch) -> None:
+    """Advance a virtual clock through startup, connections and late backoff wakeups.
+
+    The virtual thread's join stops execution at the stage deadline, just as the real join stops
+    waiting for a worker. This exercises elapsed time without waiting thirty minutes in the test.
+    """
+    now = 0.0
+    calls = []
+
+    class StageDeadlineReached(BaseException):
+        pass
+
+    class VirtualThread:
+        def __init__(self, *, target, args, **_kwargs):
+            self.target = target
+            self.args = args
+            self.deadline = float("inf")
+
+        def start(self):
+            advance(1.0)  # Thread startup happens after the stage clock starts.
+
+        def join(self, timeout):
+            self.deadline = now + timeout
+            with suppress(StageDeadlineReached):
+                self.target(*self.args)
+
+    def advance(seconds):
+        nonlocal now
+        now += seconds
+        if now >= worker.deadline:
+            now = worker.deadline
+            raise StageDeadlineReached
+
+    def thread(**kwargs):
+        nonlocal worker
+        worker = VirtualThread(**kwargs)
+        return worker
+
+    def open_(_request, timeout=None):
+        calls.append(timeout)
+        advance(timeout + 1.0)  # Connection setup, then the full socket read timeout.
+        raise TimeoutError("timed out")
+
+    worker = None
+    monkeypatch.setattr(review, "threading", SimpleNamespace(Thread=thread, Lock=threading.Lock))
+    monkeypatch.setattr(
+        review, "time", SimpleNamespace(monotonic=lambda: now, sleep=lambda delay: advance(delay + 0.5))
+    )
+    axis = review.Axis("Spec", "model")
+    outcomes = review.run_axes(
+        (axis,), {axis.name: "review this"}, review.Backend("https://example.com", "key"), open_
+    )
+
+    assert calls == [review.REQUEST_TIMEOUT_SECONDS] * 3
+    assert now == 1811.0
+    assert outcomes[0].seconds == 1810.0
+    assert outcomes[0].status == review.OUTCOME_READ_TIMEOUT
+    assert outcomes[0].attempts == 3
+
+
 # --- Ticket 22: the comment is a durable record, not a snapshot of the last run -------------------
 
 
@@ -1162,3 +1224,4 @@ def test_an_empty_answer_is_its_own_class_and_keeps_the_findings(monkeypatch, tm
     assert "empty review" in posted[0]
     assert "findings kept" in posted[0]
     assert "they are kept rather than erased" in posted[0]
+
