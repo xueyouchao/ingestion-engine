@@ -143,15 +143,22 @@ class FastTextLanguageIdentifier:
 
 
 def _chunks(text: str, size: int) -> tuple[str, ...]:
-    """The page in pieces of at most `size` characters, split on whitespace.
+    """The page in pieces of at most `size` characters, preferring whitespace boundaries.
 
     Splitting on whitespace also strips the layout characters the model has no use for: it expects
-    UTF-8 words, not a page image.
+    UTF-8 words, not a page image. Words longer than `size` are split too.
     """
     chunks: list[str] = []
     current: list[str] = []
     length = 0
     for word in text.split():
+        if len(word) > size:
+            if current:
+                chunks.append(" ".join(current))
+                current, length = [], 0
+            tail = ((len(word) - 1) // size) * size
+            chunks.extend(word[start:start + size] for start in range(0, tail, size))
+            word = word[tail:]
         extra = len(word) if not current else len(word) + 1
         if current and length + extra > size:
             chunks.append(" ".join(current))

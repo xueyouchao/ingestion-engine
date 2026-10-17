@@ -14,6 +14,7 @@ import pytest
 
 from finepdfs.domain.language import UNKNOWN_LANGUAGE
 from finepdfs.infrastructure.language.fasttext import (
+    CHUNK_CHARACTERS,
     ISO_639_3_BY_LID_LABEL,
     LANGUAGE_PREFIX,
     FastTextLanguageIdentifier,
@@ -158,13 +159,36 @@ def test_a_page_that_fits_is_shown_to_the_model_whole() -> None:
     assert labeller.calls[0].split() == ENGLISH.split()
 
 
+@pytest.mark.parametrize("length", [CHUNK_CHARACTERS, CHUNK_CHARACTERS * 2, CHUNK_CHARACTERS * 2 + 17])
+def test_text_without_whitespace_is_shown_in_bounded_pieces(length: int) -> None:
+    page = "中" * length
+    labeller = FixedLabeller("zho", 0.9)
+
+    tag = FastTextLanguageIdentifier(labeller).identify(page, page_number=1)
+
+    assert len(labeller.calls) == (length + CHUNK_CHARACTERS - 1) // CHUNK_CHARACTERS
+    assert all(0 < len(chunk) <= CHUNK_CHARACTERS for chunk in labeller.calls)
+    assert "".join(labeller.calls) == page
+    assert tag.language == "zho"
+    assert tag.confidence == pytest.approx(0.9)
+
+
+def test_an_oversized_word_between_words_keeps_all_text_in_order() -> None:
+    labeller = FixedLabeller("zho", 0.9)
+    page = "before " + "中" * 25 + " after"
+
+    FastTextLanguageIdentifier(labeller, min_characters=1, chunk_characters=10).identify(page, page_number=1)
+
+    assert labeller.calls == ["before", "中" * 10, "中" * 10, "中" * 5, "after"]
+
+
 def test_a_long_page_is_labelled_in_pieces_and_the_winning_language_is_the_strongest_vote() -> None:
-    # A chunk size of four characters makes every word of this page its own chunk, which is what makes
+    # A chunk size of nine characters makes every word of this page its own chunk, which is what makes
     # the arithmetic below a hand-written expectation rather than a restatement of the splitter.
     labeller = KeywordLabeller({"english": ("eng", 0.9), "german": ("deu", 0.6)})
     page = " ".join(["english"] * 10 + ["german"] * 10)
 
-    tag = FastTextLanguageIdentifier(labeller, chunk_characters=4).identify(page, page_number=1)
+    tag = FastTextLanguageIdentifier(labeller, chunk_characters=9).identify(page, page_number=1)
 
     assert len(labeller.calls) == 20
     assert tag.language == "eng"
@@ -175,7 +199,7 @@ def test_a_piece_the_model_cannot_name_is_a_vote_for_nobody() -> None:
     labeller = KeywordLabeller({"english": ("eng", 0.9)})
     page = " ".join(["english"] * 5 + ["gibberish"] * 5)
 
-    tag = FastTextLanguageIdentifier(labeller, chunk_characters=4).identify(page, page_number=1)
+    tag = FastTextLanguageIdentifier(labeller, chunk_characters=9).identify(page, page_number=1)
 
     assert tag.language == "eng"
     assert tag.confidence == pytest.approx(0.45)
