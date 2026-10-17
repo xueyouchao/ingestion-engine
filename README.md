@@ -106,9 +106,11 @@ FINEPDFS_LANGUAGE=fasttext FINEPDFS_LANGUAGE_MODEL=$PWD/lid.176.ftz .venv/bin/fi
 The model is downloaded, never vendored: the library (`fasttext-numpy2-wheel`) is MIT, the `lid.176`
 model is CC-BY-SA-3.0. It answers in whatever code its training data used -- `en`, `de` -- and the
 adapter normalises the two-letter codes to ISO 639-3 (`eng`, `deu`), so the recorded field,
-`FINEPDFS_LANGUAGES` and GlotLID's codes all agree. A page is labelled in paragraph-sized pieces and the
-pieces vote, because lid.176 is trained on short text and a whole page dilutes it. There is still one
-global confidence floor; per-language thresholds are not implemented.
+`FINEPDFS_LANGUAGES` and GlotLID's codes all agree -- with one exception: the Bihari collective `bh`
+has no ISO 639-3 code and is carried as `bih` (ISO 639-2/639-5), as ADR-0001 records. A page is
+labelled in paragraph-sized pieces and the pieces vote, because lid.176 is trained on short text and a
+whole page dilutes it. There is still one global confidence floor; per-language thresholds are not
+implemented.
 
 The allow-list `FINEPDFS_LANGUAGES` is read in whichever code the selected adapter emits, so its
 vocabulary follows `FINEPDFS_LANGUAGE`: `Latn,Grek` matches under `script`, `eng,spa` under `fasttext`,
