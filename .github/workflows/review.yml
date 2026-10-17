@@ -19,8 +19,9 @@ concurrency:
   # pushes to two pull requests put up to four long requests against the one OLLAMA_API_KEY. This
   # group caps it at the two axes of a single review, which the probe measured at 6/6 answering.
   group: ${{ github.workflow }}
-  # false, not true: a queued review must still run rather than replace another. A review is a
-  # comment, not a gate, so waiting behind one costs nothing but the comment arrives.
+  # Preserve pending reviews across pull requests instead of replacing the single default pending
+  # run. GitHub allows up to 100 pending runs with queue: max; further arrivals are canceled.
+  queue: max
   cancel-in-progress: false
 
 permissions:
@@ -44,7 +45,7 @@ jobs:
           git diff --unified=3 "origin/${BASE_REF}...HEAD" > pr.diff
           wc -c < pr.diff
           # A queued run may start after a later push has moved the merge ref this job checks out, and
-          # cancel-in-progress: false is chosen precisely so queued runs do run. Stamp the head actually
+          # queue: max preserves pending runs. Stamp the head actually
           # diffed -- the merge commit's second parent -- not the SHA the event carried, or the revision
           # the comment names would not be the revision it read.
           REVIEWED_SHA=$(git rev-parse --verify -q HEAD^2 || git rev-parse HEAD)
