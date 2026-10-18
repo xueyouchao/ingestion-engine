@@ -242,7 +242,9 @@ EXPLORER_HTML = """<!doctype html>
   <section id="document-detail" aria-label="Document detail" hidden></section>
 </main>
 <script>
-const state = { documents: [], summary: null, observed: null, finishedAt: "", selected: null };
+const state = {
+  documents: [], summary: null, observed: null, finishedAt: "", selected: null, searchParams: "",
+};
 
 const byId = (id) => document.getElementById(id);
 
@@ -440,17 +442,24 @@ async function showDetail(key) {
 }
 
 async function loadAll() {
-  const response = await fetch("/api/documents", { cache: "no-store" });
-  if (!response.ok) throw new Error("summary request failed with HTTP " + response.status);
-  const payload = await response.json();
-  state.documents = Array.isArray(payload.documents) ? payload.documents : [];
-  state.summary = payload.summary || {};
-  state.observed = await loadObserved();
-  state.finishedAt = (state.observed && state.observed.recorded && state.observed.finished_at) || "";
-  renderSummary();
-  refreshFilterOptions();
-  renderTable();
-  if (state.selected) await showDetail(state.selected);
+  try {
+    const response = await fetch("/api/documents", { cache: "no-store" });
+    if (!response.ok) throw new Error("summary request failed with HTTP " + response.status);
+    const payload = await response.json();
+    state.documents = Array.isArray(payload.documents) ? payload.documents : [];
+    state.summary = payload.summary || {};
+    state.observed = await loadObserved();
+    state.finishedAt = (state.observed && state.observed.recorded && state.observed.finished_at) || "";
+    renderSummary();
+    refreshFilterOptions();
+    renderTable();
+    if (state.selected) await showDetail(state.selected);
+  } finally {
+    // The declared chunks may have changed with the documents; never leave the previous hits on
+    // the page labelled "accepted, current chunks". The re-asked search answers the API's own
+    // freshness check, so a stale index becomes its explicit unavailable reason.
+    await reloadSearch();
+  }
 }
 
 function setError(error) {
@@ -496,7 +505,9 @@ function startPolling() {
 
 function snippetFragment(snippet) {
   const fragment = document.createDocumentFragment();
-  const parts = String(snippet || "").split(new RegExp("<mark>|</mark>"));
+  // The delimiters must be captured: split() drops what it matches unless it is in a group, and
+  // then the loop below never sees <mark> and every part renders as plain text.
+  const parts = String(snippet || "").split(new RegExp("(<mark>|</mark>)"));
   let highlighted = false;
   parts.forEach((part) => {
     if (part === "<mark>") { highlighted = true; return; }
@@ -550,27 +561,49 @@ function renderSearch(payload) {
 async function searchEvidence(event) {
   event.preventDefault();
   const query = byId("search-query").value.trim();
-  const state = byId("search-state");
+  const status = byId("search-state");
   if (!query) {
-    state.textContent = "Type words to search accepted evidence.";
+    // Nothing is being asked, so nothing from an earlier query stays labelled as current evidence.
+    state.searchParams = "";
+    byId("search-results").replaceChildren();
+    status.classList.remove("error");
+    status.textContent = "Type words to search accepted evidence.";
     return;
   }
-  const params = new URLSearchParams({ query, top_k: byId("search-top-k").value || "10" });
+  state.searchParams = currentSearchParams();
+  await runSearch(state.searchParams);
+}
+
+function currentSearchParams() {
+  const params = new URLSearchParams({
+    query: byId("search-query").value.trim(),
+    top_k: byId("search-top-k").value || "10",
+  });
   [["language", "search-language"], ["engine", "search-engine"], ["doc_id", "search-doc"]]
     .forEach(([name, id]) => {
       const value = byId(id).value.trim();
       if (value) params.set(name, value);
     });
-  state.classList.remove("error");
-  state.textContent = "Searching accepted evidence...";
+  return params;
+}
+
+async function runSearch(params) {
+  const status = byId("search-state");
+  status.classList.remove("error");
+  status.textContent = "Searching accepted evidence...";
+  byId("search-results").replaceChildren();
   try {
     const response = await fetch("/api/search?" + params.toString(), { cache: "no-store" });
     if (!response.ok) throw new Error("search failed with HTTP " + response.status);
     renderSearch(await response.json());
   } catch (error) {
-    state.textContent = "Error: " + (error && error.message ? error.message : error);
-    state.classList.add("error");
+    status.textContent = "Error: " + (error && error.message ? error.message : error);
+    status.classList.add("error");
   }
+}
+
+async function reloadSearch() {
+  if (state.searchParams) await runSearch(state.searchParams);
 }
 
 ["filter-url", "filter-language", "filter-routing", "filter-kind"].forEach((id) => {

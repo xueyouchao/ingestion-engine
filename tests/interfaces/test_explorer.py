@@ -392,6 +392,41 @@ def test_the_html_carries_the_filter_and_detail_contract(tmp_path) -> None:
         assert "Accepted pages" in html
 
 
+def _js_function(html: str, start: str, end: str) -> str:
+    """The served asset's text from one function marker to the next, for a contract assertion."""
+    return html.split(start, 1)[1].split(end, 1)[0]
+
+
+def test_the_page_asset_renders_marks_and_rechecks_search_on_every_reload(tmp_path) -> None:
+    """A highlighted snippet must become a <mark>, and a reload must re-ask the active search.
+
+    The API already answers a stale index with ``available: false``, but the page has to ask again:
+    ``loadAll`` used to reload the table and detail while leaving the previous hits labelled
+    "accepted, current chunks". There is no browser framework in the offline suite, so this pins
+    the asset's two contracts; the runbook's real-browser check is the behavioural evidence.
+    """
+    out, corpus, _digest = _completed_output(tmp_path)
+
+    with _serving(explorer_for(out, corpus)) as base:
+        html = _get(base + "/").read().decode("utf-8")
+
+    split = _js_function(html, "function snippetFragment(", "function searchHit(")
+    assert 'split(new RegExp("(<mark>|</mark>)"))' in split, (
+        "split() must capture the delimiters, or the loop never sees them and every part renders plain"
+    )
+    assert 'textNode(highlighted ? "mark" : "span", part)' in split
+
+    load_all = _js_function(html, "async function loadAll(", "function setError(")
+    assert "await reloadSearch()" in load_all, (
+        "a reload must not leave the old hits showing as accepted, current chunks"
+    )
+
+    search = _js_function(html, "async function searchEvidence(", "function currentSearchParams(")
+    assert 'state.searchParams = "";' in search and 'byId("search-results").replaceChildren()' in search, (
+        "an empty submit must drop the earlier hits instead of keeping them labelled current"
+    )
+
+
 def test_absent_run_timing_is_reported_as_not_recorded(tmp_path) -> None:
     """Timing is observed beside the outputs, never declared: its absence is a state, not a zero."""
     out, corpus, _ = _completed_output(tmp_path)
