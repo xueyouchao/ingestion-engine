@@ -586,3 +586,34 @@ def test_the_search_setting_comes_from_the_documented_variable(monkeypatch, tmp_
     assert runtime_from_environment({"FINEPDFS_SEARCH": "true"}).search_enabled is True
     assert runtime_from_environment({"FINEPDFS_SEARCH": ""}).search_enabled is False
     assert runtime_from_environment({"FINEPDFS_SEARCH": "0"}).search_enabled is False
+
+
+def test_a_relabel_is_not_searchable_until_the_index_is_rebuilt(tmp_path) -> None:
+    """ADR-0008: a label change is new declared evidence, even though the text and ids are unchanged."""
+    from finepdfs.domain.chunks import chunk_page_records
+
+    record = PageRecord(
+        doc_id="a" * 16,
+        source_url="https://a.example/one.pdf",
+        digest="1" * 64,
+        page_number=1,
+        text="Harbour dredging continues across the tidal range.",
+        engine="pymupdf@native",
+    )
+    declared = chunk_page_records((record,), language="Latn")
+    relabelled = chunk_page_records((record,), language="eng")
+    assert relabelled[0].chunk_id == declared[0].chunk_id, "the label is not part of the chunk identity"
+    index_path = tmp_path / "index.db"
+    assert _reindex_chunks(index_path, declared).ok
+
+    stale = _search_chunks(index_path, relabelled, "harbour", language="eng")
+
+    assert stale.available is False, "the stored label is Latn, so an eng index is out of date"
+    assert stale.hits == (), "a stale label is never served as a fresh hit"
+    assert "index-search" in stale.reason
+
+    assert _reindex_chunks(index_path, relabelled).ok
+    fresh = _search_chunks(index_path, relabelled, "harbour", language="eng")
+    assert fresh.available is True
+    assert [hit.chunk.language for hit in fresh.hits] == ["eng"]
+    assert _search_chunks(index_path, relabelled, "harbour", language="Latn").hits == ()

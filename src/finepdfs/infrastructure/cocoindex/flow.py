@@ -35,6 +35,11 @@ from finepdfs.infrastructure.publishing.disk import DUPLICATES_REPORT, KEPT_REPO
 
 logger = logging.getLogger(__name__)
 
+# What the summary says about a configured engine whose identity probe cannot answer. A fixed word, not
+# the probe's error: a declared summary must not carry an executable path or a temp directory, and two
+# runs that both could not reach the engine must declare the same bytes (ADR-0005).
+UNAVAILABLE_ENGINE_IDENTITY = "unavailable"
+
 _app_runtime: Runtime | None = None
 
 
@@ -207,16 +212,32 @@ async def publish_corpus(readings: tuple[DocumentReading, ...], similar_at: floa
     # place. It carries no timing: elapsed time is an observation the command wrapper around the run
     # records in `out/last-run.json` (interfaces/run_log.py), never a declared field.
     manifest = runtime.corpus().manifest()
-    engine = runtime.engines[runtime.policy.engine_name]
     summary = runtime.metrics.summary(
         crawl_id=manifest.crawl_id,
         domain=manifest.domain,
         crawl_records=len(readings),
         documents=len({item.document.digest for item in readings}),
         engine_name=runtime.policy.engine_name,
-        engine_identity=str(engine.identity),
+        engine_identity=_summary_engine_identity(runtime),
     )
     localfs.declare_file(published.summary_path(), published.summary_payload(summary), create_parent_dirs=True)
+
+
+def _summary_engine_identity(runtime: Runtime) -> str:
+    """The configured engine's identity, or a deterministic ``unavailable`` when it cannot name itself.
+
+    This probe runs after every Document has been read, outside the per-document error handler in
+    ``read_document``. A configured engine that is not installed, or whose version probe fails, is an
+    unavailable OCR engine -- not a corpus-wide failure: its Documents are already exclusions, one per
+    Document, and the native Documents that were read must still publish. The summary therefore says
+    ``unavailable`` instead of raising, and says the same word on every run, with no host path.
+    """
+    engine = runtime.engines[runtime.policy.engine_name]
+    try:
+        return str(engine.identity)
+    except Exception as error:  # the engine is unavailable; the run is not
+        logger.warning("engine %s cannot name its identity: %s", runtime.policy.engine_name, error)
+        return UNAVAILABLE_ENGINE_IDENTITY
 
 
 def _extraction(item: DocumentReading) -> ExtractionResult:
@@ -323,6 +344,10 @@ def _declare_exclusion(
 async def app_main() -> None:
     """Read every document concurrently, then decide the corpus in one pass."""
     runtime = active_runtime()
+    # A runtime outlives one update: the demo keeps a warm database and `configure_runtime` holds the
+    # runtime between commands. Each update is a run of its own, so its counters start from zero
+    # instead of reporting the previous run's calls and doubling its publications and exclusions.
+    runtime.metrics.reset()
     documents = runtime.corpus().documents()
     keepers = exact_duplicate_keepers({document.url: document.digest for document in documents})
     requests = tuple(ReadingRequest(document=document, keeper=keepers[document.url]) for document in documents)

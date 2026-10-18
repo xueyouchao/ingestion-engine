@@ -21,6 +21,7 @@ deliberate: a different chunking rule is different evidence, and the index must 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -72,16 +73,18 @@ class DeclaredChunkSet:
 
 
 def chunk_set_fingerprint(chunks: Iterable[Chunk]) -> str:
-    """A stable digest of exactly this evidence: every chunk identity and every chunk text.
+    """A stable digest of exactly this evidence: every stored field of every chunk.
 
-    Identity alone would miss a replacement that kept the ids; text alone would miss a re-ordering.
-    Both, in ``chunk_id`` order, move whenever declared evidence changes and never when it does not.
+    Identity and text alone would miss a relabel: language and engine are filters a reader applies,
+    and changing either leaves the text and the chunk ids untouched. So the fingerprint covers every
+    field the index stores -- through ``CHUNK_FIELDS``, canonically serialized -- in ``chunk_id``
+    order, and moves whenever declared evidence changes and never when it does not.
     """
     digest = hashlib.sha256()
     for chunk in sorted(chunks, key=lambda item: item.chunk_id):
-        digest.update(chunk.chunk_id.encode("utf-8"))
-        digest.update(b"\x1f")
-        digest.update(chunk.text.encode("utf-8"))
+        digest.update(
+            json.dumps(chunk.as_json(), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        )
         digest.update(b"\x1e")
     return f"sha256:{digest.hexdigest()}"
 

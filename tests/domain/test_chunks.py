@@ -132,3 +132,35 @@ def test_the_chunking_version_is_reported_for_every_chunk() -> None:
 
     assert default[0].chunking_version == CHUNKING_VERSION
     assert bumped[0].chunking_version == "chunking-v2"
+
+
+def test_the_declared_fingerprint_names_every_stored_field_not_only_id_and_text() -> None:
+    """A relabel is new declared evidence even when its text and chunk identity are unchanged.
+
+    The fingerprint is what makes a stale index visible (ADR-0008). Language and engine are filters
+    a reader can apply, so changing either changes the evidence the index mirrors even though the
+    chunk it names is the same slice of the same page.
+    """
+    from finepdfs.domain.chunks import chunk_set_fingerprint
+
+    chunk = _chunks((_record(1, "alpha beta"),))[0]
+    base = chunk_set_fingerprint((chunk,))
+    assert base == chunk_set_fingerprint((chunk,)), "the same evidence fingerprints the same"
+
+    relabelled = replace(chunk, language="eng")
+    assert relabelled.chunk_id == chunk.chunk_id, "a label is not part of the chunk identity"
+    assert chunk_set_fingerprint((relabelled,)) != base, "a language change must move the fingerprint"
+
+    for changed in (
+        replace(chunk, engine="docling@cli"),
+        replace(chunk, text="alpha gamma"),
+        replace(chunk, doc_id="fedcba9876543210"),
+        replace(chunk, source_url="https://example.org/other.pdf"),
+        replace(chunk, digest="b" * 64),
+        replace(chunk, chunking_version="chunking-v2"),
+        replace(chunk, ordinal=1),
+        replace(chunk, page_number=2),
+        replace(chunk, start_offset=1),
+        replace(chunk, end_offset=len(chunk.text) - 1),
+    ):
+        assert chunk_set_fingerprint((changed,)) != base, f"{changed} must move the fingerprint"

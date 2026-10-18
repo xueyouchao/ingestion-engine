@@ -55,6 +55,10 @@ stored as a result and is retried on the next run.
 * A document is read again when its content digest changes, when the engine name or its identity changes
   (model, base URL, page DPI, tool command or version), or when the code in that function changes.
 * Moving or renaming a corpus re-reads nothing: the digest is the key and the file is looked up under it.
+* A configured engine whose identity probe cannot answer (a missing executable, a failed version
+  command) is an unavailable OCR engine, not a corpus-wide failure: the Documents routed to it are
+  excluded one by one, the Documents another engine read still publish, and the declared run summary
+  reports its identity as `unavailable` rather than a host path or an error.
 * Writing different bytes into a digest-named file is a failure, not a second document and not the old
   extraction: the digest in the name, the digest in the manifest and the bytes are all checked.
 

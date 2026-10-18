@@ -55,6 +55,10 @@ The seam is the record contract, and the backend is behind it:
 * Every per-chunk failure is reported, and a retry is idempotent; `chunk_id` is the primary key, so a
   reindex cannot duplicate a hit, and `retain` retracts replacements, fewer pages, exclusions and
   removed Crawl Records.
+* The freshness fingerprint covers every stored Chunk field, not only `chunk_id` and text. A language
+  or Engine Identity relabel leaves both unchanged, and a fingerprint over identity alone would call
+  an index with the old labels fresh. An index written before this fingerprint existed is stale once;
+  `index-search` rebuilds it.
 * "Only as fresh as the last `index-search`" is enforced, not documented: the rebuild records a
   fingerprint of the declared chunk set, and every read compares it with the current set. A stale,
   empty, schema-less or missing index is an explicit `available: false` with the reason and "run

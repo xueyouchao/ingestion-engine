@@ -306,3 +306,83 @@ def test_a_cheap_policy_change_reuses_extraction_and_updates_the_declared_output
     assert exclusion["kind"] == "dropped"
     assert "character minimum" in exclusion["reason"]
     assert engines.native.calls == 1 and engines.ocr.calls == 1
+
+
+def test_a_second_update_on_the_same_runtime_reports_only_that_update(
+    monkeypatch, tmp_path, corpus
+) -> None:
+    """`configure_runtime` reuses one runtime across updates, so a run's counters cannot be cumulative.
+
+    A warm rerun is a run in its own right: it makes no engine call, reuses every Extraction it asks
+    for, and publishes the same Documents once. Carrying the first run's counters forward would
+    report both the cold run's calls as this run's and double every publication and exclusion.
+    """
+    out_dir = tmp_path / "out"
+    runtime = _runtime(corpus, out_dir, _engines())
+
+    _run(monkeypatch, tmp_path, runtime, "runs")
+    assert _summary(out_dir)["extraction"] == {"requested": 2, "calls": 2, "reused": 0}
+
+    _run(monkeypatch, tmp_path, runtime, "runs")
+
+    summary = _summary(out_dir)
+    assert summary["routing"] == {"documents": 2, "native": 1, "ocr": 1}, "routing is not doubled"
+    assert summary["extraction"] == {"requested": 2, "calls": 0, "reused": 2}, (
+        "the warm run reports its own reuse, not the cold run's calls"
+    )
+    assert summary["published"] == {"documents": 2, "page_records": 2}, "publications are not doubled"
+    assert summary["exclusions"] == {
+        "total": 2,
+        "by_kind": {"dropped": 0, "exact-duplicate": 1, "failed": 1, "near-duplicate": 0},
+    }, "exclusions are not doubled"
+
+
+def test_an_unavailable_ocr_engine_does_not_fail_the_run_or_lose_native_documents(
+    monkeypatch, tmp_path, corpus
+) -> None:
+    """The summary's identity probe runs outside the per-document handler; it must not end the run.
+
+    A configured Docling whose executable is missing fails its version probe, and ADR-0005 keeps that
+    version in the Engine Identity. Documents routed to it are excluded one by one; the native
+    Documents already read still publish, and the summary names the unavailable engine
+    deterministically instead of crashing or recording a host path.
+    """
+    from finepdfs.infrastructure.engines.docling_engine import DoclingEngine
+    from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextEngine
+
+    class MissingRunner:
+        def run(self, arguments):
+            raise FileNotFoundError(f"no executable named {arguments[0]}")
+
+    out_dir = tmp_path / "out"
+    policy = CurationPolicy(engine_name="docling")
+    runtime = Runtime(
+        corpus_dir=corpus,
+        out_dir=out_dir,
+        policy=policy,
+        extraction=ExtractionStep(
+            SelectiveProbe(),
+            {
+                "pymupdf": PymupdfTextEngine(),
+                "docling": DoclingEngine(
+                    command="/nonexistent/docling-for-summary", runner=MissingRunner()
+                ),
+            },
+            policy,
+        ),
+        curation=CurationStep(ScriptLanguageIdentifier(), policy),
+    )
+
+    _run(monkeypatch, tmp_path, runtime, "runs")
+
+    summary = _summary(out_dir)
+    assert summary["engine"] == {"name": "docling", "identity": "unavailable"}, (
+        "an engine that cannot name itself is reported deterministically, not as a host path"
+    )
+    assert summary["routing"] == {"documents": 2, "native": 1, "ocr": 1}
+    assert summary["published"]["documents"] == 1, "a native Document already read is not lost"
+    assert summary["published"]["page_records"] >= 1
+    assert summary["exclusions"]["by_kind"]["failed"] == 2, (
+        "the broken file and the Document routed to the unavailable engine are exclusions, not a run failure"
+    )
+    assert summary["exclusions"]["by_kind"]["exact-duplicate"] == 1

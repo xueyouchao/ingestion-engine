@@ -16,7 +16,7 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev]"   # pinned: cocoindex=
 .venv/bin/finepdfs fetch-corpus --domain noaa.gov --limit 12
 
 # or restore the pinned 18-Document demo corpus instead of discovering a new one
-.venv/bin/finepdfs restore-corpus --manifest docs/demo/pdf-demo-corpus-manifest.json --corpus corpus/pdf-demo
+.venv/bin/finepdfs restore-corpus --manifest src/finepdfs/data/pdf-demo-corpus-manifest.json --corpus corpus/pdf-demo
 
 # 2. see what would happen, without writing anything
 .venv/bin/finepdfs dry-run
@@ -37,8 +37,10 @@ The CocoIndex CLI works too, because the pipeline *is* a CocoIndex app:
 
 [`docs/demo/`](docs/demo/) pins a real 19-record / 18-Document Corpus and records the rehearsal,
 including measured timings, OCR page evidence and the limitations that remain. The demo command keeps
-its corpus, output and warm CocoIndex database in one isolated root (`.demo/`, gitignored) that a run
-never wipes; only `reset` deletes it.
+its corpus, output and warm CocoIndex database in one isolated root (`FINEPDFS_DEMO_ROOT`, else
+`.demo/` in the current directory, gitignored) that a run never wipes; only `reset` deletes it. The
+pinned manifest ships inside the package (`src/finepdfs/data/`), so `finepdfs-demo restore` works from
+a wheel install, not only from this checkout.
 
 ~~~~bash
 PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo restore

@@ -4,7 +4,9 @@ The extract body is memoised on (content digest, engine name, engine identity), 
 miss (ADR-0005). That makes the counters a property of the run, not of CocoIndex's component graph:
 
 * a *call* is counted inside the memoised body, so it is one actual Extraction and not a memo hit;
-* a *reuse* is a memo key the reading pass asked for that the body never ran for.
+* a *reuse* is a memo key the reading pass asked for that the body never ran for;
+* the counters start fresh at the beginning of every update, so a runtime reused across updates
+  reports the run that just finished, not the sum of the runs before it.
 
 CocoIndex's own component and memo statistics are deliberately not folded in here; they count work
 units, not engine calls. The summary is written by the flow as declared target state, so no second
@@ -39,6 +41,21 @@ class RunMetrics:
     exclusions: dict[str, int] = field(default_factory=lambda: dict.fromkeys(EXCLUSION_KINDS, 0))
     _requested: dict[_ExtractionKey, None] = field(default_factory=dict)
     _executed: dict[_ExtractionKey, None] = field(default_factory=dict)
+
+    def reset(self) -> None:
+        """Start a new update's counters.
+
+        One Runtime can serve several updates: the demo keeps a warm database and
+        ``configure_runtime`` holds the runtime between commands. Each update is a run of its own, so
+        its counters start from zero instead of carrying the previous run's work into its summary.
+        """
+        self.routed_native = 0
+        self.routed_ocr = 0
+        self.published_documents = 0
+        self.page_records = 0
+        self.exclusions = dict.fromkeys(EXCLUSION_KINDS, 0)
+        self._requested.clear()
+        self._executed.clear()
 
     def route(self, *, needs_ocr: bool) -> None:
         """Count one routed Document; an exact duplicate is skipped before routing and not counted."""
@@ -89,7 +106,8 @@ class RunMetrics:
 
         No timestamp, duration, host path or lease id lands here: a published record must be
         reproducible, so an unchanged rerun rewrites these exact bytes and target state does not
-        change. Wall-clock observation belongs to the command wrapper that measures the run.
+        change. Wall-clock observation belongs to the command wrapper that measures the run, and an
+        engine whose identity probe cannot answer is reported as ``unavailable`` by the caller.
         """
         return {
             "schema_version": SCHEMA_VERSION,
