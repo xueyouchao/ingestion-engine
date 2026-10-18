@@ -9,7 +9,9 @@ Ordering is the contract:
 
 1. create the Sandbox;
 2. write its id to the lease state *immediately*, before any readiness wait, so a start that times out
-   or fails readiness still leaves the stop command something to terminate;
+   or fails readiness still leaves the stop command something to terminate. The file is the one named
+   by this lease's identity (``FINEPDFS_GPU_LEASE_ID``), which is what keeps a concurrent run's worker
+   out of reach;
 3. wait for the readiness probe and verify ``/v1/models`` names the pinned model;
 4. print exactly one JSON object on stdout and exit.
 
@@ -25,7 +27,6 @@ import os
 import sys
 import urllib.request
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
 from typing import Any
 
 from deploy.gpu.contract import (
@@ -37,9 +38,10 @@ from deploy.gpu.contract import (
     base_url_with_v1,
     emit_endpoint,
     endpoint_payload,
+    lease_file,
+    positive_seconds,
     read_lease,
     redact,
-    state_path,
     write_lease,
 )
 from deploy.modal.image import HF_CACHE_PATH, HF_CACHE_VOLUME, worker_image
@@ -83,7 +85,7 @@ def _import_sdk() -> Any:
 
 
 def _create_worker(modal: Any, environ: Mapping[str, str]) -> Any:
-    path = state_path(environ)
+    path = lease_file(environ)
     existing = read_lease(path)
     if existing is not None:
         raise WorkerContractError(
@@ -98,18 +100,13 @@ def _create_worker(modal: Any, environ: Mapping[str, str]) -> Any:
         gpu=environ.get(GPU_VARIABLE, GPU_DEFAULT).strip() or GPU_DEFAULT,
         encrypted_ports=[WORKER_PORT],
         readiness_probe=modal.Probe.with_tcp(WORKER_PORT),
-        timeout=_seconds(environ, LIFETIME_VARIABLE, LIFETIME_DEFAULT),
+        timeout=positive_seconds(environ, LIFETIME_VARIABLE, LIFETIME_DEFAULT),
         volumes={HF_CACHE_PATH: weights},
     )
     try:
         write_lease(
             path,
-            LeaseState(
-                provider=PROVIDER_MODAL,
-                worker_id=sandbox.object_id,
-                app_name=APP_NAME,
-                created_at=datetime.now(UTC).isoformat(),
-            ),
+            LeaseState(provider=PROVIDER_MODAL, worker_id=sandbox.object_id),
         )
     except Exception as error:
         # The worker exists but cannot be recorded, so stop could never find it. Give it back here
@@ -123,7 +120,9 @@ def _create_worker(modal: Any, environ: Mapping[str, str]) -> Any:
 
 
 def _await_serving(sandbox: Any, environ: Mapping[str, str], opener: Opener) -> str:
-    sandbox.wait_until_ready(timeout=_seconds(environ, READY_TIMEOUT_VARIABLE, READY_TIMEOUT_DEFAULT))
+    sandbox.wait_until_ready(
+        timeout=positive_seconds(environ, READY_TIMEOUT_VARIABLE, READY_TIMEOUT_DEFAULT)
+    )
     tunnels = sandbox.tunnels(timeout=TUNNEL_TIMEOUT)
     tunnel = tunnels.get(WORKER_PORT)
     if tunnel is None:
@@ -149,17 +148,6 @@ def _verify_models(base_url: str, opener: Opener, timeout: float) -> None:
 
 def _open(url: str, timeout: float) -> Any:
     return urllib.request.urlopen(url, timeout=timeout)
-
-
-def _seconds(environ: Mapping[str, str], name: str, default: int) -> int:
-    raw = environ.get(name, str(default)).strip()
-    try:
-        seconds = int(raw)
-    except ValueError as error:
-        raise WorkerContractError(f"{name} is not a whole number of seconds: {raw!r}") from error
-    if seconds <= 0:
-        raise WorkerContractError(f"{name} must be positive, got {seconds}")
-    return seconds
 
 
 def _terminate_quietly(sandbox: Any, environ: Mapping[str, str]) -> None:

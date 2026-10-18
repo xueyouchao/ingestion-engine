@@ -3,18 +3,23 @@
 The scripts import Modal lazily and accept the SDK as an argument, so these small stand-ins are all the
 vendor surface the tests need: an app lookup, a sandbox create, a readiness wait, tunnels, terminate and
 the one exception class stop classifies. No network, no GPU, no Modal package (ADR-0009).
+
+Two facts about the real world are modelled rather than mocked away. Every start rents a *new* sandbox,
+so the fake hands out a fresh id per start; and a sandbox's readiness wait looks for its own id in the
+lease state, so the fake reads the state directory rather than assuming one file's path.
 """
 
 from __future__ import annotations
 
 import io
 import json
+from collections.abc import Mapping, Sequence
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Self
 
-from deploy.gpu.contract import WORKER_MODEL, WORKER_PORT, read_lease
+from deploy.gpu.contract import WORKER_MODEL, WORKER_PORT, read_lease, state_directory
 from deploy.modal import start, stop
 from finepdfs.infrastructure.engines.subprocess_support import CommandResult
 
@@ -53,13 +58,14 @@ class FakeImage:
 class FakeSandbox:
     def __init__(
         self,
-        lease_path: Path,
+        object_id: str,
+        lease_dir: Path,
         tunnel_url: str | None = TUNNEL_URL,
         ready_error: Exception | None = None,
         tunnel_error: Exception | None = None,
     ) -> None:
-        self.object_id = "sb-abc123"
-        self.lease_path = lease_path
+        self.object_id = object_id
+        self.lease_dir = lease_dir
         self.tunnel_url = tunnel_url
         self.ready_error = ready_error
         self.tunnel_error = tunnel_error
@@ -70,8 +76,7 @@ class FakeSandbox:
 
     def wait_until_ready(self, *, timeout: int) -> None:
         self.ready_timeout = timeout
-        lease = read_lease(self.lease_path)
-        self.lease_was_recorded_before_readiness = lease is not None and lease.worker_id == self.object_id
+        self.lease_was_recorded_before_readiness = self.object_id in self._recorded_worker_ids()
         if self.ready_error is not None:
             raise self.ready_error
 
@@ -86,17 +91,27 @@ class FakeSandbox:
     def terminate(self) -> None:
         self.terminated = True
 
+    def _recorded_worker_ids(self) -> list[str]:
+        """Every worker the state directory records, whichever lease file names it."""
+        recorded = []
+        for path in sorted(self.lease_dir.glob("*.json")):
+            lease = read_lease(path)
+            if lease is not None:
+                recorded.append(lease.worker_id)
+        return recorded
+
 
 class FakeModal:
     """Enough of the Modal module for ``start.main``."""
 
     def __init__(
         self,
-        lease_path: Path,
+        lease_dir: Path,
+        object_id: str = "sb-abc123",
         create_error: Exception | None = None,
         **sandbox_options: Any,
     ) -> None:
-        self.sandbox = FakeSandbox(lease_path, **sandbox_options)
+        self.sandbox = FakeSandbox(object_id, Path(lease_dir), **sandbox_options)
         self.image = FakeImage()
         self.create_error = create_error
         self.created: dict[str, Any] = {}
@@ -191,31 +206,51 @@ class ScriptRunner:
     """Runs the real start/stop ``main`` functions behind the real ``CommandGpuProvider``.
 
     This is what proves the command contract end to end offline: the provider sees a command that
-    exits 0 or nonzero, and the scripts see the same environment a run would give them.
+    exits 0 or nonzero, and the scripts see the environment a run would give them. The provider passes
+    each lease its own identity in that environment, which is merged here exactly as a subprocess would
+    inherit it. Every start rents a fresh fake sandbox and every stop is recorded, so two leases in one
+    test behave like two runs against one fake Modal account.
     """
 
     def __init__(
         self,
-        values: dict[str, str],
-        start_modal: FakeModal,
+        values: Mapping[str, str],
         opener: RecordingOpener,
         stop_modal: FakeStopModal,
+        modal_options: Mapping[str, Any] | None = None,
     ) -> None:
-        self.values = values
-        self.start_modal = start_modal
+        self.values = dict(values)
         self.opener = opener
         self.stop_modal = stop_modal
+        self.modal_options = dict(modal_options or {})
         self.calls: list[tuple[str, ...]] = []
+        self.environments: list[dict[str, str]] = []
+        self.created: list[FakeSandbox] = []
+        self.start_codes: list[int] = []
 
-    def run(self, argv: Any, cwd: Path | None = None) -> CommandResult:
+    def run(
+        self,
+        argv: Sequence[str],
+        cwd: Path | None = None,
+        environ: Mapping[str, str] | None = None,
+    ) -> CommandResult:
         self.calls.append(tuple(argv))
+        self.environments.append(dict(environ or {}))
+        values = {**self.values, **(environ or {})}
         if argv[0] == "start":
+            modal = FakeModal(
+                state_directory(values),
+                object_id=f"sb-{len(self.start_codes) + 1:04d}",
+                **self.modal_options,
+            )
             output = io.StringIO()
             with redirect_stdout(output):
-                code = start.main(self.values, sdk=self.start_modal, opener=self.opener)
+                code = start.main(values, sdk=modal, opener=self.opener)
+            self.created.append(modal.sandbox)
+            self.start_codes.append(code)
             return CommandResult(argv=tuple(argv), returncode=code, stdout=output.getvalue())
-        return CommandResult(argv=tuple(argv), returncode=stop.main(self.values, sdk=self.stop_modal))
+        return CommandResult(argv=tuple(argv), returncode=stop.main(values, sdk=self.stop_modal))
 
 
-def worker_environment(state_file: Path, **values: str) -> dict[str, str]:
-    return {"FINEPDFS_GPU_STATE_FILE": str(state_file), **values}
+def worker_environment(lease_dir: Path, **values: str) -> dict[str, str]:
+    return {"FINEPDFS_GPU_STATE_DIR": str(lease_dir), **values}

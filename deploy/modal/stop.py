@@ -3,8 +3,10 @@
 This is the stop command behind ``FINEPDFS_GPU_STOP_COMMAND`` (ADR-0009). It must be safe to run when
 the worker never became ready (the id is written before readiness on purpose), when it is already
 terminated, and twice in a row: the lease file is the single source of truth, and a missing file means
-there is nothing to give back. A stop that cannot terminate the worker exits nonzero and *keeps* the
-lease, so the operator can retry instead of losing the only handle on a GPU that may still be billing.
+there is nothing to give back. It reads only the file this lease's identity names, so it can give back
+its own run's worker and no other run's. A stop that cannot terminate the worker exits nonzero and
+*keeps* the lease, so the operator can retry instead of losing the only handle on a GPU that may still
+be billing.
 """
 
 from __future__ import annotations
@@ -19,16 +21,16 @@ from deploy.gpu.contract import (
     LeaseState,
     WorkerContractError,
     clear_lease,
+    lease_file,
     read_lease,
     redact,
-    state_path,
 )
 
 
 def main(environ: Mapping[str, str] | None = None, sdk: Any = None) -> int:
     """Terminate the recorded worker, or report why it could not be given back."""
     values = os.environ if environ is None else environ
-    path = state_path(values)
+    path = lease_file(values)
     try:
         state = read_lease(path)
         if state is None:

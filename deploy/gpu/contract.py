@@ -7,9 +7,11 @@ This module owns the parts that must not be re-decided per vendor:
 * the endpoint payload, whose ``base_url`` must carry the ``/v1`` base path because ``ChatEndpoint``
   appends only ``/chat/completions``;
 * the deployment detail, which names the model and its versions and never the ephemeral address;
-* the lease state, written as soon as a worker exists and before any readiness wait, so a stop can
-  still find and terminate a worker that never finished starting;
-* redaction of anything secret from text that is about to be printed or logged.
+* the lease state, one file per lease and named after the identity the provider gives that lease,
+  written as soon as a worker exists and before any readiness wait, so a stop can still find and
+  terminate a worker that never finished starting, and cannot find another run's;
+* redaction of anything secret -- a credential or the leased address -- from text that is about to be
+  printed or logged.
 
 It imports no vendor SDK, so the offline suite can test it with no Modal installed (ADR-0009).
 """
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -51,11 +54,24 @@ WORKER_DETAIL = (
 
 PROVIDER_MODAL = "modal"
 
-STATE_FILE = "FINEPDFS_GPU_STATE_FILE"
-DEFAULT_STATE_FILE = "~/.cache/finepdfs/gpu-worker.json"
+# One lease, one state file. The provider mints an identity per lease and passes it to the start and the
+# stop command alike (``FINEPDFS_GPU_LEASE_ID``); the state file is named after it, so two runs record two
+# workers and neither can find, overwrite or terminate the other's (ADR-0007).
+LEASE_ID_VARIABLE = "FINEPDFS_GPU_LEASE_ID"
+STATE_DIR_VARIABLE = "FINEPDFS_GPU_STATE_DIR"
+DEFAULT_STATE_DIR = "~/.cache/finepdfs/gpu-workers"
+# A start run by hand has no provider to mint an identity. It records under this fixed name, which is
+# what keeps `start` then `stop` from one shell working.
+UNIDENTIFIED_LEASE = "manual"
+LEASE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 # Environment names whose values must never reach stdout, stderr or a log line.
 SECRET_MARKERS = ("TOKEN", "SECRET", "KEY", "PASSWORD", "CREDENTIAL")
+# The leased address is a credential too: the tunnel is unguessable and is the only thing protecting the
+# worker, so it never goes into an error or a log line (the runbook says so, and this enforces it). Any
+# scheme is masked, not only http(s): a value rejected for a mistyped scheme would otherwise print the
+# host, and so would a vendor error that quotes one.
+URL_PATTERN = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*)://[^\s\"'<>]+")
 
 
 class WorkerContractError(RuntimeError):
@@ -110,18 +126,25 @@ def emit_endpoint(payload: Mapping[str, str], stream: TextIO | None = None) -> s
     return line
 
 
+def _mask_urls(text: str) -> str:
+    """Replace an http(s) address with its scheme, so a message names the fault and not the address."""
+    return URL_PATTERN.sub(lambda match: f"{match.group(1)}://***", text)
+
+
 def _require_base_url(base_url: str) -> None:
     if not base_url or not base_url.strip():
         raise WorkerContractError("the worker endpoint has no base_url")
     parsed = urlsplit(base_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise WorkerContractError(f"the worker base_url is not an http(s) address: {base_url!r}")
+        raise WorkerContractError(f"the worker base_url is not an http(s) address: {_mask_urls(base_url)!r}")
     if parsed.path.rstrip("/") != "/v1":
         raise WorkerContractError(
-            f"the worker base_url must end at the /v1 base path, got {base_url!r}"
+            f"the worker base_url must end at the /v1 base path, got {_mask_urls(base_url)!r}"
         )
     if parsed.query or parsed.fragment:
-        raise WorkerContractError(f"the worker base_url must not carry a query or fragment: {base_url!r}")
+        raise WorkerContractError(
+            f"the worker base_url must not carry a query or fragment: {_mask_urls(base_url)!r}"
+        )
 
 
 def _require_model(model: str) -> None:
@@ -130,27 +153,38 @@ def _require_model(model: str) -> None:
 
 
 def _require_detail(detail: str) -> None:
+    """A detail is one token of the shape ``model@version[:attribute...]`` and never an address.
+
+    The shape is what makes the detail usable as the deployment half of the Engine Identity: a bare
+    name says nothing about which weights served the text, so a rebuilt worker would keep the memo key
+    and the corpus would never be re-read (ADR-0005, ADR-0009).
+    """
     if not detail or not detail.strip():
         raise WorkerContractError("the worker detail is empty; it must name the model and its versions")
     if "://" in detail or detail.lower().startswith(("http:", "https:")):
-        raise WorkerContractError(f"the worker detail must not contain a URL: {detail!r}")
+        raise WorkerContractError(f"the worker detail must not contain a URL: {_mask_urls(detail)!r}")
     if any(character.isspace() for character in detail):
-        raise WorkerContractError(f"the worker detail must be one token, got {detail!r}")
+        raise WorkerContractError(f"the worker detail must be one token, got {_mask_urls(detail)!r}")
+    model, _, attributes = detail.partition("@")
+    version = attributes.partition(":")[0]
+    if detail.count("@") != 1 or not model or not version:
+        raise WorkerContractError(
+            "the worker detail must name the model and its version as model@version, "
+            f"got {_mask_urls(detail)!r}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class LeaseState:
     """What must survive the start command: enough to terminate the worker from another process.
 
-    Only the provider and the worker id are load-bearing. ``app_name`` is recorded because Modal
-    sandboxes belong to an app and an operator may need to find the worker by app; ``created_at`` is
-    there to age out a stale lease. Neither is a secret and neither is an address.
+    Two fields, and both are load-bearing: an id is what the vendor's terminate-by-id needs, and the
+    provider is what makes a stop refuse another vendor's id instead of guessing what it means. Neither
+    is a secret and neither is an address.
     """
 
     provider: str
     worker_id: str
-    app_name: str = ""
-    created_at: str = ""
 
     def __post_init__(self) -> None:
         if not self.provider:
@@ -159,12 +193,7 @@ class LeaseState:
             raise WorkerContractError("the lease state has no worker id")
 
     def to_payload(self) -> dict[str, str]:
-        return {
-            "provider": self.provider,
-            "worker_id": self.worker_id,
-            "app_name": self.app_name,
-            "created_at": self.created_at,
-        }
+        return {"provider": self.provider, "worker_id": self.worker_id}
 
     @classmethod
     def from_payload(cls, payload: object) -> LeaseState:
@@ -176,22 +205,55 @@ class LeaseState:
             raise WorkerContractError("the lease state does not name its provider")
         if not isinstance(worker_id, str) or not worker_id:
             raise WorkerContractError("the lease state does not name its worker_id")
-        app_name = payload.get("app_name") or ""
-        created_at = payload.get("created_at") or ""
-        if not isinstance(app_name, str) or not isinstance(created_at, str):
-            raise WorkerContractError("the lease state has a non-string app_name or created_at")
-        return cls(provider=provider, worker_id=worker_id, app_name=app_name, created_at=created_at)
+        return cls(provider=provider, worker_id=worker_id)
 
 
-def state_path(environ: Mapping[str, str]) -> Path:
-    """Where this machine records the one worker it currently leases.
+def state_directory(environ: Mapping[str, str]) -> Path:
+    """The directory that holds one state file per lease.
 
     An empty value is not a path: it is the unset value every other optional variable here reads as
     absent, so it falls back to the default rather than becoming ``.`` -- a directory that stop would
     then report as an unreadable lease.
     """
-    configured = environ.get(STATE_FILE, "").strip()
-    return Path(configured or DEFAULT_STATE_FILE).expanduser()
+    configured = environ.get(STATE_DIR_VARIABLE, "").strip()
+    return Path(configured or DEFAULT_STATE_DIR).expanduser()
+
+
+def lease_file(environ: Mapping[str, str]) -> Path:
+    """The state file that records *this* lease, named by the identity its provider passed.
+
+    Per lease, not per machine. A single shared file is what let one run's stop terminate another run's
+    live worker: both commands read the same path, so the second stop found the first run's worker id.
+    An identity is validated as one file-name component, so a value from the environment cannot name a
+    path outside the state directory. An empty identity is a start run by hand, which records under the
+    fixed ``manual`` name so one start and the stop that follows it in the same shell still meet.
+    """
+    lease_id = environ.get(LEASE_ID_VARIABLE, "").strip()
+    if not lease_id:
+        return state_directory(environ) / f"{UNIDENTIFIED_LEASE}.json"
+    if not LEASE_ID_PATTERN.fullmatch(lease_id):
+        raise WorkerContractError(
+            f"{LEASE_ID_VARIABLE} is not a usable lease identity "
+            f"(letters, digits, '-' and '_', at most 64): {lease_id!r}"
+        )
+    return state_directory(environ) / f"{lease_id}.json"
+
+
+def positive_seconds(environ: Mapping[str, str], name: str, default: int) -> int:
+    """A positive whole number of seconds, where an empty or blank value is the unset value.
+
+    Empty is absent everywhere else on this boundary -- the state directory, a pinned detail -- so a
+    variable exported with no value must mean the default rather than fail the start that read it:
+    ``int("")`` used to report the empty string as "not a whole number of seconds".
+    """
+    raw = environ.get(name, "").strip() or str(default)
+    try:
+        seconds = int(raw)
+    except ValueError as error:
+        raise WorkerContractError(f"{name} is not a whole number of seconds: {raw!r}") from error
+    if seconds <= 0:
+        raise WorkerContractError(f"{name} must be positive, got {seconds}")
+    return seconds
 
 
 def write_lease(path: Path, state: LeaseState) -> None:
@@ -226,14 +288,16 @@ def clear_lease(path: Path) -> None:
 
 
 def redact(text: str, environ: Mapping[str, str]) -> str:
-    """Replace credential-looking environment values before text reaches a terminal or a log.
+    """Replace credentials before text reaches a terminal or a log.
 
-    The worker never needs to print a secret, but a vendor SDK error can quote one. This is the last
-    line of defence at the script boundary, not a licence to pass secrets around (ADR-0009).
+    Two things are credentials here. A value under a credential-looking name, which a vendor SDK error
+    can quote; and any http(s) address, because the leased tunnel URL *is* the credential the runbook
+    describes. The address is masked by shape, not by name: nothing in the environment has to be
+    declared secret for it to be hidden, and an address a vendor error invented is hidden too.
     """
     redacted = text
     for name, value in environ.items():
         if len(value) < 4 or not any(marker in name.upper() for marker in SECRET_MARKERS):
             continue
         redacted = redacted.replace(value, "***")
-    return redacted
+    return _mask_urls(redacted)

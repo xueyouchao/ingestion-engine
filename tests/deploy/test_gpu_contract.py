@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -68,6 +69,31 @@ def test_the_detail_names_the_model_and_its_versions_and_never_the_address() -> 
     assert TUNNEL not in detail
 
 
+def test_the_detail_names_the_model_its_version_and_both_pinned_versions() -> None:
+    """Read the detail the way a consumer does, instead of comparing it with the constant that built it.
+
+    ``WORKER_DETAIL`` is assembled from the pins, so asserting equality only proves the assembly runs.
+    This parses the shape, checks the model and version the vendor published, and proves each digest is
+    a prefix of the pin it claims to name -- so a detail that silently reported the wrong weights or a
+    host would fail here.
+    """
+    detail = contract.endpoint_payload(contract.base_url_with_v1(TUNNEL))["detail"]
+
+    model, _, rest = detail.partition("@")
+    version, _, attributes = rest.partition(":")
+    weights, _, image = attributes.partition(":")
+
+    assert model == "paddleocr-vl", "the detail names the served model, not a host"
+    assert version == "1.6", "the detail carries the model version a reader can compare"
+    assert weights.startswith("weights-") and image.startswith("image-")
+    assert contract.MODEL_REVISION.startswith(weights.removeprefix("weights-")), "those are the pinned weights"
+    assert contract.VLLM_IMAGE_DIGEST.startswith(image.removeprefix("image-")), "that is the pinned image"
+    assert contract.VLLM_IMAGE.endswith("@sha256:" + contract.VLLM_IMAGE_DIGEST)
+    assert re.fullmatch(r"paddleocr-vl@1\.6:weights-[0-9a-f]{12}:image-[0-9a-f]{12}", detail)
+    assert "://" not in detail
+    assert TUNNEL not in detail and "modal.host" not in detail
+
+
 @pytest.mark.parametrize(
     "detail",
     [
@@ -105,12 +131,7 @@ def test_malformed_start_output_is_refused_by_the_provider_not_carried_into_a_ru
 
 def test_the_lease_records_the_worker_and_no_address_or_secret(tmp_path) -> None:
     path = tmp_path / "nested" / "worker.json"
-    state = contract.LeaseState(
-        provider=contract.PROVIDER_MODAL,
-        worker_id="sb-abc123",
-        app_name="finepdfs-gpu-worker",
-        created_at="2026-10-18T00:00:00+00:00",
-    )
+    state = contract.LeaseState(provider=contract.PROVIDER_MODAL, worker_id="sb-abc123")
 
     contract.write_lease(path, state)
 
@@ -149,15 +170,50 @@ def test_a_lease_without_a_worker_id_is_invalid(tmp_path) -> None:
         contract.read_lease(path)
 
 
-def test_the_state_file_is_named_by_the_environment_then_defaults(tmp_path) -> None:
-    explicit = tmp_path / "lease.json"
+def test_each_lease_is_recorded_in_its_own_file(tmp_path) -> None:
+    """One shared state file is what let one run's stop terminate another run's live worker."""
+    directory = tmp_path / "leases"
+    first = {contract.STATE_DIR_VARIABLE: str(directory), contract.LEASE_ID_VARIABLE: "a" * 32}
+    second = {contract.STATE_DIR_VARIABLE: str(directory), contract.LEASE_ID_VARIABLE: "b" * 32}
 
-    assert contract.state_path({contract.STATE_FILE: str(explicit)}) == explicit
-    assert contract.state_path({}) == Path(contract.DEFAULT_STATE_FILE).expanduser()
+    assert contract.lease_file(first) == directory / f"{'a' * 32}.json"
+    assert contract.lease_file(second) == directory / f"{'b' * 32}.json"
+    assert contract.lease_file(first) != contract.lease_file(second), "two leases never share a file"
+
+
+def test_the_lease_identity_variable_is_the_one_the_provider_passes() -> None:
+    """The provider mints the identity; these scripts read it. One concept, one spelling."""
+    from finepdfs.infrastructure.compute.providers import GPU_LEASE_ID
+
+    assert contract.LEASE_ID_VARIABLE == GPU_LEASE_ID
+
+
+def test_the_state_directory_is_named_by_the_environment_then_defaults(tmp_path) -> None:
+    explicit = tmp_path / "leases"
+
+    assert contract.state_directory({contract.STATE_DIR_VARIABLE: str(explicit)}) == explicit
+    assert contract.state_directory({}) == Path(contract.DEFAULT_STATE_DIR).expanduser()
     # A present-but-empty value is the unset value, not the path ".": exporting an empty variable must
     # not turn stop into an "unreadable lease" report about a directory.
-    assert contract.state_path({contract.STATE_FILE: ""}) == Path(contract.DEFAULT_STATE_FILE).expanduser()
-    assert contract.state_path({contract.STATE_FILE: "   "}) == Path(contract.DEFAULT_STATE_FILE).expanduser()
+    assert contract.state_directory({contract.STATE_DIR_VARIABLE: ""}) == Path(contract.DEFAULT_STATE_DIR).expanduser()
+    assert contract.state_directory({contract.STATE_DIR_VARIABLE: "   "}) == Path(contract.DEFAULT_STATE_DIR).expanduser()
+
+
+def test_a_start_run_by_hand_records_under_one_fixed_name(tmp_path) -> None:
+    """No provider mints an identity for a hand-run start, so start and stop in one shell must still meet."""
+    values = {contract.STATE_DIR_VARIABLE: str(tmp_path)}
+
+    assert contract.lease_file(values).name == contract.UNIDENTIFIED_LEASE + ".json"
+    assert contract.lease_file({**values, contract.LEASE_ID_VARIABLE: ""}).name == (
+        contract.UNIDENTIFIED_LEASE + ".json"
+    )
+
+
+@pytest.mark.parametrize("lease_id", ["../escape", "a/b", "a b", "x" * 65, "?"])
+def test_a_lease_identity_that_is_not_one_file_name_is_refused(tmp_path, lease_id: str) -> None:
+    """The identity comes from the environment, so it may not name a path outside the state directory."""
+    with pytest.raises(contract.WorkerContractError, match=contract.LEASE_ID_VARIABLE):
+        contract.lease_file({contract.STATE_DIR_VARIABLE: str(tmp_path), contract.LEASE_ID_VARIABLE: lease_id})
 
 
 def test_secrets_are_redacted_from_text_that_would_be_printed() -> None:
@@ -178,3 +234,61 @@ def test_secrets_are_redacted_from_text_that_would_be_printed() -> None:
 def test_a_short_value_under_a_secret_name_is_left_alone() -> None:
     """Redacting a two-character value would shred every message that happens to contain it."""
     assert contract.redact("key is ab", {"HF_TOKEN": "ab"}) == "key is ab"
+
+
+def test_a_url_in_text_is_redacted_even_though_no_variable_names_it() -> None:
+    """The tunnel URL is the credential (runbook): redaction cannot rely on an environment name."""
+    redacted = contract.redact(
+        f"the tunnel {TUNNEL}/v1/models refused; ftp://tunnel-abc123.modal.host/v1; key sekret",
+        {"MODAL_TOKEN_SECRET": "sekret"},
+    )
+
+    assert TUNNEL not in redacted
+    assert "modal.host" not in redacted
+    assert "sekret" not in redacted
+    assert redacted.count("***") == 3, "a mistyped scheme must not be a way to print the tunnel host"
+
+
+def test_a_rejected_base_url_is_not_quoted_back_by_the_contract() -> None:
+    """An operator needs to know which rule failed, not the address that is also the credential."""
+    with pytest.raises(contract.WorkerContractError) as caught:
+        contract.endpoint_payload(TUNNEL)  # right scheme, wrong path
+
+    message = str(caught.value)
+    assert "/v1" in message, "the message still says what was wrong"
+    assert TUNNEL not in message
+    assert "modal.host" not in message
+
+
+def test_a_base_url_with_a_query_is_refused_without_repeating_it() -> None:
+    with pytest.raises(contract.WorkerContractError) as caught:
+        contract.endpoint_payload(TUNNEL + "/v1?token=sekret")
+
+    message = str(caught.value)
+    assert "query or fragment" in message
+    assert "sekret" not in message
+    assert "modal.host" not in message
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "paddleocr-vl",  # nothing names a version
+        "paddleocr-vl@",  # an empty version
+        "paddleocr-vl@:",  # an empty version before the attributes
+        "paddleocr-vl@:weights-x:image-y",
+        "@1.6:weights-x:image-y",  # nothing names the model
+        "paddleocr-vl@1.6@extra:weights-x",  # more than one identity in one token
+    ],
+)
+def test_a_detail_that_does_not_name_a_model_and_a_version_is_refused(detail: str) -> None:
+    """The detail is the deployment half of the memo key: without a version it cannot tell two apart."""
+    with pytest.raises(contract.WorkerContractError, match="model@version"):
+        contract.endpoint_payload(contract.base_url_with_v1(TUNNEL), detail=detail)
+
+
+def test_a_detail_that_carries_a_url_is_refused_without_repeating_it() -> None:
+    with pytest.raises(contract.WorkerContractError, match="URL") as caught:
+        contract.endpoint_payload(contract.base_url_with_v1(TUNNEL), detail=f"paddleocr-vl@1.6:{TUNNEL}")
+
+    assert TUNNEL not in str(caught.value)

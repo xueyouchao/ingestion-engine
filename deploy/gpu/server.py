@@ -7,13 +7,13 @@ and served name. That keeps one server, one protocol and one place where the wei
 deployment detail.
 
 The exact upstream invocation is the one assumption this offline slice cannot execute (ADR-0009). It
-is therefore a single documented command, overridable by one environment variable, and every argument
-is visible through ``--print-command``:
+is therefore one pinned command, built from the image's own environment, and every argument is visible
+before it runs:
 
     python server.py --print-command
 
-``PADDLEOCR_VL_SERVE_COMMAND`` overrides the whole argv as a JSON array of strings, for the day the
-upstream command changes or a compatible managed endpoint is served instead.
+There is no command override: the recipe is pinned rather than configurable, so a changed serving
+surface is a change to this file and its test, not an undeclared variable in the deploy environment.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import TextIO
 
-SERVE_COMMAND = "PADDLEOCR_VL_SERVE_COMMAND"
 MODEL_VARIABLE = "PADDLEOCR_VL_MODEL"
 REVISION_VARIABLE = "PADDLEOCR_VL_REVISION"
 SERVED_MODEL_VARIABLE = "PADDLEOCR_VL_SERVED_MODEL_NAME"
@@ -49,10 +48,7 @@ class ServerConfigurationError(RuntimeError):
 
 
 def serve_argv(environ: Mapping[str, str]) -> list[str]:
-    """The argv the worker runs: one documented command, or the documented override."""
-    override = environ.get(SERVE_COMMAND, "").strip()
-    if override:
-        return _override_argv(override)
+    """The argv the worker runs: the pinned vLLM command, built from the image's environment."""
     model = _required(environ, MODEL_VARIABLE)
     revision = _required(environ, REVISION_VARIABLE)
     served_model = _required(environ, SERVED_MODEL_VARIABLE)
@@ -93,20 +89,6 @@ def main(
     command = serve_argv(values)
     execvp(command[0], command)
     return 0
-
-
-def _override_argv(override: str) -> list[str]:
-    try:
-        payload = json.loads(override)
-    except ValueError as error:
-        raise ServerConfigurationError(
-            f"{SERVE_COMMAND} is not a JSON array of strings: {override!r} ({error})"
-        ) from error
-    if not isinstance(payload, list) or not payload or not all(
-        isinstance(token, str) and token for token in payload
-    ):
-        raise ServerConfigurationError(f"{SERVE_COMMAND} must be a non-empty JSON array of strings: {override!r}")
-    return list(payload)
 
 
 def _required(environ: Mapping[str, str], name: str) -> str:

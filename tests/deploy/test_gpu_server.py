@@ -1,9 +1,9 @@
 """The in-container launcher: one pinned upstream command, visible before it is executed.
 
 The launcher is the one assumption this offline slice cannot execute, so the tests pin everything that
-can be checked offline: the model, revision, served name, port, recipe flags and the documented override.
-The routes themselves (``/v1/models``, ``/v1/chat/completions``) are vLLM's, and the start command checks
-``/v1/models`` before it prints an endpoint.
+can be checked offline: the model, revision, served name, port and recipe flags of the one command the
+image runs. The routes themselves (``/v1/models``, ``/v1/chat/completions``) are vLLM's, and the start
+command checks ``/v1/models`` before it prints an endpoint.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from deploy.gpu.server import (
     MODEL_VARIABLE,
     PORT_VARIABLE,
     REVISION_VARIABLE,
-    SERVE_COMMAND,
     SERVED_MODEL_VARIABLE,
     ServerConfigurationError,
     main,
@@ -60,22 +59,6 @@ def test_the_command_can_be_inspected_without_launching_anything() -> None:
 
     assert launched == [], "printing the command must not start the model"
     assert json.loads(stream.getvalue()) == serve_argv(_environment())
-
-
-def test_a_documented_override_replaces_the_whole_command() -> None:
-    override = ["vllm", "serve", "PaddlePaddle/PaddleOCR-VL-1.6", "--port", "8118"]
-
-    argv = serve_argv(_environment(**{SERVE_COMMAND: json.dumps(override)}))
-
-    assert argv == override
-
-
-def test_a_malformed_override_names_the_variable() -> None:
-    with pytest.raises(ServerConfigurationError, match=SERVE_COMMAND):
-        serve_argv(_environment(**{SERVE_COMMAND: "vllm serve nope"}))
-
-    with pytest.raises(ServerConfigurationError, match=SERVE_COMMAND):
-        serve_argv(_environment(**{SERVE_COMMAND: json.dumps(["vllm", ""])}))
 
 
 @pytest.mark.parametrize("variable", [MODEL_VARIABLE, REVISION_VARIABLE, SERVED_MODEL_VARIABLE])

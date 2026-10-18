@@ -14,6 +14,13 @@ a TCP readiness probe and a lifetime cap. The Sandbox outlives the start process
 after readiness and `CommandGpuProvider` is not deadlocked. `deploy/modal/stop.py` reads the sandbox id
 from the lease file and calls `Sandbox.from_id(id).terminate()`.
 
+**One lease, one state file.** `CommandGpuProvider` mints an identity per lease and puts it in the
+environment of that lease's start and stop command as `FINEPDFS_GPU_LEASE_ID`; the scripts record the
+lease at `$FINEPDFS_GPU_STATE_DIR/<identity>.json`. Two runs therefore record two workers and each can
+only give back its own -- a single shared file used to make the second run refuse to start, and then its
+stop terminated the first run's live worker. A `start` you run by hand has no provider to mint an
+identity and records under `manual.json`, so `start` and then `stop` from one shell still meet.
+
 Why a Sandbox rather than a deployed app or function: the lease is per run, the SDK terminates it by
 id from another process, and there is no deployment left serving (and billing) between runs. A deployed
 app would need `modal deploy`, a function URL and a second lifecycle for concurrency; ADR-0009 gives the
@@ -26,7 +33,7 @@ same `command` provider. Nothing in the flow, engines or `PROVIDERS` changes.
 
 | Path | Role |
 | --- | --- |
-| `deploy/gpu/contract.py` | endpoint JSON, `/v1` validation, detail without a URL, atomic lease state, redaction |
+| `deploy/gpu/contract.py` | endpoint JSON, `/v1` validation, `model@version` detail without a URL, one atomic lease file per lease, redaction of credentials and addresses |
 | `deploy/gpu/server.py` | in-container launcher for the pinned vLLM OpenAI server (`/v1/models`, `/v1/chat/completions`) |
 | `deploy/modal/image.py` | pinned vLLM image + launcher entrypoint, weights revision and served name as env, HF cache volume path |
 | `deploy/modal/start.py` | creates one Sandbox, writes the lease, waits for `/v1/models`, prints one JSON object |
@@ -90,7 +97,7 @@ python -m deploy.gpu.server --print-command
 stderr only. Failure exits nonzero, which the provider reports as an operator problem (the CLI exits 2).
 
 ```bash
-export FINEPDFS_GPU_STATE_FILE="$PWD/.gpu-worker.json"
+export FINEPDFS_GPU_STATE_DIR="$PWD/.gpu-worker-leases"   # one file per lease, never committed
 
 # Worker check only: rent, print the endpoint, then give it back.
 ENDPOINT="$(python -m deploy.modal.start)"
@@ -102,14 +109,19 @@ python -m deploy.modal.stop
 python -m deploy.modal.stop        # second run must say there is nothing to stop
 ```
 
-`base_url` always ends at `/v1`; `detail` names the model, weights revision and image digest and never
-the address. `start` refuses to overwrite an existing lease: run `stop` first, so a previous worker is
-never orphaned. If a start fails after creating the worker, the id is already on disk and `stop` is the
-next command.
+A hand-run `start` has no lease identity and records `manual.json`; the matching `stop` reads the same
+file. `base_url` always ends at `/v1`; `detail` is `model@version:weights-<digest>:image-<digest>`, names
+the weights revision and image digest and never the address. `start` refuses to overwrite an existing
+lease: run `stop` first, so a previous worker is never orphaned. If a start fails after creating the
+worker, the id is already on disk and `stop` is the next command.
 
-Wire the provider for a pipeline run (commands are run from the repository root, and the same shell
-must run both commands because the lease file is the hand-off). The interpreter is the deploy
-environment, not the base `.venv`, because Modal is not a base dependency:
+The tunnel URL is the credential: both scripts mask any URL before they print it (the scheme stays, the
+host does not), so an error names what failed and never the address. The one place the address appears is the endpoint JSON on
+stdout, which the provider consumes -- keep it out of notes, issues and PRs.
+
+Wire the provider for a pipeline run. The provider runs both commands itself and gives each lease its
+own identity in their environment, so nothing shared has to be exported for the hand-off. The
+interpreter is the deploy environment, not the base `.venv`, because Modal is not a base dependency:
 
 ```bash
 export FINEPDFS_GPU_PROVIDER=command
@@ -121,7 +133,8 @@ export FINEPDFS_GPU_TYPE=L4                   # the GPU the approved rate was qu
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `FINEPDFS_GPU_STATE_FILE` | `~/.cache/finepdfs/gpu-worker.json` | where the one live lease is recorded; never committed |
+| `FINEPDFS_GPU_STATE_DIR` | `~/.cache/finepdfs/gpu-workers` | directory holding one state file per lease; never committed |
+| `FINEPDFS_GPU_LEASE_ID` | unset (`manual`) | the lease identity; the provider sets it and passes the same value to start and stop |
 | `FINEPDFS_GPU_TYPE` | `L4` | Modal GPU string; override only with an approved rate |
 | `FINEPDFS_GPU_READY_TIMEOUT` | `900` | seconds to wait for the readiness probe |
 | `FINEPDFS_GPU_WORKER_LIFETIME` | `3600` | Sandbox maximum age, the leak backstop |
@@ -197,14 +210,23 @@ incrementality and a released lease together.
 Run these after every attempt, including a failed start, a failed readiness wait and a failed run:
 
 ```bash
-python -m deploy.modal.stop
-test ! -e "${FINEPDFS_GPU_STATE_FILE:-$HOME/.cache/finepdfs/gpu-worker.json}" && echo "lease cleared"
+python -m deploy.modal.stop                                  # the lease this shell names, if any
+ls "${FINEPDFS_GPU_STATE_DIR:-$HOME/.cache/finepdfs/gpu-workers}"   # any file left is a worker to check
 modal container list          # no finepdfs worker should remain; copy any leftover id
 modal app list                # finepdfs-gpu-worker may remain as an empty app record (it is free)
 ```
 
+A provider run passes its own `FINEPDFS_GPU_LEASE_ID`, so its stop command is the one that clears its
+file; this plain `stop` only handles the `manual` lease this shell started (or nothing). For a lease file
+a crash left behind, name it from its file name:
+
+```bash
+lease_file="$HOME/.cache/finepdfs/gpu-workers/0123abcd.json"   # the file the check above listed
+FINEPDFS_GPU_LEASE_ID="$(basename "$lease_file" .json)" python -m deploy.modal.stop
+```
+
 If a worker remains because stop could not run, the last resort is the operator killing that exact
-container id; the lifetime cap is the automatic backstop. Do not delete the lease file by hand while a
+container id; the lifetime cap is the automatic backstop. Do not delete a lease file by hand while a
 worker may exist: it is the only recorded handle on it.
 
 ## Assumptions this offline slice did not execute
@@ -214,8 +236,8 @@ worker may exist: it is the only recorded handle on it.
   --host 0.0.0.0 --port 8000 --trust-remote-code --max-num-batched-tokens 16384
   --no-enable-prefix-caching --mm-processor-cache-gb 0`. The vLLM recipe requires vLLM >= 0.11.1 and
   this slice pins `vllm/vllm-openai:v0.32.0` by tag and amd64 manifest digest; the pair was not run.
-  One env var, `PADDLEOCR_VL_SERVE_COMMAND` (a JSON argv array), replaces the whole command if the
-  upstream surface differs.
+  There is deliberately no command override: if the upstream surface differs, this file and its test
+  change, so the served command stays pinned and inspectable.
 * **The routes.** `/v1/models` and `/v1/chat/completions` are vLLM's OpenAI surface. The start command
   checks `/v1/models`; the engine calls `/v1/chat/completions` with the page image and prompt `OCR:`.
 * **The served-model name.** The pipeline must be configured with

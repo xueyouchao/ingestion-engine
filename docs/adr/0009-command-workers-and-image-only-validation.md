@@ -4,19 +4,21 @@ Date: 2026-10-18
 
 ## Status
 
-Accepted. This fixes the worker shape and the acceptance gate before implementation; the worker itself
-is still to be built.
+Accepted. The worker exists as the offline command scripts under `deploy/`: a pinned Modal image, a
+start and a stop script, a per-lease state file, and the contract tests behind them. **No real GPU run
+has happened.** The validation gates below are still open, and nothing here is measured evidence.
 
 ## Context
 
 ADR-0007 already put the rented GPU behind a provider port. The seam exists and is tested: `none`,
 `static` and `command` providers, a `GpuEndpoint` that separates the address from the memo identity, and
-a lease that wraps the whole CocoIndex update. What does not exist is a real worker to put behind it.
+a lease that wraps the whole CocoIndex update. What did not exist is a real worker to put behind it.
 
 The deferred worker ticket asks for a Modal app and a RunPod app that serve an OCR engine and print
 their endpoint as one JSON object, wired through `FINEPDFS_GPU_START_COMMAND` /
 `FINEPDFS_GPU_STOP_COMMAND`, with a stable model-and-version identity and a released lease. It is blocked
-on a GPU account and on choosing which engine to serve.
+on a GPU account and on choosing which engine to serve. The Modal half is now implemented offline (see
+Decision); the RunPod half remains deferred.
 
 Three implementation shapes are available:
 
@@ -65,6 +67,27 @@ error handling.
 The start command must detach. `CommandGpuProvider` runs it synchronously and waits for it to exit before
 using the endpoint; a start command that stays in the foreground would deadlock the lease.
 
+### One lease, one worker, one state file
+
+The lease state is per lease, not per machine. `CommandGpuProvider` mints an identity for each lease,
+passes it in the environment to that lease's start *and* stop command, and the scripts record it at
+`$FINEPDFS_GPU_STATE_DIR/<identity>.json` (default `~/.cache/finepdfs/gpu-workers`). A single shared
+file broke ADR-0007's per-run lease in the two ways a shared file always does: a second run refused to
+start, and then its unconditional stop terminated the first run's live worker and cleared the first
+run's lease. An identity the provider chooses, rather than a path an operator must remember to set, is
+what makes two concurrent runs independent. A start run by hand has no provider to mint one and records
+under the fixed `manual` name, so `start` then `stop` from one shell still meet.
+
+### The Modal unit is a detached Sandbox, not a deployed app
+
+A Modal lease is **one detached `modal.Sandbox`** created per run from the pinned image, with a GPU, an
+encrypted tunnel on the worker port, a TCP readiness probe and a lifetime cap. It outlives the start
+process, so the provider is not deadlocked, and it is terminated by id from the stop process. `modal
+deploy` was rejected: a deployed app or function leaves a URL and its own lifecycle serving (and
+billing) between runs, adds deployment state this design has nowhere to record, and gives concurrency a
+second meaning — two runs would share one deployment instead of renting two workers. The lifetime cap
+is the automatic backstop if stop never runs, and the runbook's teardown check is the human one.
+
 The JSON contract is:
 
 ```json
@@ -74,9 +97,12 @@ The JSON contract is:
 `base_url` is the ephemeral OpenAI-compatible base URL and **must include `/v1`**. `ChatEndpoint` appends
 only `/chat/completions`, so returning a bare host would send OCR requests to the wrong route; the worker
 must serve both `/v1/chat/completions` and `/v1/models`. `detail` is the deployment half of the Engine
-Identity and must name the model and its version — weights and/or image digest — and never the URL.
-Credentials come from the environment and are never committed. The start script writes nothing secret to
-stdout or logs.
+Identity, and the contract now *enforces* its shape: one token, `model@version[:attribute...]`, so a
+detail that names no model or no version is refused where it is produced instead of entering a memo key
+that silently means nothing. It carries the weights revision and image digest and never the URL.
+Credentials come from the environment and are never committed. The start script writes nothing secret
+to stdout or logs, and both scripts mask any URL before printing an error: the leased
+tunnel URL is itself the credential, so a diagnostic may name the failure and not the address.
 
 No new port is introduced. `GpuProvider` remains the port and `CommandGpuProvider` remains the adapter.
 If a native adapter is later justified, it is one entry in the existing `PROVIDERS` registration point,
@@ -99,7 +125,7 @@ The acceptance evidence is ordered from cheapest to most expensive:
 
 | Gate | Evidence | What it proves |
 |---|---|---|
-| Contract | Fake start/stop commands; one JSON object; start detaches; ID saved before readiness; stop runs on success, readiness failure and failure | The lease and provider contract, without a GPU |
+| Contract | Fake start/stop commands; one JSON object; start detaches; ID saved before readiness; stop runs on success, readiness failure and failure; two leases cannot stop each other's worker | The lease and provider contract, without a GPU |
 | Worker | Modal health/`/v1/models`; one real image-only page | The worker actually serves PaddleOCR-VL |
 | Page mapping | The genuine 1-page and 2-page AOML scans | OCR runs, pages survive, original numbering is preserved |
 | Incremental run | Full pinned NOAA corpus cold, then the same command with a new lease | The second run makes 0 extraction calls and reuses everything |
@@ -131,6 +157,9 @@ each run.
 
 ## Consequences
 
+* The lease state is one file per lease, named by an identity the provider mints and gives to both
+  commands. Two concurrent runs record two workers and can only give back their own; no shared path is
+  configured, so no operator mistake can make them collide again.
 * The base install stays model-free and vendor-free. Modal and RunPod dependencies live in the deploy
   environment; nothing in `domain/`, `application/`, the flow or the engines imports either vendor.
 * RunPod later is either a second pair of start/stop scripts implementing the same stdout contract, or,
