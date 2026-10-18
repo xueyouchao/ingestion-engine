@@ -30,7 +30,7 @@ from finepdfs.infrastructure.compute.providers import (
     UnknownGpuProvider,
     leased_environment,
 )
-from finepdfs.infrastructure.corpus.fetch import fetch_corpus
+from finepdfs.infrastructure.corpus.fetch import fetch_corpus, restore_corpus
 from finepdfs.infrastructure.corpus.index import CorpusIndex
 from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifest
 from finepdfs.infrastructure.engines.registry import KNOWN_ENGINES
@@ -71,6 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--crawl", default=None, help="crawl id; default is the newest full crawl")
     fetch.add_argument("--limit", type=int, default=25, help="how many index records to ask for")
     fetch.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
+
+    restore = commands.add_parser("restore-corpus", help="restore the exact PDFs a pinned manifest names")
+    restore.add_argument("--manifest", type=Path, required=True, help="pinned manifest to replay")
+    restore.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
 
     inspect = commands.add_parser("inspect", help="summarise a corpus directory")
     inspect.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
@@ -166,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
 def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "fetch-corpus":
         return _fetch_corpus(args)
+    if args.command == "restore-corpus":
+        return _restore_corpus(args)
     if args.command == "inspect":
         return _inspect(args)
     if args.command == "dry-run":
@@ -188,6 +194,23 @@ def _fetch_corpus(args: argparse.Namespace) -> int:
     for failure in report.failures[:5]:
         print(f"  failed: {failure.url} ({failure.reason})")
     return 1 if report.fetched == 0 and report.failed else 0
+
+
+def _restore_corpus(args: argparse.Namespace) -> int:
+    """Replay a committed manifest; a pinned record that cannot be restored is a visible failure."""
+    corpus_dir = _runtime_from_args(args).corpus_dir
+    pinned = CorpusManifest.load(args.manifest)
+    if not pinned.entries:
+        print(f"no pinned manifest at {args.manifest} (or it lists no entries)", file=sys.stderr)
+        return 2
+
+    print(f"restoring {len(pinned.entries)} pinned PDFs from {pinned.crawl_id} into {corpus_dir}")
+    report = restore_corpus(CommonCrawlSource(), pinned, corpus_dir)
+
+    print(report.summary())
+    for failure in report.failures:
+        print(f"  failed: {failure.url} ({failure.reason})")
+    return 1 if report.failed else 0
 
 
 def _inspect(args: argparse.Namespace) -> int:

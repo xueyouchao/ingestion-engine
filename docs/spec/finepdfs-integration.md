@@ -193,9 +193,11 @@ genuinely corpus-level, is JSONL under `out/dedupe/`.
 **Corpus on disk.** The corpus is a real directory of PDF files named by content digest, plus a
 manifest JSON. Fetching is a separate, resumable CLI step, so processing never depends on the network.
 
-**CLI.** fetch-corpus, inspect, dry-run, run. `dry-run` curates the corpus in process and prints
-a table of what would happen without writing anything, which is the fastest way to see routing decisions
-on real documents. The CocoIndex application is also runnable directly through `cocoindex update main.py`.
+**CLI.** fetch-corpus, restore-corpus, inspect, dry-run, run. `fetch-corpus` asks the index for a
+crawl's PDFs; `restore-corpus` replays a committed manifest and verifies every pinned digest instead of
+querying the latest crawl. `dry-run` curates the corpus in process and prints a table of what would
+happen without writing anything, which is the fastest way to see routing decisions on real documents.
+The CocoIndex application is also runnable directly through `cocoindex update main.py`.
 
 *Amended during implementation.* The remote engines were originally reached only at a `--base-url` an
 operator supplied by hand. A rented GPU answers on a new host every run, and the memo key is the engine

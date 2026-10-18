@@ -9,8 +9,13 @@ import hashlib
 
 from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
 from finepdfs.infrastructure.corpus import fetch as fetch_module
-from finepdfs.infrastructure.corpus.fetch import fetch_corpus
-from finepdfs.infrastructure.corpus.manifest import CorpusManifest
+from finepdfs.infrastructure.corpus.fetch import fetch_corpus, restore_corpus
+from finepdfs.infrastructure.corpus.index import CorpusIndex
+from finepdfs.infrastructure.corpus.manifest import (
+    CorpusEntry,
+    CorpusManifest,
+    relative_pdf_path,
+)
 
 PDF_ONE = b"%PDF-1.7 first document"
 PDF_TWO = b"%PDF-1.7 second document"
@@ -24,8 +29,10 @@ class FakeCrawlSource:
         self._payloads = dict(payloads)
         self._failing = set(failing_urls)
         self.fetch_calls = []
+        self.list_calls = []
 
     def list_records(self, query):
+        self.list_calls.append(query)
         return list(self._records)
 
     def fetch(self, record):
@@ -148,6 +155,112 @@ def test_a_pdf_deleted_from_disk_is_fetched_again(tmp_path):
 
     assert report.fetched == 1 and report.skipped == 0
     assert len(list((tmp_path / "pdfs").iterdir())) == 1
+
+
+def _pinned_entry(url: str, payload: bytes, offset: int = 100) -> CorpusEntry:
+    digest = hashlib.sha256(payload).hexdigest()
+    return CorpusEntry(
+        url=url,
+        digest=digest,
+        file=relative_pdf_path(digest),
+        bytes=len(payload),
+        crawl_id="CC-MAIN-2026-39",
+        warc_filename="crawl-data/CC-MAIN-2026-39/segments/x/warc/y.warc.gz",
+        offset=offset,
+        length=len(payload),
+    )
+
+
+def test_restore_replays_the_pinned_manifest_without_querying_the_index(tmp_path):
+    stale = _pinned_entry("https://old.example/stale.pdf", b"%PDF-1.7 stale")
+    CorpusManifest(crawl_id="CC-MAIN-2025-01", domain="old.example", entries=[stale]).save(tmp_path / "manifest.json")
+    pinned = CorpusManifest(
+        crawl_id="CC-MAIN-2026-39",
+        domain="a.example",
+        entries=[
+            _pinned_entry("https://a.example/one.pdf", PDF_ONE),
+            _pinned_entry("https://a.example/two.pdf", PDF_TWO, offset=900),
+        ],
+    )
+    source = FakeCrawlSource(
+        [],
+        {"https://a.example/one.pdf": PDF_ONE, "https://a.example/two.pdf": PDF_TWO},
+    )
+
+    report = restore_corpus(source, pinned, corpus_dir=tmp_path)
+
+    assert report.records_seen == 2 and report.fetched == 2 and report.skipped == 0 and report.failed == 0
+    assert source.list_calls == [], "restoration must replay the manifest, not ask the index for the latest crawl"
+    assert source.fetch_calls == ["https://a.example/one.pdf", "https://a.example/two.pdf"]
+    manifest = CorpusManifest.load(tmp_path / "manifest.json")
+    assert manifest == pinned
+    for entry in pinned.entries:
+        assert (tmp_path / entry.file).read_bytes() in (PDF_ONE, PDF_TWO)
+
+
+def test_a_second_restore_verifies_local_bytes_and_fetches_nothing(tmp_path):
+    pinned = CorpusManifest(
+        crawl_id="CC-MAIN-2026-39",
+        domain="a.example",
+        entries=[_pinned_entry("https://a.example/one.pdf", PDF_ONE)],
+    )
+    source = FakeCrawlSource([], {"https://a.example/one.pdf": PDF_ONE})
+    restore_corpus(source, pinned, corpus_dir=tmp_path)
+
+    second = restore_corpus(source, pinned, corpus_dir=tmp_path)
+
+    assert second.fetched == 0 and second.skipped == 1 and second.failed == 0
+    assert source.fetch_calls == ["https://a.example/one.pdf"]
+
+
+def test_restore_refetches_local_bytes_that_do_not_match_the_pinned_digest(tmp_path):
+    pinned = CorpusManifest(
+        crawl_id="CC-MAIN-2026-39",
+        domain="a.example",
+        entries=[_pinned_entry("https://a.example/one.pdf", PDF_ONE)],
+    )
+    source = FakeCrawlSource([], {"https://a.example/one.pdf": PDF_ONE})
+    restore_corpus(source, pinned, corpus_dir=tmp_path)
+    (tmp_path / pinned.entries[0].file).write_bytes(PDF_TWO)
+
+    report = restore_corpus(source, pinned, corpus_dir=tmp_path)
+
+    assert report.fetched == 1 and report.skipped == 0 and report.failed == 0
+    assert (tmp_path / pinned.entries[0].file).read_bytes() == PDF_ONE
+
+
+def test_restore_fails_a_payload_that_does_not_match_the_pinned_digest(tmp_path):
+    pinned = CorpusManifest(
+        crawl_id="CC-MAIN-2026-39",
+        domain="a.example",
+        entries=[_pinned_entry("https://a.example/one.pdf", PDF_ONE)],
+    )
+    source = FakeCrawlSource([], {"https://a.example/one.pdf": PDF_TWO})
+
+    report = restore_corpus(source, pinned, corpus_dir=tmp_path)
+
+    assert report.fetched == 0 and report.failed == 1
+    assert "pinned" in report.failures[0].reason
+    assert not (tmp_path / pinned.entries[0].file).exists(), "bytes that are not the pinned Document are not stored"
+
+
+def test_a_missing_remote_record_stays_declared_instead_of_becoming_a_source_deletion(tmp_path):
+    """An unavailable URL is that record's failure, not permission to drop it from the target state."""
+    one = "https://a.example/one.pdf"
+    gone = "https://a.example/gone.pdf"
+    pinned = CorpusManifest(
+        crawl_id="CC-MAIN-2026-39",
+        domain="a.example",
+        entries=[_pinned_entry(one, PDF_ONE), _pinned_entry(gone, PDF_TWO, offset=900)],
+    )
+    source = FakeCrawlSource([], {one: PDF_ONE}, failing_urls={gone})
+
+    report = restore_corpus(source, pinned, corpus_dir=tmp_path)
+
+    assert report.fetched == 1 and report.failed == 1
+    assert gone in report.failures[0].url
+    assert CorpusManifest.load(tmp_path / "manifest.json").urls == {one, gone}
+    assert {document.url for document in CorpusIndex(tmp_path).documents()} == {one, gone}
 
 
 def test_a_disk_that_fills_up_is_one_record_s_problem(tmp_path, monkeypatch):
