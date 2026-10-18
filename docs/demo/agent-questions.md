@@ -4,12 +4,19 @@ The agent test set for the P3 stage. Each answerable question names the accepted
 the sixth question has no supporting page in the Corpus and must produce an explicit
 insufficient-evidence answer rather than a citation.
 
-These questions were run with the local `qwen3:1.7b` model through `finepdfs ask` against a local replay
-of the pinned `CC-MAIN-2026-39` manifest. That run used the `pymupdf` text layer only, so it published
-15 Documents / 310 page records / 590 chunks and dropped the two image-only scans (no embedded text);
-the Docling run measured in [`pdf-demo-runbook.md`](pdf-demo-runbook.md) publishes 17 Documents / 313
-pages. The agent evidence in [`agent-evidence.md`](agent-evidence.md) is therefore text-layer evidence,
-not OCR evidence, and the questions below avoid the scans on purpose.
+These questions were run with `deepseek-v4.1-flash:cloud` over the local Ollama OpenAI-compatible
+endpoint through `finepdfs ask`, against a local replay of the pinned `CC-MAIN-2026-39` manifest. That
+run used the `pymupdf` text layer only, so it published 15 Documents / 310 page records / 590 chunks and
+dropped the two image-only scans (no embedded text); the Docling run measured in
+[`pdf-demo-runbook.md`](pdf-demo-runbook.md) publishes 17 Documents / 313 pages. The agent evidence in
+[`agent-evidence.md`](agent-evidence.md) is therefore text-layer evidence, not OCR evidence, and the
+questions below avoid the scans on purpose.
+
+Each answerable question must end with a structured citation naming a page `read_pdf_page` returned;
+the six answers below passed twice each with exactly the supporting page listed in the table. The
+unanswerable question must end with `INSUFFICIENT EVIDENCE` and no citation. Model-quality failures are
+not edited into a pass: the earlier `qwen3:1.7b` run missed on questions 1, 3 and 4, and that run is
+recorded in [`agent-evidence.md`](agent-evidence.md).
 
 `doc_id` is the Source Identity: the first 16 hex digits of the SHA-256 of the source URL. Page numbers
 are original 1-based PDF pages, read from the declared page exports, never reconstructed from Markdown.

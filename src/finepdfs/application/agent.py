@@ -10,8 +10,15 @@ Two tools, both reading the same record contract a citation names:
 The loop is deliberately not a framework: it speaks the OpenAI-compatible chat-completions message
 shape, caps tool executions (six by default), and reports every call and result. A chat model is
 injected, so a fake can drive the loop in tests and an HTTP transport can drive it in the CLI without
-changing this module. An answer may only cite pages a tool actually returned: citations in the model's
-text are filtered against that evidence set, so a fabricated document or page cannot become a citation.
+changing this module.
+
+The citation contract is enforced, not requested. A final answer may cite only pages whose exact text
+``read_pdf_page`` returned: a citation for any other page is stripped from the answer, a search snippet
+does not make a page citable, and a page number written in prose ("page 37") is not a citation at all.
+When no verified citation is left the loop makes one bounded repair turn asking the model to read the
+supporting page, and if that does not produce a verified citation the answer becomes an explicit
+insufficient-evidence reply. A contradictory insufficient-evidence tail after a supported answer is
+dropped. The tool-call budget and the visible trace are unchanged.
 """
 
 from __future__ import annotations
@@ -96,6 +103,9 @@ _CITATION = re.compile(
 # Some models drop the doc_id but keep the tag. A page-only tag is resolved only when the evidence the
 # tools returned names that page for exactly one document; otherwise it is not a citation.
 _PAGE_ONLY_CITATION = re.compile(r"<doc_id>\s*(?:p\.|page\s+)\s*(\d+)\s*</doc_id>", re.IGNORECASE)
+# A model that answers and then contradicts itself ends with this marker on its own line; it is a tail
+# to drop, not a second answer.
+_INSUFFICIENT_LINE = re.compile(r"^[\s>*_#-]*INSUFFICIENT EVIDENCE\b.*$", re.IGNORECASE | re.MULTILINE)
 
 
 class ChatModel(Protocol):
@@ -259,6 +269,7 @@ def run_agent(
     trace: list[ToolCall] = []
     used = 0
     budget_exhausted = False
+    repaired = False
     answer = ""
 
     while True:
@@ -266,7 +277,11 @@ def run_agent(
         messages.append(message)
         calls = message.get("tool_calls") or []
         if not calls:
-            answer = _content_text(message.get("content"))
+            answer = _content_text(message.get("content")).strip()
+            if not repaired and used < max_tool_calls and _needs_repair(answer, trace):
+                repaired = True
+                messages.append({"role": "user", "content": _REPAIR_PROMPT})
+                continue
             break
 
         skipped = 0
@@ -304,9 +319,7 @@ def run_agent(
         if not answer:
             answer = "INSUFFICIENT EVIDENCE: the agent returned no answer within the tool budget."
 
-    answer = answer.strip()
-    insufficient = _claims_insufficient(answer)
-    citations = () if insufficient else _citations(answer, trace)
+    answer, insufficient, citations = _finalise(answer, trace)
     return AgentAnswer(
         question=question.strip(),
         answer=answer,
@@ -330,7 +343,8 @@ def _system_prompt(max_tool_calls: int) -> str:
         "Cite every factual claim in plain text as [<doc_id> p.<page_number>], for example "
         "[9bf665589f7333a8 p.8]. Use the exact doc_id string a tool returned; never abbreviate it and "
         "never wrap a citation in any other tag. Cite only a page that read_pdf_page returned as "
-        "accepted: a search snippet locates a page but does not verify what that page says.\n"
+        "accepted: a search snippet locates a page but does not verify what that page says. A page "
+        "number written in prose, such as 'page 37', is not a citation and will not be accepted.\n"
         "Never invent a document, page, quotation or URL.\n"
         "If the tools do not contain the answer, reply exactly 'INSUFFICIENT EVIDENCE: <what is "
         "missing>' and cite nothing."
@@ -340,7 +354,20 @@ def _system_prompt(max_tool_calls: int) -> str:
 _BUDGET_PROMPT = (
     "The tool budget is exhausted. Answer now from the evidence already returned, citing each claim "
     "as [<doc_id> p.<page_number>] in plain text, or reply exactly 'INSUFFICIENT EVIDENCE: <what is "
-    "missing>'. Do not request another tool and do not wrap citations in other tags."
+    "missing>'. Do not request another tool and do not wrap citations in other tags. Cite only a page "
+    "read_pdf_page returned; if no returned page supports the claim, reply INSUFFICIENT EVIDENCE."
+)
+
+_REPAIR_PROMPT = (
+    "Your answer is not backed by a page you read, so it cannot stand. Call read_pdf_page with the "
+    "doc_id and page_number of the page that supports the claim, then answer again citing it as "
+    "[<doc_id> p.<page_number>]. A page number written in prose is not a citation. If no page already "
+    "returned by the tools supports the claim, reply exactly 'INSUFFICIENT EVIDENCE: <what is missing>'."
+)
+
+_INSUFFICIENT_FALLBACK = (
+    "INSUFFICIENT EVIDENCE: no page that read_pdf_page returned supports this answer. "
+    "A search snippet, a prose page number or an unread page is not a verified citation."
 )
 
 
@@ -418,49 +445,117 @@ def _claims_insufficient(answer: str) -> bool:
     return answer.lstrip("*_# ").upper().startswith("INSUFFICIENT EVIDENCE")
 
 
-def _citations(answer: str, trace: Sequence[ToolCall]) -> tuple[Citation, ...]:
-    evidence: dict[tuple[str, int], Citation] = {}
+def _needs_repair(answer: str, trace: Sequence[ToolCall]) -> bool:
+    """Whether the answer cites something the tools did not verify and a repair turn could fix.
+
+    Two shapes need it: a claim with no verified citation at all (prose "page 37", a snippet-only
+    citation), and a verified answer that also carries a citation for a page nobody read.
+    """
+    if _claims_insufficient(answer):
+        return False
+    text, citations = _only_verified_citations(answer, _verified_evidence(trace))
+    return not citations or text != answer
+
+
+def _finalise(answer: str, trace: Sequence[ToolCall]) -> tuple[str, bool, tuple[Citation, ...]]:
+    """Apply the citation contract: verified pages only, no contradictory tail, else insufficient."""
+    answer = answer.strip()
+    if _claims_insufficient(answer):
+        return _without_citations(answer), True, ()
+    answer = _strip_insufficient_tail(answer)
+    if not answer:
+        return _INSUFFICIENT_FALLBACK, True, ()
+    verified = _verified_evidence(trace)
+    stripped, citations = _only_verified_citations(answer, verified)
+    if not citations:
+        return _INSUFFICIENT_FALLBACK, True, ()
+    return stripped, False, citations
+
+
+def _verified_evidence(trace: Sequence[ToolCall]) -> dict[tuple[str, int], Citation]:
+    """The pages ``read_pdf_page`` returned as accepted; the only pages an answer may cite."""
+    chunk_ids: dict[tuple[str, int], str] = {}
+    for outcome in trace:
+        for hit in outcome.result.get("hits") or []:
+            if isinstance(hit, dict) and hit.get("chunk_id"):
+                chunk_ids.setdefault(
+                    (str(hit.get("doc_id")), int(hit.get("page_number", 0))), str(hit["chunk_id"])
+                )
+    verified: dict[tuple[str, int], Citation] = {}
     for outcome in trace:
         result = outcome.result
-        for hit in result.get("hits") or []:
-            if not isinstance(hit, dict):
-                continue
-            key = (str(hit.get("doc_id")), int(hit.get("page_number", 0)))
-            evidence.setdefault(
-                key,
-                Citation(
-                    doc_id=key[0],
-                    page_number=key[1],
-                    source_url=str(hit.get("source_url", "")),
-                    chunk_id=hit.get("chunk_id"),
-                ),
-            )
-        if result.get("status") == "accepted":
-            key = (str(result.get("doc_id")), int(result.get("page_number", 0)))
-            previous = evidence.get(key)
-            evidence[key] = Citation(
-                doc_id=key[0],
-                page_number=key[1],
-                source_url=str(result.get("source_url", "")),
-                chunk_id=previous.chunk_id if previous is not None else None,
-                verified=True,
-            )
+        if result.get("status") != "accepted":
+            continue
+        key = (str(result.get("doc_id")), int(result.get("page_number", 0)))
+        verified[key] = Citation(
+            doc_id=key[0],
+            page_number=key[1],
+            source_url=str(result.get("source_url", "")),
+            chunk_id=chunk_ids.get(key),
+            verified=True,
+        )
+    return verified
+
+
+def _only_verified_citations(
+    answer: str, verified: dict[tuple[str, int], Citation]
+) -> tuple[str, tuple[Citation, ...]]:
+    """Remove every citation whose page was not read, and return the ones that were.
+
+    A page-only tag is resolved only when the exact page was read for exactly one document; prose such
+    as "page 37" is left in the text but is not a citation, so an answer resting on it has none.
+    """
     found: list[Citation] = []
     seen: set[tuple[str, int]] = set()
+    spans: list[tuple[int, int]] = []
     for match in _CITATION.finditer(answer):
         key = (match.group(1).lower(), int(match.group(2)))
-        if key in seen or key not in evidence:
+        if key in verified:
+            if key not in seen:
+                seen.add(key)
+                found.append(verified[key])
             continue
-        seen.add(key)
-        found.append(evidence[key])
-    evidence_by_page: dict[int, list[tuple[str, int]]] = {}
-    for key in evidence:
-        evidence_by_page.setdefault(key[1], []).append(key)
+        spans.append(_span_with_brackets(answer, match.start(), match.end()))
+    by_page: dict[int, list[tuple[str, int]]] = {}
+    for key in verified:
+        by_page.setdefault(key[1], []).append(key)
     for match in _PAGE_ONLY_CITATION.finditer(answer):
-        page_number = int(match.group(1))
-        candidates = evidence_by_page.get(page_number, [])
-        if len(candidates) != 1 or candidates[0] in seen:
+        candidates = by_page.get(int(match.group(1)), [])
+        if len(candidates) == 1:
+            if candidates[0] not in seen:
+                seen.add(candidates[0])
+                found.append(verified[candidates[0]])
             continue
-        seen.add(candidates[0])
-        found.append(evidence[candidates[0]])
-    return tuple(found)
+        spans.append((match.start(), match.end()))
+    if not spans:
+        return answer, tuple(found)
+    for start, end in sorted(spans, reverse=True):
+        answer = answer[:start] + answer[end:]
+    answer = re.sub(r"[ \t]{2,}", " ", answer)
+    answer = re.sub(r"\s+([.,;:!?])", r"\1", answer)
+    answer = re.sub(r"\[\s*\]|\(\s*\)", "", answer)
+    return answer.strip(), tuple(found)
+
+
+def _without_citations(answer: str) -> str:
+    """An insufficient-evidence reply cites nothing, so every marker is removed from it."""
+    answer = _CITATION.sub("", answer)
+    answer = _PAGE_ONLY_CITATION.sub("", answer)
+    answer = re.sub(r"\[\s*\]|\(\s*\)", "", answer)
+    answer = re.sub(r"[ \t]{2,}", " ", answer)
+    return re.sub(r"\s+([.,;:!?])", r"\1", answer).strip()
+
+
+def _span_with_brackets(text: str, start: int, end: int) -> tuple[int, int]:
+    """Widen a citation match to the brackets or parentheses that only wrap it."""
+    if start > 0 and end < len(text) and (text[start - 1], text[end]) in {("[", "]"), ("(", ")")}:
+        return start - 1, end + 1
+    return start, end
+
+
+def _strip_insufficient_tail(answer: str) -> str:
+    """Drop a contradictory ``INSUFFICIENT EVIDENCE`` segment after an already supported answer."""
+    marker = _INSUFFICIENT_LINE.search(answer)
+    if marker is None or marker.start() == 0:
+        return answer
+    return answer[: marker.start()].rstrip()
