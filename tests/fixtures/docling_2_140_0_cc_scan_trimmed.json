@@ -1,0 +1,129 @@
+{
+  "_provenance": "Trimmed recording of Docling 2.140.0 `convert --to json` output for the genuine image-only CC-MAIN-2026-39 scan b5f7ac05c298f1a0db0fff96325b0ab51fb5050de0b03f65001c2c2a3a20265f (2 pages, zero native characters). Only the page, provenance, reading-order and table-cell shapes needed by the adapter test are kept; strings are the tool's actual output. This is a mapping fixture, not evidence of OCR quality.",
+  "schema_name": "DoclingDocument",
+  "version": "1.10.0",
+  "name": "b5f7ac05c298f1a0db0fff96325b0ab51fb5050de0b03f65001c2c2a3a20265f",
+  "origin": {
+    "mimetype": "application/pdf",
+    "filename": "b5f7ac05c298f1a0db0fff96325b0ab51fb5050de0b03f65001c2c2a3a20265f.pdf"
+  },
+  "pages": {
+    "1": {"size": {"width": 612.0, "height": 792.0}},
+    "2": {"size": {"width": 612.0, "height": 792.0}}
+  },
+  "body": {
+    "self_ref": "#/body",
+    "children": [
+      {"$ref": "#/texts/0"},
+      {"$ref": "#/groups/0"},
+      {"$ref": "#/texts/4"},
+      {"$ref": "#/tables/0"}
+    ],
+    "content_layer": "body",
+    "name": "_root_",
+    "label": "unspecified"
+  },
+  "groups": [
+    {
+      "self_ref": "#/groups/0",
+      "children": [
+        {"$ref": "#/texts/1"},
+        {"$ref": "#/texts/2"},
+        {"$ref": "#/pictures/0"}
+      ],
+      "name": "group",
+      "label": "unspecified"
+    }
+  ],
+  "texts": [
+    {
+      "self_ref": "#/texts/0",
+      "children": [],
+      "label": "section_header",
+      "prov": [{"page_no": 1, "bbox": {"l": 72.0, "t": 700.0, "r": 180.0, "b": 688.0, "coord_origin": "BOTTOMLEFT"}, "charspan": [0, 9]}],
+      "orig": "Flight ID",
+      "text": "Flight ID"
+    },
+    {
+      "self_ref": "#/texts/1",
+      "children": [],
+      "label": "section_header",
+      "prov": [{"page_no": 1, "bbox": {"l": 72.0, "t": 640.0, "r": 170.0, "b": 628.0, "coord_origin": "BOTTOMLEFT"}, "charspan": [0, 11]}],
+      "orig": "Post flight",
+      "text": "Post flight"
+    },
+    {
+      "self_ref": "#/texts/2",
+      "children": [],
+      "label": "text",
+      "prov": [{"page_no": 1, "bbox": {"l": 72.0, "t": 620.0, "r": 540.0, "b": 608.0, "coord_origin": "BOTTOMLEFT"}, "charspan": [0, 100]}],
+      "orig": "[Note: all data removed from the aircraft by HRD personnel should be cleared with the AOC flight director:]",
+      "text": "[Note: all data removed from the aircraft by HRD personnel should be cleared with the AOC flight director:]"
+    },
+    {
+      "self_ref": "#/texts/3",
+      "children": [],
+      "label": "text",
+      "prov": [{"page_no": 1, "bbox": {"l": 470.0, "t": 260.0, "r": 510.0, "b": 248.0, "coord_origin": "BOTTOMLEFT"}, "charspan": [0, 6]}],
+      "orig": "Murilk",
+      "text": "Murilk"
+    },
+    {
+      "self_ref": "#/texts/4",
+      "children": [],
+      "label": "section_header",
+      "prov": [{"page_no": 2, "bbox": {"l": 180.0, "t": 720.0, "r": 520.0, "b": 708.0, "coord_origin": "BOTTOMLEFT"}, "charspan": [0, 52]}],
+      "orig": "GPS Dropwindsonde Scientist Log (Revised 5/2002}",
+      "text": "GPS Dropwindsonde Scientist Log (Revised 5/2002}"
+    },
+    {
+      "self_ref": "#/texts/5",
+      "children": [],
+      "label": "page_header",
+      "prov": [{"page_no": 2, "bbox": {"l": 72.0, "t": 760.0, "r": 160.0, "b": 748.0, "coord_origin": "BOTTOMLEFT"}, "charspan": [0, 12]}],
+      "orig": "WxwxA Dannyl",
+      "text": "WxwxA Dannyl"
+    }
+  ],
+  "pictures": [
+    {
+      "self_ref": "#/pictures/0",
+      "children": [{"$ref": "#/texts/3"}],
+      "label": "picture",
+      "prov": [{"page_no": 1, "bbox": {"l": 460.0, "t": 270.0, "r": 520.0, "b": 240.0, "coord_origin": "BOTTOMLEFT"}, "charspan": [0, 0]}]
+    }
+  ],
+  "tables": [
+    {
+      "self_ref": "#/tables/0",
+      "children": [],
+      "label": "table",
+      "prov": [{"page_no": 2, "bbox": {"l": 70.0, "t": 660.0, "r": 540.0, "b": 200.0, "coord_origin": "BOTTOMLEFT"}, "charspan": [0, 0]}],
+      "data": {
+        "table_cells": [
+          {"text": "Sonde", "start_row_offset_idx": 0, "start_col_offset_idx": 1},
+          {"text": "Tle (JTC)", "start_row_offset_idx": 0, "start_col_offset_idx": 2},
+          {"text": "Iat", "start_row_offset_idx": 0, "start_col_offset_idx": 3},
+          {"text": "Lon (\")", "start_row_offset_idx": 0, "start_col_offset_idx": 4},
+          {"text": "Surface Presgure (5b)", "start_row_offset_idx": 0, "start_col_offset_idx": 5},
+          {"text": "ind closest to surface hgt (Kc) (m)", "start_row_offset_idx": 0, "start_col_offset_idx": 6},
+          {"text": "BT SST", "start_row_offset_idx": 0, "start_col_offset_idx": 8},
+          {"text": "Eye, Eyewall, Rainband (direction)", "start_row_offset_idx": 0, "start_col_offset_idx": 9},
+          {"text": "Comantg", "start_row_offset_idx": 0, "start_col_offset_idx": 10},
+          {"text": "22", "start_row_offset_idx": 1, "start_col_offset_idx": 2},
+          {"text": "2", "start_row_offset_idx": 1, "start_col_offset_idx": 5},
+          {"text": "2", "start_row_offset_idx": 1, "start_col_offset_idx": 6}
+        ],
+        "num_rows": 2,
+        "num_cols": 11
+      }
+    }
+  ],
+  "furniture": {
+    "self_ref": "#/furniture",
+    "children": [],
+    "content_layer": "furniture",
+    "name": "_root_",
+    "label": "unspecified"
+  }
+}

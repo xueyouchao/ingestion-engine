@@ -73,7 +73,7 @@ Seams you can replace without touching the pipeline:
 | Engine | How it is reached | Notes |
 |---|---|---|
 | `pymupdf` | in process | free, instant, only reads text the PDF already has (AGPL-3.0, so check your use) |
-| `docling` | `--engine-command docling` | local CLI, MIT; document-level Markdown, page markers honoured when written |
+| `docling` | `--engine-command docling` | local CLI, MIT; page-aware DoclingDocument JSON keeps the original 1-based pages |
 | `paddleocr-vl` | `--base-url http://host:8000/v1 --model PaddleOCR-VL-1.6`, or `--engine-command paddleocr` | Apache-2.0; one rendered page per request, prompt `OCR:` |
 | `mineru` | `--base-url http://host:8000` (multipart `/file_parse`) or `--engine-command mineru` | MinerU2.5-Pro weights are Apache-2.0; the package carries its own licence |
 
@@ -86,6 +86,26 @@ vllm serve PaddlePaddle/PaddleOCR-VL-1.6 --trust-remote-code
 vllm serve opendatalab/MinerU2.5-Pro-2605-1.2B --logits-processors mineru_vl_utils:MinerULogitsProcessor
 .venv/bin/finepdfs run --engine mineru --base-url http://127.0.0.1:8000
 ~~~~
+
+### Docling page mapping
+
+Docling's command-line Markdown export carries no page boundaries, so the adapter asks for
+`--to json` and reads each item's 1-based `prov[].page_no` from the body tree. Check the installed
+tool and the shape it writes with:
+
+~~~~bash
+docling --version
+docling convert --to json --image-export-mode placeholder --output /tmp/docling-out <scan>.pdf
+python -m json.tool /tmp/docling-out/*.json | grep -m3 '"page_no"'
+~~~~
+
+A recorded run on 2026-10-18 with Docling 2.140.0, EasyOCR 1.7.2 and CPU torch 2.10.0 produced Page
+Texts numbered 1 and 2 from a genuine two-page image-only `CC-MAIN-2026-39` scan; printed headers
+were readable, handwritten fields mostly were not. With `--ocr-engine tesseract` (Tesseract 5.3.4)
+the same one-page scan was OCRed upside down because Docling's unconditional OSD reported 180 degrees
+at low confidence, so that path is not evidence of usable text on handwritten scans. Offline tests
+use a trimmed recording of the JSON shape: they prove page mapping and failure handling, not OCR
+quality.
 
 ## Language identification
 
@@ -239,11 +259,13 @@ the whole crawl.
   and a disk that fills up leave the corpus resumable rather than silently different.
 * **Model servers**: the PaddleOCR-VL and MinerU HTTP adapters are exercised against a real stub HTTP
   server on localhost, which proves the wire format, the multipart body and the response parsing.
-* **Command-line engines**: Docling, MinerU and PaddleOCR-VL CLI adapters are exercised with a recording
-  runner that writes the files those tools write, which proves the command and the parsing around it.
-* **Not executed here**: real Docling, PaddleOCR-VL and MinerU weights. This machine has no GPU and none
-  of those tools installed, so their adapters are written to the tools' documented interfaces and tested
-  against recorded shapes rather than live runs.
+* **Command-line engines**: Docling's adapter asks for page-aware DoclingDocument JSON and is
+  exercised with a recording runner writing a trimmed real recording, which proves the command, the
+  original-page mapping and the failure handling. MinerU and PaddleOCR-VL CLI adapters are exercised
+  the same way with a recording runner that writes the files those tools write.
+* **Not executed here**: real PaddleOCR-VL and MinerU weights. Those adapters are written to the
+  tools' documented interfaces and tested against recorded shapes rather than live runs. Docling was
+  run live on a CPU-only isolated install; see [Docling page mapping](#docling-page-mapping).
 * **Language**: `ScriptLanguageIdentifier` names the script with no dependency at all, and reports
   `Latn` for English and German alike. `FINEPDFS_LANGUAGE=fasttext` against a downloaded `lid.176.ftz`
   tagged the 12 real NOAA PDFs here as 11 `eng` and one `spa` -- the Spanish edition of the Caribbean
