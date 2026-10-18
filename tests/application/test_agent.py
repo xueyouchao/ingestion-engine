@@ -285,6 +285,10 @@ def test_the_loop_round_trips_tool_results_and_cites_only_returned_evidence(tmp_
                     f"It also does not support a claim about [{'f' * 16} p.7]."
                 ),
             },
+            {
+                "role": "assistant",
+                "content": f"The accepted page says the observation was alpine meteorology [{key} p.1].",
+            },
         ]
     )
     events = []
@@ -325,6 +329,11 @@ def test_citations_accept_a_quoted_doc_id_and_resolve_a_unique_page_only_tag(tmp
             },
             {
                 "role": "assistant",
+                "content": None,
+                "tool_calls": [_tool_call("call-2", "read_pdf_page", {"doc_id": key, "page_number": 1})],
+            },
+            {
+                "role": "assistant",
                 "content": (
                     f'Quoted evidence <Cite doc_id "{key}" p.1></Cite> and page '
                     "<doc_id> p.1</doc_id>."
@@ -336,11 +345,16 @@ def test_citations_accept_a_quoted_doc_id_and_resolve_a_unique_page_only_tag(tmp
     answer = run_agent("Cite it", model, tools)
 
     assert [citation.citation for citation in answer.citations] == [f"{key} p.1"]
+    assert answer.citations[0].verified
 
 
-def test_a_page_only_tag_that_is_not_unique_in_evidence_is_not_a_citation(tmp_path) -> None:
+def test_a_page_only_tag_only_resolves_to_a_page_that_was_read(tmp_path) -> None:
     out, key, _duplicate = _accepted_output(tmp_path)
     tools = _tools(out)
+    unsupported = (
+        f"The observation was alpine meteorology [{key} p.1]. "
+        "A further claim rests on <doc_id> p.99</doc_id>."
+    )
     model = FakeChatModel(
         [
             {
@@ -348,14 +362,21 @@ def test_a_page_only_tag_that_is_not_unique_in_evidence_is_not_a_citation(tmp_pa
                 "content": None,
                 "tool_calls": [_tool_call("call-1", "search_pdfs", {"query": "alpine"})],
             },
-            {"role": "assistant", "content": "Supported by <doc_id> p.99</doc_id>."},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_tool_call("call-2", "read_pdf_page", {"doc_id": key, "page_number": 1})],
+            },
+            {"role": "assistant", "content": unsupported},
+            {"role": "assistant", "content": unsupported},
         ]
     )
 
     answer = run_agent("Cite it", model, tools)
 
-    assert answer.citations == ()
-    assert key not in answer.answer
+    assert [citation.citation for citation in answer.citations] == [f"{key} p.1"]
+    assert "p.99" not in answer.answer
+    assert not answer.insufficient_evidence
 
 
 def test_the_tool_budget_bounds_the_loop_and_forces_a_final_answer(tmp_path) -> None:
@@ -369,7 +390,7 @@ def test_the_tool_budget_bounds_the_loop_and_forces_a_final_answer(tmp_path) -> 
     model = FakeChatModel(
         [
             endless,
-            {**endless, "tool_calls": [_tool_call("call-2", "search_pdfs", {"query": "storm"})]},
+            {**endless, "tool_calls": [_tool_call("call-2", "read_pdf_page", {"doc_id": key, "page_number": 1})]},
             {"role": "assistant", "content": f"Best evidence is [{key} p.1]."},
         ]
     )
@@ -382,7 +403,7 @@ def test_the_tool_budget_bounds_the_loop_and_forces_a_final_answer(tmp_path) -> 
     assert model.requests[-1]["tools"] == [], "the forced answer cannot ask for more tools"
     assert answer.answer == f"Best evidence is [{key} p.1]."
     assert [citation.citation for citation in answer.citations] == [f"{key} p.1"]
-    assert not answer.citations[0].verified, "only a search snippet named this page"
+    assert answer.citations[0].verified, "the forced answer cites the page the second call read"
     assert MAX_TOOL_CALLS == 6
 
 
@@ -409,7 +430,7 @@ def test_the_default_budget_is_six_calls_per_question(tmp_path) -> None:
 
 
 def test_an_unanswerable_question_reports_insufficient_evidence_without_citations(tmp_path) -> None:
-    out, _key, _duplicate = _accepted_output(tmp_path)
+    out, key, _duplicate = _accepted_output(tmp_path)
     tools = _tools(out)
     model = FakeChatModel(
         [
@@ -420,7 +441,10 @@ def test_an_unanswerable_question_reports_insufficient_evidence_without_citation
             },
             {
                 "role": "assistant",
-                "content": "INSUFFICIENT EVIDENCE: no accepted page mentions quantum chromodynamics.",
+                "content": (
+                    "INSUFFICIENT EVIDENCE: no accepted page mentions quantum chromodynamics. "
+                    f"The nearest page only names alpine meteorology [{key} p.1]."
+                ),
             },
         ]
     )
@@ -429,6 +453,7 @@ def test_an_unanswerable_question_reports_insufficient_evidence_without_citation
 
     assert answer.insufficient_evidence
     assert answer.citations == ()
+    assert f"{key} p.1" not in answer.answer, "an insufficient-evidence reply cites nothing"
     assert answer.tool_calls[0].result["total"] == 0
 
 
@@ -439,3 +464,131 @@ def test_an_empty_question_is_rejected_before_any_model_call() -> None:
         run_agent("   ", model, AcceptedEvidenceTools(RecordingIndex(), DiskPageReader(Path("/nowhere"))))
 
     assert model.requests == []
+
+
+def test_a_citation_for_a_page_no_read_returned_is_repaired_then_stripped(tmp_path) -> None:
+    out, key, _duplicate = _accepted_output(tmp_path)
+    tools = _tools(out)
+    unsupported = (
+        f"The accepted page says alpine meteorology [{key} p.1]. "
+        f"An unread page supposedly adds a storm flight identifier [{key} p.2]."
+    )
+    model = FakeChatModel(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_tool_call("call-1", "search_pdfs", {"query": "alpine"})],
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_tool_call("call-2", "read_pdf_page", {"doc_id": key, "page_number": 1})],
+            },
+            {"role": "assistant", "content": unsupported},
+            {"role": "assistant", "content": unsupported},
+        ]
+    )
+
+    answer = run_agent("What does the accepted page say?", model, tools)
+
+    assert [citation.citation for citation in answer.citations] == [f"{key} p.1"]
+    assert answer.citations[0].verified
+    assert f"{key} p.2" not in answer.answer, "a page no tool returned cannot stay in the answer"
+    assert "[]" not in answer.answer
+    assert not answer.insufficient_evidence
+    assert len(model.requests) == 4, "one repair turn, then the unanswered citation is stripped"
+    assert model.requests[3]["messages"][-1]["role"] == "user"
+
+
+def test_a_prose_only_page_reference_triggers_one_repair_turn_that_reads_the_page(tmp_path) -> None:
+    out, key, _duplicate = _accepted_output(tmp_path)
+    tools = _tools(out)
+    model = FakeChatModel(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_tool_call("call-1", "search_pdfs", {"query": "alpine"})],
+            },
+            {"role": "assistant", "content": "The observation is described on page 1."},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_tool_call("call-2", "read_pdf_page", {"doc_id": key, "page_number": 1})],
+            },
+            {
+                "role": "assistant",
+                "content": f"The observation was alpine meteorology [{key} p.1].",
+            },
+        ]
+    )
+
+    answer = run_agent("What does the accepted page say?", model, tools)
+
+    assert [citation.citation for citation in answer.citations] == [f"{key} p.1"]
+    assert answer.citations[0].verified
+    assert not answer.insufficient_evidence
+    assert [outcome.name for outcome in answer.tool_calls] == ["search_pdfs", "read_pdf_page"]
+    assert len(model.requests) == 4, "two scripted answers, one repair turn and one final answer"
+    repair = model.requests[2]["messages"][-1]
+    assert repair["role"] == "user"
+    assert "read_pdf_page" in repair["content"]
+
+
+def test_a_supported_answer_drops_a_contradictory_insufficient_evidence_tail(tmp_path) -> None:
+    out, key, _duplicate = _accepted_output(tmp_path)
+    tools = _tools(out)
+    model = FakeChatModel(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_tool_call("call-1", "search_pdfs", {"query": "alpine"})],
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_tool_call("call-2", "read_pdf_page", {"doc_id": key, "page_number": 1})],
+            },
+            {
+                "role": "assistant",
+                "content": (
+                    f"The observation was alpine meteorology [{key} p.1].\n\n"
+                    "INSUFFICIENT EVIDENCE: the tools do not give a numeric temperature.\n"
+                    "The search results do state the observation, so the answer above stands."
+                ),
+            },
+        ]
+    )
+
+    answer = run_agent("What does the accepted page say?", model, tools)
+
+    assert answer.answer.startswith("The observation was alpine meteorology")
+    assert "INSUFFICIENT EVIDENCE" not in answer.answer
+    assert not answer.insufficient_evidence
+    assert [citation.citation for citation in answer.citations] == [f"{key} p.1"]
+
+
+def test_an_answer_with_no_verified_citation_becomes_insufficient_evidence(tmp_path) -> None:
+    out, key, _duplicate = _accepted_output(tmp_path)
+    tools = _tools(out)
+    model = FakeChatModel(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_tool_call("call-1", "search_pdfs", {"query": "alpine"})],
+            },
+            {"role": "assistant", "content": "The observation is described on page 2."},
+            {"role": "assistant", "content": f"The observation is described on page 2 [{key} p.2]."},
+        ]
+    )
+
+    answer = run_agent("What does the accepted page say?", model, tools)
+
+    assert answer.insufficient_evidence
+    assert answer.citations == ()
+    assert answer.answer.startswith("INSUFFICIENT EVIDENCE")
+    assert f"{key} p.2" not in answer.answer
+    assert len(model.requests) == 3, "one repair turn, then the contract refuses the answer"

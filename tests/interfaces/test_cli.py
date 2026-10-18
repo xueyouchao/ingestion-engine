@@ -207,6 +207,26 @@ def _write_declared_chunks(out_dir: Path) -> dict:
             engine="pymupdf@native",
         )
         records.append(record)
+        corpus.record_path(record.doc_id).parent.mkdir(parents=True, exist_ok=True)
+        corpus.record_path(record.doc_id).write_text(
+            json.dumps(
+                {
+                    "url": record.source_url,
+                    "digest": record.digest,
+                    "engine": record.engine,
+                    "routing_decision": "text-layer",
+                    "routing_reason": "healthy text layer",
+                    "language": "eng",
+                    "page_count": 1,
+                    "accepted_pages": 1,
+                    "dropped_pages": 0,
+                    "character_count": len(record.text),
+                }
+            ),
+            encoding="utf-8",
+        )
+        corpus.pages_path(record.doc_id).parent.mkdir(parents=True, exist_ok=True)
+        corpus.pages_path(record.doc_id).write_text(corpus.pages_payload((record,)), encoding="utf-8")
         path = corpus.chunks_path(record.doc_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(corpus.chunks_payload(chunk_page_records((record,), language="eng")))
@@ -272,6 +292,20 @@ def _ask_model(doc_id: str) -> _FakeChatModel:
                         "id": "call-1",
                         "type": "function",
                         "function": {"name": "search_pdfs", "arguments": '{"query": "alpine"}'},
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-2",
+                        "type": "function",
+                        "function": {
+                            "name": "read_pdf_page",
+                            "arguments": json.dumps({"doc_id": doc_id, "page_number": 9}),
+                        },
                     }
                 ],
             },
@@ -389,9 +423,12 @@ def test_ask_prints_visible_tool_calls_and_citations(tmp_path, capsys, monkeypat
     printed = capsys.readouterr()
     assert "[tool 1] search_pdfs" in printed.out
     assert "-> 1 hits" in printed.out
+    assert "[tool 2] read_pdf_page" in printed.out
+    assert "-> accepted page 9" in printed.out
     assert f"- {doc_id} p.9" in printed.out
     assert "https://example.org/page-9.pdf" in printed.out
-    assert "Tool calls: 1 of 6" in printed.out
+    assert "(page read)" in printed.out
+    assert "Tool calls: 2 of 6" in printed.out
     assert "sk-this-must-not-be-printed" not in printed.out + printed.err
     # The tool result round trip reached the model, and the schemas were offered on the first turn.
     assert model.requests[0]["tools"]
@@ -432,5 +469,6 @@ def test_ask_json_carries_the_answer_citations_and_trace(tmp_path, capsys, monke
     assert payload["answer"].startswith("Alpine meteorology")
     assert payload["citations"][0]["doc_id"] == doc_id
     assert payload["citations"][0]["page_number"] == 9
-    assert payload["tool_calls"][0]["tool"] == "search_pdfs"
+    assert payload["citations"][0]["verified"] is True
+    assert [call["tool"] for call in payload["tool_calls"]] == ["search_pdfs", "read_pdf_page"]
     assert payload["insufficient_evidence"] is False

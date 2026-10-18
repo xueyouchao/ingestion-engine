@@ -381,8 +381,8 @@ def _ask(args: argparse.Namespace) -> int:
     if answer.citations:
         print("\nCitations:")
         for citation in answer.citations:
-            state = "page read" if citation.verified else "snippet only; page not read"
-            print(f"- {citation.citation}  {citation.source_url}  ({state})")
+            # Only a page read_pdf_page returned can reach this list, so every citation is verified.
+            print(f"- {citation.citation}  {citation.source_url}  (page read)")
     else:
         print("\nCitations: none (no evidence page was cited)")
     budget = " (tool budget exhausted)" if answer.budget_exhausted else ""

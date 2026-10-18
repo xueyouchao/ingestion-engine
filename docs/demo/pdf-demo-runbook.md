@@ -411,12 +411,22 @@ second search backend. Two tools are exposed to an OpenAI-compatible chat model:
 
 Both are application functions (`finepdfs/application/search.py` and
 `finepdfs/application/page_reads.py`), so the CLI, the loop and the tests share one contract. The loop
-(`finepdfs/application/agent.py`) caps tool executions at six by default, prints every call and result,
-and asks the model to cite `[<doc_id> p.<page_number>]`. Citations are filtered against the pages the
-tools actually returned, so a fabricated document or page is dropped rather than printed as evidence.
-Each citation is marked **page read** only when `read_pdf_page` returned that exact page; a citation
-seen only in a search snippet is printed as unverified. When the tool budget is spent, one final
-completion without tools is allowed to force an answer or an explicit insufficient-evidence reply.
+(`finepdfs/application/agent.py`) caps tool executions at six by default and prints every call and
+result, and its citation contract is enforced rather than requested:
+
+* a final answer may cite only a page `read_pdf_page` returned as accepted; a citation for any other
+  page is removed from the answer text, and a search snippet never makes a page citable;
+* a page number in prose ("page 37") is not a citation;
+* when the answer has no verified citation, or carries one for a page nobody read, the loop takes one
+  bounded repair turn asking the model to read the supporting page; if that does not produce a verified
+  citation, the answer becomes `INSUFFICIENT EVIDENCE`;
+* a contradictory `INSUFFICIENT EVIDENCE` tail after a supported answer is dropped, and an
+  insufficient-evidence reply carries no citations.
+
+Every citation the CLI prints therefore names a page that was read, and `--json` still carries the
+`verified` flag and the full tool trace. When the tool budget is spent, one final completion without
+tools is allowed to force an answer or an explicit insufficient-evidence reply; that answer goes through
+the same contract, so an unverified claim is reported as insufficient rather than cited.
 
 ### Commands
 
@@ -424,12 +434,12 @@ completion without tools is allowed to force an answer or an explicit insufficie
 # ask over the current declared evidence; the index must exist first
 PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli ask \
   --question "What rate of wind-speed increase over 24 hours counts as rapid intensification?" \
-  --base-url 'http://[::1]:11434/v1' --model qwen3:1.7b \
+  --base-url 'http://[::1]:11434/v1' --model deepseek-v4.1-flash:cloud \
   --out .demo/out --index .demo/out/search.db --max-tool-calls 6
 
 # the same answer, citations and full tool trace as JSON
 PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli ask \
-  --question "..." --base-url 'http://[::1]:11434/v1' --model qwen3:1.7b \
+  --question "..." --base-url 'http://[::1]:11434/v1' --model deepseek-v4.1-flash:cloud \
   --out .demo/out --index .demo/out/search.db --json
 ```
 
@@ -440,30 +450,36 @@ model does not ask for a count.
 
 ### Model capability, checked rather than assumed
 
-The rehearsal host serves `qwen3:1.7b` from Ollama at `http://[::1]:11434` (IPv6; the IPv4 address timed
-out). A model list is not evidence of tool support, so the check was an actual inference with a tool
-schema: the model returned real `tool_calls` with schema-valid arguments in **12.12 s**, and a
-tool-result round trip produced a final answer. `qwen3:1.7b` then called both `search_pdfs` and
-`read_pdf_page` on the demo's real index and page exports. No cloud-tagged model was needed.
+The rehearsal host serves several models from Ollama at `http://[::1]:11434` (IPv6; the IPv4 address
+timed out). A model list is not evidence of tool support, so the check was an actual inference with a
+tool schema: `deepseek-v4.1-flash:cloud` returned real `tool_calls` with schema-valid arguments in
+**0.49 s**, and `deepseek-v4-pro:cloud` in 0.68 s. The cloud-tagged model was used for the question
+runs and produced real tool calls on every question, so the larger model was not needed.
+`qwen3:1.7b` is still served and also returns real tool calls, but it missed three of the six questions
+(an unread page cited on Q1, a contradictory `INSUFFICIENT EVIDENCE` tail on Q3, a prose-only "page 37"
+on Q4); the contract now strips an unread-page citation, drops the contradictory tail and refuses a
+prose page number, and the model difference is recorded rather than hidden.
 
 The five answerable questions and one unanswerable control are in
 [`agent-questions.md`](agent-questions.md); the observed answers, citations, tool traces, timings and
-model-quality limitations are in [`agent-evidence.md`](agent-evidence.md). Summary of that run:
+limitations are in [`agent-evidence.md`](agent-evidence.md). Summary of the two `deepseek-v4.1-flash:cloud`
+runs, both with the enforced contract:
 
 | # | Result | Citation | Verified page read? |
 | --- | --- | --- | --- |
-| 1 | correct answer; **wrong page cited** (`p.10`; the sentence is on `p.8`) | `9bf665589f7333a8 p.10` | no |
-| 2 | correct | `6dd127bebc737740 p.5` | no |
-| 3 | correct, with a contradictory trailing `INSUFFICIENT EVIDENCE` line | `24564fdbfbb89e55 p.1`, `p.3` | no |
-| 4 | correct; citation only in prose ("page 37"), so none structured | none | n/a |
+| 1 | correct, citing the page that states it | `9bf665589f7333a8 p.8` | yes |
+| 2 | correct | `6dd127bebc737740 p.5` | yes |
+| 3 | correct, no contradictory tail | `24564fdbfbb89e55 p.3` | yes |
+| 4 | correct, structured citation instead of prose | `0adb664b1fafd254 p.37` | yes |
 | 5 | correct | `8cc4c231717ef28f p.33` | yes |
 | 6 | `INSUFFICIENT EVIDENCE`, no citation | none | n/a |
 
 The agent evidence state is the text-layer run (15 published Documents / 310 page records / 590
 chunks), so those answers are not OCR evidence; the two scans were dropped. The questions avoid them.
-The Q1/page-attribution error and the Q3 contradiction are reported rather than presented as success:
-tool calling, the round trip, the budget and citation filtering are verified, while answer and citation
-precision belong to the small model. No retrieval-quality claim is made from 15 Documents.
+No retrieval-quality claim is made from 15 Documents. What is verified is that the tools are called,
+their results round-trip, the budget holds, every citation names a page the tools read, and an
+unsupported answer is reported as insufficient evidence; answer correctness beyond that is a model
+property, observed twice per question here.
 
 
 ## Dry run is not a free estimate
