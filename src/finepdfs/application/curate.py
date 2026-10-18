@@ -125,6 +125,10 @@ class CurationStep:
         pages = self.clean(extraction.pages, ocr_branch)
         tags = [self._languages.identify(page.text, page.number) for page in pages]
         language = self._policy.language.apply(tags, extraction.document.page_count)
+        # The record, the publish test, the Markdown and the near-duplicate fingerprint all see the
+        # accepted Page Texts only, still carrying their original 1-based numbers.
+        accepted_numbers = set(language.accepted_pages)
+        pages = tuple(page for page in pages if page.number in accepted_numbers)
 
         record = self._record(extraction, pages, language, url, digest)
         publishable, reason = self._policy.publish.judge(pages, language)

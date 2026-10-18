@@ -136,7 +136,7 @@ def test_a_page_the_identifier_is_unsure_about_drops_the_document_with_a_reason(
     outcome = use_case.run(Document(name="https://a.example/one.pdf", content=b"%PDF"))
 
     assert not outcome.published
-    assert "language" in outcome.reason.lower()
+    assert outcome.reason == "0 pages is fewer than the 1 page minimum"
 
 
 def test_a_document_the_policy_drops_is_not_a_failure() -> None:
@@ -150,7 +150,7 @@ def test_a_document_the_policy_drops_is_not_a_failure() -> None:
 
     assert outcome.status == "dropped"
     assert outcome.markdown == ""
-    assert "language" in outcome.reason
+    assert outcome.reason == "0 pages is fewer than the 1 page minimum"
 
 
 def test_an_engine_failure_is_reported_as_a_failed_document_not_an_exception() -> None:
