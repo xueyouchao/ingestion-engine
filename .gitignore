@@ -6,8 +6,9 @@
 /cocoindex.db
 # The demo command's isolated state: corpus, output and warm CocoIndex database. Persistent by design.
 /.demo/
-# A rented worker's lease: machine-local, may name a billing worker, never committed.
-/.gpu-worker.json
+# A rented worker's leases: machine-local, may name a billing worker, never committed. One file per
+# lease, so the directory is ignored rather than one name (the runbook's FINEPDFS_GPU_STATE_DIR default).
+/.gpu-worker-leases/
 
 # Python
 __pycache__/

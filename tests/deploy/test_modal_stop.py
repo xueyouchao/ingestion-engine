@@ -90,6 +90,25 @@ def test_a_malformed_lease_is_reported_and_nothing_is_terminated(tmp_path, capsy
     assert str(lease_file(values)) in capsys.readouterr().err
 
 
+def test_an_unusable_lease_identity_is_reported_not_raised(tmp_path, capsys) -> None:
+    """The identity comes from the operator's environment, so stop must report a bad one like any other failure.
+
+    It used to be read outside the handler, so it escaped as a traceback -- printing the value
+    unredacted. An operator who exported the tunnel URL here would then see the credential the runbook
+    says never reaches a diagnostic; a typo would see a traceback instead of one line naming the variable.
+    """
+    values = worker_environment(tmp_path / "leases", FINEPDFS_GPU_LEASE_ID="https://tunnel-abc123.modal.host/v1")
+    modal = FakeStopModal()
+
+    assert stop.main(values, sdk=modal) == 1
+
+    error = capsys.readouterr().err
+    assert "FINEPDFS_GPU_LEASE_ID" in error, "the message names the variable to fix"
+    assert "modal.host" not in error, "and never echoes the value, which may be an address"
+    assert "Traceback" not in error
+    assert modal.from_ids == [], "an unusable identity terminates nothing"
+
+
 def test_a_lease_owned_by_another_vendor_is_left_alone(tmp_path, capsys) -> None:
     values = _record(tmp_path / "leases", provider="runpod", worker_id="pod-123")
     modal = FakeStopModal()

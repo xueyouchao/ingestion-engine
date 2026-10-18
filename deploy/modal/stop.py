@@ -30,8 +30,12 @@ from deploy.gpu.contract import (
 def main(environ: Mapping[str, str] | None = None, sdk: Any = None) -> int:
     """Terminate the recorded worker, or report why it could not be given back."""
     values = os.environ if environ is None else environ
-    path = lease_file(values)
     try:
+        # Inside the handler on purpose: lease_file validates the identity it is given, and that value
+        # comes from the environment. An unrecognised one is a reportable stop failure, not a traceback
+        # -- which would also print the value unredacted, and an operator who exported a tunnel URL
+        # here would then see the credential the runbook says never reaches a diagnostic.
+        path = lease_file(values)
         state = read_lease(path)
         if state is None:
             print(f"no Modal worker is recorded at {path}; nothing to stop", file=sys.stderr)
