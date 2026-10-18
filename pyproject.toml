@@ -50,7 +50,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "C4", "PYI"]
 "tests/**" = ["E501", "RUF001"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+# "." is the deploy slice: deploy/gpu and deploy/modal are command and contract modules outside the
+# installed package, so the offline suite imports them from the checkout, never from the wheel (ADR-0009).
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 addopts = "-m 'not network and not model'"
 markers = [

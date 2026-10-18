@@ -1,0 +1,6 @@
+# The deploy environment, not the package. Modal is pinned to the version this slice was written and
+# checked against (`modal --version` reported 1.5.5 on 2026-10-18); the base pyproject stays vendor-free
+# (ADR-0009). Install with:
+#
+#   python -m pip install -r deploy/requirements-modal.txt
+modal==1.5.5

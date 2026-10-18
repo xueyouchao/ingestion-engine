@@ -6,6 +6,8 @@
 /cocoindex.db
 # The demo command's isolated state: corpus, output and warm CocoIndex database. Persistent by design.
 /.demo/
+# A rented worker's lease: machine-local, may name a billing worker, never committed.
+/.gpu-worker.json
 
 # Python
 __pycache__/
