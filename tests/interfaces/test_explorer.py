@@ -18,8 +18,12 @@ from pathlib import Path
 
 import pytest
 
+from finepdfs.application.search import reindex_search
+from finepdfs.domain.chunks import chunk_page_records
+from finepdfs.domain.publishing import PageRecord
 from finepdfs.infrastructure.corpus.index import document_key
 from finepdfs.infrastructure.corpus.manifest import CorpusEntry, CorpusManifest, relative_pdf_path
+from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
 from finepdfs.interfaces import explorer as explorer_module
 from finepdfs.interfaces.explorer import Explorer, ExplorerError, explorer_for
 
@@ -346,6 +350,118 @@ def test_the_html_carries_the_filter_and_detail_contract(tmp_path) -> None:
         assert "Accepted pages" in html
 
 
+def test_search_returns_the_shared_contract_from_the_index(tmp_path) -> None:
+    out, corpus, digest = _completed_output(tmp_path)
+    key = document_key(URL)
+    index_path = _write_search_index(out, key, digest)
+    assert index_path.is_file()
+
+    with _serving(explorer_for(out, corpus)) as base:
+        payload = _json(base + "/api/search?query=alpine&top_k=5")
+        assert payload["available"] is True
+        assert payload["query"] == "alpine"
+        assert payload["total"] == 1
+        hit = payload["hits"][0]
+        assert hit["doc_id"] == key
+        assert hit["page_number"] == 1
+        assert hit["source_url"] == URL
+        assert hit["digest"] == digest
+        assert hit["chunk_id"]
+        assert hit["text"] == "alpine meteorology observation on an accepted page"
+        assert "<mark>" in hit["snippet"]
+        assert hit["score"] > 0
+
+        assert _json(base + "/api/search?query=alpine&language=eng")["total"] == 1
+        assert _json(base + "/api/search?query=alpine&language=spa")["total"] == 0
+        assert _json(base + f"/api/search?query=alpine&doc_id={key}")["total"] == 1
+        assert _json(base + "/api/search?query=alpine&doc_id=" + "0" * 16)["total"] == 0
+        assert _json(base + "/api/search?query=alpine&engine=pymupdf%401.28.2")["total"] == 1
+        assert _json(base + "/api/search?query=alpine&engine=other")["total"] == 0
+
+
+def test_search_without_an_index_is_a_clear_empty_state(tmp_path) -> None:
+    out, corpus, _digest = _completed_output(tmp_path)
+    index_path = out / "search.db"
+
+    with _serving(explorer_for(out, corpus)) as base:
+        payload = _json(base + "/api/search?query=alpine")
+
+        assert payload["available"] is False
+        assert payload["total"] == 0
+        assert payload["hits"] == []
+        assert "index-search" in payload["reason"]
+        assert not index_path.exists(), "a read-only view must not build the index it reads"
+
+
+def test_search_rejects_an_empty_query_and_a_bad_top_k(tmp_path) -> None:
+    out, corpus, digest = _completed_output(tmp_path)
+    _write_search_index(out, document_key(URL), digest)
+
+    with _serving(explorer_for(out, corpus)) as base:
+        for path in ("/api/search", "/api/search?query=%20%20", "/api/search?query=alpine&top_k=0",
+                     "/api/search?query=alpine&top_k=not-a-number"):
+            with pytest.raises(urllib.error.HTTPError) as caught:
+                _get(base + path)
+            assert caught.value.code == 400
+            assert "error" in json.loads(caught.value.read())
+
+
+def test_searching_the_explorer_writes_nothing(tmp_path) -> None:
+    out, corpus, digest = _completed_output(tmp_path)
+    _write_search_index(out, document_key(URL), digest)
+    before = {root: _snapshot(root) for root in (out, corpus)}
+
+    with _serving(explorer_for(out, corpus)) as base:
+        _json(base + "/api/search?query=alpine")
+
+    assert {root: _snapshot(root) for root in (out, corpus)} == before
+
+
+def _write_search_index(out: Path, key: str, digest: str) -> Path:
+    pages = (
+        PageRecord(
+            doc_id=key,
+            source_url=URL,
+            digest=digest,
+            page_number=1,
+            text="alpine meteorology observation on an accepted page",
+            engine="pymupdf@1.28.2",
+        ),
+        PageRecord(
+            doc_id=key,
+            source_url=URL,
+            digest=digest,
+            page_number=2,
+            text="a storm flight identifier on the second accepted page",
+            engine="pymupdf@1.28.2",
+        ),
+    )
+    chunks = tuple(
+        chunk for page in pages for chunk in chunk_page_records((page,), language="eng")
+    )
+    index_path = out / "search.db"
+    reindex_search(SqliteFtsSearchIndex(index_path), chunks)
+    return index_path
+
+
+def test_the_html_carries_the_search_contract(tmp_path) -> None:
+    out, corpus, _digest = _completed_output(tmp_path)
+
+    with _serving(explorer_for(out, corpus)) as base:
+        html = _get(base + "/").read().decode("utf-8")
+
+    for identifier in (
+        'id="search-form"',
+        'id="search-query"',
+        'id="search-language"',
+        'id="search-results"',
+        'id="search-state"',
+    ):
+        assert identifier in html
+    assert "/api/search" in html
+    assert "Accepted evidence search" in html
+
+
 def test_the_cli_explore_command_takes_the_output_and_port() -> None:
     from finepdfs.interfaces.cli import build_parser
 
@@ -358,6 +474,17 @@ def test_the_cli_explore_command_takes_the_output_and_port() -> None:
     assert args.corpus == Path("c")
     assert args.port == 8123
     assert args.host == "127.0.0.1"
+    assert args.index is None
+
+
+def test_the_cli_explore_command_takes_an_index_path() -> None:
+    from finepdfs.interfaces.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["explore", "--out", "o", "--corpus", "c", "--index", "o/search.db"]
+    )
+
+    assert args.index == Path("o/search.db")
 
 
 def test_the_cli_refuses_an_absent_output_without_starting_a_server(tmp_path, capsys, monkeypatch) -> None:

@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 from collections.abc import Iterable, Sequence
 
+from finepdfs.application.page_reads import KEY_PATTERN
 from finepdfs.domain.chunks import Chunk
 from finepdfs.domain.dedup import DedupPlan
 from finepdfs.domain.publishing import DocumentRecord, PageRecord
@@ -127,3 +129,92 @@ class PublishedCorpus:
 
 def _jsonl(rows: Iterable[dict]) -> str:
     return "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
+
+
+class DiskPageReader:
+    """``DeclaredPageReader`` over the output directory: the same files the flow declared.
+
+    It reads only ``records/``, ``excluded/`` and ``pages/``. Markdown, the run summary and every other
+    output are not evidence sources here, so a citation cannot be reconstructed from a projection.
+    """
+
+    def __init__(self, root: pathlib.Path | str) -> None:
+        self._root = pathlib.Path(root)
+
+    @property
+    def root(self) -> pathlib.Path:
+        return self._root
+
+    def has_output(self) -> bool:
+        return self._root.is_dir()
+
+    def published_digest(self, doc_id: str) -> str | None:
+        path = self._path(RECORDS, doc_id, ".json")
+        if not path.is_file():
+            return None
+        payload = _read_object(path)
+        digest = payload.get("digest")
+        if not isinstance(digest, str) or not digest:
+            raise ValueError(f"{path} does not name a published digest")
+        return digest
+
+    def exclusion(self, doc_id: str) -> tuple[str, str] | None:
+        path = self._path(EXCLUDED, doc_id, ".json")
+        if not path.is_file():
+            return None
+        payload = _read_object(path)
+        kind = payload.get("kind")
+        reason = payload.get("reason")
+        if not isinstance(kind, str) or not kind:
+            raise ValueError(f"{path} does not name an exclusion kind")
+        return kind, reason if isinstance(reason, str) else ""
+
+    def accepted_pages(self, doc_id: str) -> tuple[PageRecord, ...] | None:
+        path = self._path(PAGES, doc_id, ".jsonl")
+        if not path.is_file():
+            return None
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as error:
+            raise ValueError(f"{path} could not be read: {error}") from error
+        pages = []
+        for line in lines:
+            if not line.strip():
+                continue
+            payload = _parse_object(line, path)
+            try:
+                pages.append(
+                    PageRecord(
+                        doc_id=payload["doc_id"],
+                        source_url=payload["source_url"],
+                        digest=payload["digest"],
+                        page_number=int(payload["page_number"]),
+                        text=payload["text"],
+                        engine=payload["engine"],
+                    )
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(f"{path} holds an invalid page record: {error}") from error
+        return tuple(sorted(pages, key=lambda page: page.page_number))
+
+    def _path(self, directory: str, doc_id: str, suffix: str) -> pathlib.Path:
+        if not isinstance(doc_id, str) or re.fullmatch(KEY_PATTERN, doc_id) is None:
+            raise ValueError(f"doc_id must be a 16-character source identity, not {doc_id!r}")
+        return self._root / directory / f"{doc_id}{suffix}"
+
+
+def _read_object(path: pathlib.Path) -> dict:
+    try:
+        return _parse_object(path.read_text(encoding="utf-8"), path)
+    except OSError as error:
+        raise ValueError(f"{path} could not be read: {error}") from error
+
+
+def _parse_object(text: str, path: pathlib.Path) -> dict:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{path} is not valid JSON: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} is not valid JSON: expected an object")
+    return payload
