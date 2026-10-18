@@ -1,8 +1,17 @@
 # Modal GPU worker runbook
 
-The offline half of ADR-0009: rent one Modal sandbox that serves PaddleOCR-VL behind `/v1`, wire it
-through the existing `command` provider, and give it back. **No Modal resource was created while this
-slice was written, and no number below is a measured run.** It is a procedure with checks, not evidence.
+Rent one Modal sandbox that serves PaddleOCR-VL behind `/v1`, wire it through the existing `command`
+provider, and give it back ([ADR-0009](../adr/0009-command-workers-and-image-only-validation.md)). This
+file is the **procedure**: the commands, the gate criteria and the checks. No number below is a measured
+run; the measured numbers are in [modal-worker-evidence.md](modal-worker-evidence.md).
+
+> **Status, 2026-10-18.** The worker has run. Four L4 Sandboxes were leased and released through these
+> commands -- a direct one-page read, a one-page pipeline run, and the pinned Corpus cold then warm --
+> and the observed results, teardown included, are in
+> [the evidence record](modal-worker-evidence.md). The contract and the successful path are validated.
+> The live failure paths (start, readiness, run and stop failures) have still only ever run against the
+> offline fakes, and OCR quality is unmeasured. One pass criterion below was wrong and is corrected
+> here; the file is otherwise the same procedure it was before the first paid run.
 
 The commands name how to check machine state; they do not claim what the answer will be.
 
@@ -56,6 +65,10 @@ Budget is **not confirmed**. Do not run a start command until all of these are t
 The worker downloads the pinned weights on the first start and caches them in the workspace Volume
 `finepdfs-hf-cache` (mounted at `/root/.cache/huggingface`), so later runs do not pay that download
 again. The first run's wall time includes it; no model weights are committed or shipped here.
+
+The runs of 2026-10-18 happened under whatever budget arrangement was in force then. No cap, rate or
+bill from them is recorded in this repository, so this gate has to be satisfied from scratch before the
+next start -- that earlier spending is not an approval for the next one.
 
 ## Preflight
 
@@ -164,6 +177,12 @@ genuine image-only page produces non-empty accepted text. Cheapest evidence firs
    `paddleocr-vl@...@dpi200` with no Modal host in it. With two pages, page 1 and page 2 stay distinct;
    the 2-page scan is the page-mapping gate, not this one.
 
+   Measured on 2026-10-18: exit 0, one OCR-routed document, one extraction call, one published document
+   with one page and 474 accepted characters, 126.5 s. It passed every criterion above and is still not
+   evidence of OCR quality: the accepted text lost the table rows that a direct call to the same worker
+   returned. See
+   [the evidence record](modal-worker-evidence.md#the-direct-read-and-the-pipeline-read-do-not-agree-and-that-is-the-honest-part).
+
 4. Check teardown before doing anything else, and record the `out/run-summary.json` line.
 
 ## Gate 2 — full pinned NOAA corpus
@@ -197,7 +216,12 @@ python -m json.tool "$ROOT/out/run-summary.json"
 
 * cold run: `routing.ocr` is the expected number of image-only documents and `extraction.calls` is
   non-zero; `published.documents` covers both routed branches;
-* warm run: `extraction.calls` is 0 and `extraction.reused` equals the cold run's calls;
+* warm run: `extraction.calls` is 0, and `extraction.reused` equals the cold run's `calls` **plus** its
+  `reused`, i.e. `requested` -- every document. It is **not** `warm.reused == cold.calls`: reuse counts
+  the memo keys the reading pass asked for and had served, calls count the bodies that actually ran, and
+  a cold run that is not the very first run of its memo can itself reuse something the same engine has
+  already read. Measured: cold 17 calls + 1 reused over 18 documents, warm 0 calls + 18 reused, so the
+  old line demanded 18 = 17 and fails a correct run;
 * the Engine Identity in every record and in the memo-bearing detail is unchanged between the runs and
   contains no `://`, no hostname and no sandbox id;
 * both runs exit 0, and the second run's worker is a different Sandbox, not a cached one.
@@ -229,31 +253,50 @@ If a worker remains because stop could not run, the last resort is the operator 
 container id; the lifetime cap is the automatic backstop. Do not delete a lease file by hand while a
 worker may exist: it is the only recorded handle on it.
 
-## Assumptions this offline slice did not execute
+## Assumptions, and what the first paid runs did and did not settle
+
+The runs of 2026-10-18 settled some of these and left others exactly where they were. Each bullet says
+which, and [the evidence record](modal-worker-evidence.md) has the numbers.
 
 * **The upstream serving command.** `deploy/gpu/server.py` launches
   `vllm serve PaddlePaddle/PaddleOCR-VL-1.6 --revision c5630aba... --served-model-name PaddleOCR-VL-1.6
   --host 0.0.0.0 --port 8000 --trust-remote-code --max-num-batched-tokens 16384
   --no-enable-prefix-caching --mm-processor-cache-gb 0`. The vLLM recipe requires vLLM >= 0.11.1 and
-  this slice pins `vllm/vllm-openai:v0.32.0` by tag and amd64 manifest digest; the pair was not run.
-  There is deliberately no command override: if the upstream surface differs, this file and its test
-  change, so the served command stays pinned and inspectable.
+  this slice pins `vllm/vllm-openai:v0.32.0` by tag and amd64 manifest digest. **Settled for this pin:**
+  that command has now started four L4 Workers, `/v1/models` answered `PaddleOCR-VL-1.6` through the
+  tunnel, and `/v1/chat/completions` read one page and the two scans. There is deliberately no command
+  override: if the upstream surface differs, this file and its test change, so the served command stays
+  pinned and inspectable.
+* **The weights cache.** The first real start creates the Modal Volume `finepdfs-hf-cache` and lets
+  vLLM download the pinned revision into it; later runs reuse it. **Observed:** the first start (weights
+  download included) took 450 s end to end for start, readiness, one page and stop, while the later runs
+  that day took 126.5 s, 167 s and 153 s -- so the download is paid once, as designed. Volume storage
+  and the download are part of the budget gate; no size or cost was recorded.
 * **The routes.** `/v1/models` and `/v1/chat/completions` are vLLM's OpenAI surface. The start command
   checks `/v1/models`; the engine calls `/v1/chat/completions` with the page image and prompt `OCR:`.
+  **Observed:** both answered on a real Worker.
 * **The served-model name.** The pipeline must be configured with
-  `FINEPDFS_ENGINE_MODEL=PaddleOCR-VL-1.6`, which the image passes as `--served-model-name`.
+  `FINEPDFS_ENGINE_MODEL=PaddleOCR-VL-1.6`, which the image passes as `--served-model-name`. **Observed:**
+  the Engine Identity that reached a published record names that model, the weights revision and the
+  image digest, and no address.
+* **Detached sandboxes.** The SDK documentation (1.5.5) says a Sandbox keeps running after its creating
+  process exits and can be terminated by id from another process. **Observed:** a Sandbox outlived the
+  start process and was terminated by id from another process, four times, with a second `stop` a no-op.
 * **Whole-page OCR versus the full PaddleOCR-VL pipeline.** Upstream warns that the vLLM service is the
   VLM stage only: a full document parse also needs layout analysis (PP-DocLayout). The shipped engine
-  sends a whole rendered page with `OCR:`, so this worker serves that existing contract. If quality is
-  unacceptable on the real scans, the fix is a layout-aware server or engine, not a lifecycle change.
+  sends a whole rendered page with `OCR:`, so this worker serves that existing contract. **Observed, and
+  unresolved:** the pipeline's accepted text for the one-page scan kept every printed heading and lost
+  the table's 14 numeric rows that a direct call to the same worker returned. That is the shape of loss
+  a whole-page read shows, but one page is one sample; **OCR quality remains unverified.** If it turns
+  out unacceptable, the fix is a layout-aware server or engine, not a lifecycle change.
 * **Authentication.** The model server has no API key; the Modal tunnel is an unguessable HTTPS URL.
   The start payload therefore carries no `api_key`, and no credential is written to stdout or the lease.
   If a later provider needs a bearer token, it comes from the environment and is redacted on errors.
-* **Detached sandboxes.** The SDK documentation (1.5.5) says a Sandbox keeps running after its creating
-  process exits and can be terminated by id from another process; that is the lifecycle design here,
-  checked in the installed source, not against the live service.
-* **Image digest.** The digest was read from the Docker Hub tag API on 2026-10-18, not from a local
-  pull; a real first build must confirm the platform manifest.
-* **The weights cache.** The first real start creates the Modal Volume `finepdfs-hf-cache` and lets
-  vLLM download the pinned revision into it. Volume storage and the first download are part of the
-  budget gate; later runs reuse the cache.
+* **The image digest.** The identity's `image-<digest>` and `weights-<digest>` are the pins in
+  `deploy/gpu/contract.py`, echoed by the Worker that ran; a run does not re-read the registry, so a
+  green run confirms the pinned image started and served, not that the tag still resolves to that
+  digest.
+* **The failure paths.** Start failure, readiness failure after creation, run failure and stop failure
+  have still **never run against Modal**. They are covered only by the fakes in `tests/deploy/`, so the
+  cases where a GPU leaks are the ones this file has the least evidence for. RunPod has not been run at
+  all.
