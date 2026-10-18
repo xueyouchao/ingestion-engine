@@ -152,6 +152,10 @@ def test_a_run_keeps_the_warm_state_and_writes_only_under_the_demo_root(
     assert (paths.out / "records").is_dir()
     summary = json.loads(paths.summary.read_text())
     assert summary["extraction"] == {"requested": 1, "calls": 1, "reused": 0}
+    assert "run" not in summary, "no timestamp or duration in the declared summary"
+    observed = json.loads((paths.out / "last-run.json").read_text())
+    assert observed["observed"] is True
+    assert observed["elapsed_seconds"] >= 0
     assert "run summary:" in capsys.readouterr().out
     assert engine.calls == 1
 
@@ -193,3 +197,31 @@ def test_the_demo_runs_the_same_command_through_the_flow_without_a_second_writer
     assert record["url"] == URL
     assert summary["published"]["documents"] == 1
     assert summary["exclusions"]["total"] == 0
+
+
+def test_the_demo_restore_reuses_the_restore_corpus_implementation(tmp_path, monkeypatch) -> None:
+    """One restore implementation: both commands dispatch to the same function, neither replays."""
+    from finepdfs.interfaces import cli, restore
+
+    calls = []
+
+    def shared(manifest_path, corpus_dir, *, source=None):
+        calls.append((manifest_path, corpus_dir, source))
+        return 0
+
+    monkeypatch.setattr(demo, "restore_pinned_corpus", shared)
+    monkeypatch.setattr(cli, "restore_pinned_corpus", shared)
+    paths = demo.demo_paths(tmp_path / "demo")
+    pinned = tmp_path / "pinned.json"
+    source = object()
+    other_corpus = tmp_path / "cli-corpus"
+
+    assert demo.restore_demo_corpus(paths, pinned, source=source) == 0
+    assert (
+        cli.main(["restore-corpus", "--manifest", str(pinned), "--corpus", str(other_corpus)]) == 0
+    )
+
+    assert calls[0] == (pinned, paths.corpus, source)
+    assert calls[1][0] == pinned
+    assert calls[1][1] == other_corpus
+    assert restore.restore_pinned_corpus.__module__ == "finepdfs.interfaces.restore"

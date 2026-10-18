@@ -9,6 +9,12 @@ dependencies = ["cocoindex>=1.0.25", "pymupdf>=1.24"]
 # The dev extra installs the tools the CI lint gate runs, so `pip install -e '.[dev]'` is enough to
 # reproduce every check locally.
 dev = ["pytest>=8", "ruff>=0.6"]
+# Docling is the CPU OCR Engine the demo runbook validates (README "Engines"). It is pinned and
+# optional on purpose: the base install stays model-free and the offline suite needs no weights. Docling
+# pulls torch as its own dependency; install a CPU build explicitly when a GPU is not wanted
+# (`pip install torch --index-url https://download.pytorch.org/whl/cpu` after this extra). No unpinned
+# torch is listed here, so the base install cannot silently pull a GPU build.
+docling = ["docling==2.140.0"]
 # The original fasttext-wheel 0.9.2 raises on `predict` under NumPy 2 ("Unable to avoid copy while
 # creating an array as requested"); this is the same library built against the NumPy 2 headers, and it is
 # what the upstream FinePDFs pipeline depends on too. Only the FINEPDFS_LANGUAGE=fasttext mode needs it.

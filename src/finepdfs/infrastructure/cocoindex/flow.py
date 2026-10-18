@@ -177,22 +177,17 @@ async def publish_corpus(readings: tuple[DocumentReading, ...], similar_at: floa
         ],
         similarity_threshold=similar_at,
     )
-    # Reuse the digest keepers that skipped Extraction; they also explain every exact exclusion.
-    exact = [
-        DuplicateDecision(
-            url=item.document.url, kind="exact", duplicate_of=item.exact_duplicate_of, similarity=1.0
-        )
-        for item in readings
-        if item.exact_duplicate_of
-    ]
-    plan = DedupPlan(
-        keepers=plan.keepers,
-        duplicates=tuple(sorted([*plan.duplicates, *exact], key=lambda decision: decision.url)),
+    # An exact duplicate may only name a keeper that is actually published. The digest keeper is not
+    # always that document: it can itself be a near-duplicate loser, dropped by policy, or unreadable.
+    plan, inherited = _exact_decisions(
+        plan, readings, curated, {decision.url: decision for decision in plan.duplicates if decision.kind == "near"}
     )
     duplicates = plan.duplicates_by_url()
 
     for item in readings:
-        _declare(published, item, curated, duplicates, runtime.metrics)
+        _declare(
+            published, item, curated, duplicates, inherited, runtime.metrics, runtime.search_enabled
+        )
 
     localfs.declare_file(
         published.dedup_report_path(KEPT_REPORT), published.kept_payload(plan), create_parent_dirs=True
@@ -218,6 +213,61 @@ async def publish_corpus(readings: tuple[DocumentReading, ...], similar_at: floa
     localfs.declare_file(published.summary_path(), published.summary_payload(summary), create_parent_dirs=True)
 
 
+def _exact_decisions(
+    plan: DedupPlan,
+    readings: tuple[DocumentReading, ...],
+    curated: dict[str, tuple[CorpusDocument, CurationOutcome]],
+    near_by_url: dict[str, DuplicateDecision],
+) -> tuple[DedupPlan, dict[str, tuple[str, str, str]]]:
+    """Point every exact duplicate at a keeper this run actually publishes, or at its honest fate.
+
+    A published, non-duplicate digest keeper gets the exact decision it always got. When the keeper is
+    itself a near-duplicate loser, its exact duplicates follow the keeper's near decision, so the
+    published near keeper is the one named. When the keeper was dropped or failed, no keeper exists to
+    name: the duplicate is recorded with that same disposition and a reason naming the keeper, and it
+    still costs no Extraction because this is decided from decisions, not from more reading.
+    """
+    failed_keepers = {
+        item.document.url: item.failure or "it could not be read"
+        for item in readings
+        if item.extracted is None and not item.exact_duplicate_of
+    }
+    exact: list[DuplicateDecision] = []
+    inherited: dict[str, tuple[str, str, str]] = {}
+    for item in readings:
+        keeper = item.exact_duplicate_of
+        if not keeper:
+            continue
+        near = near_by_url.get(keeper)
+        if near is not None:
+            exact.append(
+                DuplicateDecision(
+                    url=item.document.url,
+                    kind="near",
+                    duplicate_of=near.duplicate_of,
+                    similarity=near.similarity,
+                )
+            )
+            continue
+        outcome = curated.get(keeper)
+        if outcome is not None and not outcome[1].published:
+            inherited[item.document.url] = (outcome[1].status, keeper, outcome[1].reason)
+            continue
+        if keeper in failed_keepers:
+            inherited[item.document.url] = ("failed", keeper, failed_keepers[keeper])
+            continue
+        exact.append(
+            DuplicateDecision(url=item.document.url, kind="exact", duplicate_of=keeper, similarity=1.0)
+        )
+    return (
+        DedupPlan(
+            keepers=plan.keepers,
+            duplicates=tuple(sorted([*plan.duplicates, *exact], key=lambda decision: decision.url)),
+        ),
+        inherited,
+    )
+
+
 def _extraction(item: DocumentReading) -> ExtractionResult:
     assert item.extracted is not None and item.plan is not None
     return ExtractionResult(document=item.extracted, plan=item.plan)
@@ -228,7 +278,9 @@ def _declare(
     item: DocumentReading,
     curated: dict[str, tuple[CorpusDocument, CurationOutcome]],
     duplicates: dict[str, DuplicateDecision],
+    inherited: dict[str, tuple[str, str, str]],
     metrics: RunMetrics,
+    export_chunks: bool,
 ) -> None:
     """Declare one document's outputs: its text and record, or the reason it is not published."""
     document = item.document
@@ -238,6 +290,23 @@ def _declare(
             published, metrics, document, f"identical bytes to {decision.duplicate_of}", "exact-duplicate"
         )
         return
+    if decision is not None and decision.kind == "near":
+        # Reachable before the Extraction check on purpose: an exact duplicate whose digest keeper is a
+        # near-duplicate loser follows that keeper's near decision without ever being read.
+        reason = f"near-duplicate of {decision.duplicate_of} (similarity {decision.similarity:.3f})"
+        _declare_exclusion(published, metrics, document, reason, "near-duplicate")
+        return
+    fate = inherited.get(document.url)
+    if fate is not None:
+        kind, keeper, keeper_reason = fate
+        _declare_exclusion(
+            published,
+            metrics,
+            document,
+            f"identical bytes to {keeper}, which was {kind}: {keeper_reason}",
+            kind,
+        )
+        return
     if item.extracted is None:
         _declare_exclusion(published, metrics, document, item.failure, "failed")
         return
@@ -245,11 +314,6 @@ def _declare(
     outcome = curated[document.url][1]
     if not outcome.published or outcome.record is None:
         _declare_exclusion(published, metrics, document, outcome.reason, outcome.status)
-        return
-
-    if decision is not None:
-        reason = f"near-duplicate of {decision.duplicate_of} (similarity {decision.similarity:.3f})"
-        _declare_exclusion(published, metrics, document, reason, "near-duplicate")
         return
 
     localfs.declare_file(published.doc_path(document.key), outcome.markdown, create_parent_dirs=True)
@@ -266,11 +330,14 @@ def _declare(
         published.pages_payload(pages),
         create_parent_dirs=True,
     )
-    localfs.declare_file(
-        published.chunks_path(document.key),
-        published.chunks_payload(chunk_page_records(pages, language=outcome.record.language)),
-        create_parent_dirs=True,
-    )
+    if export_chunks:
+        # Chunks exist to feed search. A run that did not enable search declares none, so the local
+        # index cannot be rebuilt against evidence this run never meant to offer.
+        localfs.declare_file(
+            published.chunks_path(document.key),
+            published.chunks_payload(chunk_page_records(pages, language=outcome.record.language)),
+            create_parent_dirs=True,
+        )
     metrics.count_published(len(outcome.pages))
 
 

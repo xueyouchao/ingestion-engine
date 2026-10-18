@@ -47,6 +47,10 @@ class Runtime:
     extraction: ExtractionStep
     curation: CurationStep
     similarity_threshold: float = 0.8
+    # Chunks are a search input, not an ingestion product: the flow declares them only when a run
+    # enabled search (FINEPDFS_SEARCH, or the CLI's --search), so a plain curation run declares none
+    # and any stale chunk export is retracted.
+    search_enabled: bool = False
     # What this run actually did. The flow counts into it at the real seams (routing, the memoised
     # extract body, each declaration) and writes out/run-summary.json from it. Observation, not
     # wiring: it is excluded from equality so two identically wired runtimes still compare equal.
@@ -112,7 +116,13 @@ def runtime_from_environment(environ: Mapping[str, str] | None = None) -> Runtim
         extraction=ExtractionStep(probe, engines, policy),
         curation=CurationStep(build_language_identifier(language_config), policy),
         similarity_threshold=float(values.get("FINEPDFS_SIMILARITY_THRESHOLD", "0.8")),
+        search_enabled=_enabled(values.get("FINEPDFS_SEARCH", "")),
     )
+
+
+def _enabled(value: str) -> bool:
+    """FINEPDFS_SEARCH is a switch: an unset, empty or explicitly false value means search is off."""
+    return value.strip().lower() not in ("", "0", "false", "no", "off")
 
 
 def _languages(values: Mapping[str, str]) -> tuple[str, ...]:

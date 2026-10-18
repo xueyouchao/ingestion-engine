@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
 import cocoindex as coco
+import pytest
 
 from finepdfs.application.curate import CurationPolicy, CurationStep, ExtractionStep
 from finepdfs.domain.chunks import CHUNKING_VERSION
@@ -92,6 +94,7 @@ def _runtime(
     languages: ControlledLanguages,
     *,
     policy: CurationPolicy | None = None,
+    search: bool = True,
 ) -> Runtime:
     policy = policy or CurationPolicy(engine_name="pymupdf", publish=PublishPolicy(min_characters=40))
     return Runtime(
@@ -100,6 +103,7 @@ def _runtime(
         policy=policy,
         extraction=ExtractionStep(PymupdfTextLayerProbe(), {"pymupdf": engine}, policy),
         curation=CurationStep(languages, policy),
+        search_enabled=search,
     )
 
 
@@ -172,17 +176,19 @@ def _reindex(out_dir: Path, index_path: Path):
     from finepdfs.infrastructure.publishing.disk import PublishedCorpus
     from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
 
-    return reindex_search(SqliteFtsSearchIndex(index_path), PublishedCorpus(out_dir).read_chunks())
+    return reindex_search(SqliteFtsSearchIndex(index_path), PublishedCorpus(out_dir).read_declared_chunks())
 
 
-def _search(index_path: Path, text: str, top_k: int = 20, **filters):
+def _search(out_dir: Path, index_path: Path, text: str, top_k: int = 20, **filters):
+    """Read through the shared contract against the declared chunks in `out_dir`."""
     from finepdfs.application.search import SearchAcceptedEvidence
     from finepdfs.domain.search import SearchFilters
+    from finepdfs.infrastructure.publishing.disk import PublishedCorpus
     from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
 
-    return SearchAcceptedEvidence(SqliteFtsSearchIndex(index_path)).search(
-        text, filters=SearchFilters(**filters), top_k=top_k
-    )
+    return SearchAcceptedEvidence(
+        SqliteFtsSearchIndex(index_path), PublishedCorpus(out_dir).read_declared_chunks
+    ).search(text, filters=SearchFilters(**filters), top_k=top_k)
 
 
 def test_the_shared_search_api_returns_accepted_evidence_with_citations(monkeypatch, tmp_path) -> None:
@@ -203,7 +209,7 @@ def test_the_shared_search_api_returns_accepted_evidence_with_citations(monkeypa
     assert report.ok, report.failures
     assert report.chunks > 0
 
-    results = _search(index_path, "Brighton")
+    results = _search(runtime.out_dir, index_path, "Brighton")
     assert len(results.hits) == 1
     hit = results.hits[0]
     assert hit.doc_id == document_key(URL)
@@ -217,7 +223,7 @@ def test_the_shared_search_api_returns_accepted_evidence_with_citations(monkeypa
     assert hit.engine == "pymupdf@controlled-pages"
     assert hit.language == "eng"
 
-    assert _search(index_path, "uncertain").hits == (), "only accepted pages are evidence"
+    assert _search(runtime.out_dir, index_path, "uncertain").hits == (), "only accepted pages are evidence"
 
 
 def test_metadata_filters_narrow_the_same_contract(tmp_path) -> None:
@@ -244,20 +250,40 @@ def test_metadata_filters_narrow_the_same_contract(tmp_path) -> None:
         chunk_page_records((first,), language="eng") + chunk_page_records((second,), language="fra"),
     )
     assert report.ok, report.failures
+    chunks = chunk_page_records((first,), language="eng") + chunk_page_records((second,), language="fra")
 
-    assert len(_search(index_path, "harbour").hits) == 2
-    assert [hit.doc_id for hit in _search(index_path, "harbour", language="fra").hits] == ["b" * 16]
-    assert [hit.doc_id for hit in _search(index_path, "harbour", engine="pymupdf@native").hits] == ["a" * 16]
-    assert [hit.doc_id for hit in _search(index_path, "harbour", doc_id="a" * 16).hits] == ["a" * 16]
-    assert _search(index_path, "harbour", language="eng", engine="docling@cli").hits == ()
-    assert len(_search(index_path, "harbour", top_k=1).hits) == 1
+    assert len(_search_chunks(index_path, chunks, "harbour").hits) == 2
+    assert [hit.doc_id for hit in _search_chunks(index_path, chunks, "harbour", language="fra").hits] == ["b" * 16]
+    assert [hit.doc_id for hit in _search_chunks(index_path, chunks, "harbour", engine="pymupdf@native").hits] == ["a" * 16]
+    assert [hit.doc_id for hit in _search_chunks(index_path, chunks, "harbour", doc_id="a" * 16).hits] == ["a" * 16]
+    assert _search_chunks(index_path, chunks, "harbour", language="eng", engine="docling@cli").hits == ()
+    assert len(_search_chunks(index_path, chunks, "harbour", top_k=1).hits) == 1
 
 
 def _reindex_chunks(index_path: Path, chunks):
     from finepdfs.application.search import reindex_search
+    from finepdfs.domain.chunks import DeclaredChunkSet
     from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
 
-    return reindex_search(SqliteFtsSearchIndex(index_path), chunks)
+    return reindex_search(SqliteFtsSearchIndex(index_path), DeclaredChunkSet.of(chunks))
+
+
+def good_chunks_hits(index_path: Path, chunk) -> tuple:
+    """The hits for one stored chunk, read against a declared set that holds exactly it."""
+    return _search_chunks(index_path, (chunk,), chunk.text.split()[0]).hits
+
+
+def _search_chunks(index_path: Path, chunks, text: str, top_k: int = 20, **filters):
+    """Read an index built from an in-memory declared set, without a published output directory."""
+    from finepdfs.application.search import SearchAcceptedEvidence
+    from finepdfs.domain.chunks import DeclaredChunkSet
+    from finepdfs.domain.search import SearchFilters
+    from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
+
+    declared = DeclaredChunkSet.of(chunks)
+    return SearchAcceptedEvidence(SqliteFtsSearchIndex(index_path), lambda: declared).search(
+        text, filters=SearchFilters(**filters), top_k=top_k
+    )
 
 
 def test_reindexing_twice_is_idempotent_and_never_duplicates_hits(monkeypatch, tmp_path) -> None:
@@ -269,13 +295,13 @@ def test_reindexing_twice_is_idempotent_and_never_duplicates_hits(monkeypatch, t
     index_path = tmp_path / "index.db"
 
     first = _reindex(runtime.out_dir, index_path)
-    results = _search(index_path, "harbour")
+    results = _search(runtime.out_dir, index_path, "harbour")
     retried = _reindex(runtime.out_dir, index_path)
 
     assert first.ok and retried.ok
     assert retried.removed == 0, "a retry declares exactly what is already stored"
     assert retried.upserted == retried.chunks
-    assert _search(index_path, "harbour").hits == results.hits
+    assert _search(runtime.out_dir, index_path, "harbour").hits == results.hits
     assert len(results.hits) == 1
     assert len({hit.chunk_id for hit in results.hits}) == len(results.hits), "one row per chunk, no duplicates"
 
@@ -305,7 +331,7 @@ def test_a_replacement_with_fewer_pages_retracts_old_chunks_and_their_hits(monke
 
     old_chunks = _chunk_records(runtime.out_dir, URL)
     old_ids = {chunk["chunk_id"] for chunk in old_chunks}
-    filler_hits = _search(index_path, "filler")
+    filler_hits = _search(runtime.out_dir, index_path, "filler")
     assert len(filler_hits.hits) >= 2, "the long first page was split into several chunks"
     assert len({hit.chunk_id for hit in filler_hits.hits}) == len(filler_hits.hits)
 
@@ -315,10 +341,10 @@ def test_a_replacement_with_fewer_pages_retracts_old_chunks_and_their_hits(monke
 
     assert report.removed == len(old_ids), "every chunk of the replaced content is retracted"
     assert len(_chunk_records(runtime.out_dir, URL)) < len(old_chunks), "the replacement has fewer chunks"
-    assert _search(index_path, "Bravo").hits == ()
-    assert _search(index_path, "Charlie").hits == ()
-    assert _search(index_path, "filler").hits == ()
-    delta = _search(index_path, "Delta")
+    assert _search(runtime.out_dir, index_path, "Bravo").hits == ()
+    assert _search(runtime.out_dir, index_path, "Charlie").hits == ()
+    assert _search(runtime.out_dir, index_path, "filler").hits == ()
+    delta = _search(runtime.out_dir, index_path, "Delta")
     assert len(delta.hits) == 1, "the surviving page is found exactly once"
     hit = delta.hits[0]
     assert hit.digest == content_digest(second_body)
@@ -338,7 +364,7 @@ def test_a_chunking_version_change_replaces_the_hits_instead_of_adding_them(monk
     index_path = tmp_path / "index.db"
     _reindex(runtime.out_dir, index_path)
 
-    before = _search(index_path, "meteorology")
+    before = _search(runtime.out_dir, index_path, "meteorology")
     assert len(before.hits) == 1
     old_id = before.hits[0].chunk_id
     assert before.hits[0].chunking_version == CHUNKING_VERSION
@@ -347,7 +373,7 @@ def test_a_chunking_version_change_replaces_the_hits_instead_of_adding_them(monk
     _run(monkeypatch, tmp_path, runtime)
     report = _reindex(runtime.out_dir, index_path)
 
-    after = _search(index_path, "meteorology")
+    after = _search(runtime.out_dir, index_path, "meteorology")
     assert len(after.hits) == 1, "the same evidence is not returned twice under two chunking versions"
     assert after.hits[0].chunk_id != old_id
     assert after.hits[0].chunking_version == "chunking-v2"
@@ -365,7 +391,7 @@ def test_an_exclusion_stops_its_chunks_being_searchable(monkeypatch, tmp_path) -
     _run(monkeypatch, tmp_path, runtime)
     index_path = tmp_path / "index.db"
     _reindex(runtime.out_dir, index_path)
-    assert len(_search(index_path, "meteorology").hits) == 1
+    assert len(_search(runtime.out_dir, index_path, "meteorology").hits) == 1
 
     dropped = _runtime(
         tmp_path,
@@ -378,7 +404,7 @@ def test_an_exclusion_stops_its_chunks_being_searchable(monkeypatch, tmp_path) -
 
     assert not _chunks_path(tmp_path / "out", URL).exists(), "a dropped Document declares no chunks"
     assert report.removed == 1
-    assert _search(index_path, "meteorology").hits == ()
+    assert _search(runtime.out_dir, index_path, "meteorology").hits == ()
 
 
 def test_removing_a_crawl_record_stops_its_chunks_being_searchable(monkeypatch, tmp_path) -> None:
@@ -396,7 +422,7 @@ def test_removing_a_crawl_record_stops_its_chunks_being_searchable(monkeypatch, 
     _run(monkeypatch, tmp_path, runtime)
     index_path = tmp_path / "index.db"
     _reindex(runtime.out_dir, index_path)
-    assert len(_search(index_path, "meteorology").hits) == 1
+    assert len(_search(runtime.out_dir, index_path, "meteorology").hits) == 1
 
     _keep_only(tmp_path / "corpus", {second_url})
     _run(monkeypatch, tmp_path, runtime)
@@ -404,8 +430,8 @@ def test_removing_a_crawl_record_stops_its_chunks_being_searchable(monkeypatch, 
 
     assert report.removed == 1
     assert not _chunks_path(runtime.out_dir, URL).exists(), "a removed Crawl Record declares no chunks"
-    assert _search(index_path, "meteorology").hits == (), "a removed Crawl Record cannot supply evidence"
-    assert len(_search(index_path, "Brighton").hits) == 1, "the surviving document is still searchable"
+    assert _search(runtime.out_dir, index_path, "meteorology").hits == (), "a removed Crawl Record cannot supply evidence"
+    assert len(_search(runtime.out_dir, index_path, "Brighton").hits) == 1, "the surviving document is still searchable"
 
 
 def test_a_chunk_that_cannot_be_stored_is_reported_not_swallowed(tmp_path) -> None:
@@ -430,4 +456,133 @@ def test_a_chunk_that_cannot_be_stored_is_reported_not_swallowed(tmp_path) -> No
     assert len(report.failures) == 1
     assert report.failures[0].chunk_id == good.chunk_id
     assert "same chunk_id" in report.failures[0].reason
-    assert len(_search(index_path, "harbour").hits) == 1, "the chunk that did store stays queryable"
+    assert _search_chunks(index_path, (good, collision), "harbour").available is False, (
+        "a partial rebuild stays stale on purpose: its rows are not evidence the declared set is covered"
+    )
+    _reindex_chunks(index_path, (good,))
+    assert len(good_chunks_hits(index_path, good)) == 1, "a clean rebuild makes the stored chunk queryable"
+
+
+def test_a_replacement_is_not_searchable_until_the_index_is_rebuilt(monkeypatch, tmp_path) -> None:
+    """ADR-0008: the index is only as fresh as the last rebuild; stale evidence is never served."""
+    first_body = FIXTURE.read_bytes()
+    second_body = first_body + b"\n% replaced bytes\n"
+    _write_corpus(tmp_path / "corpus", {URL: first_body})
+    engine = ControlledEngine(
+        {
+            content_digest(first_body): (PageText(1, "Bravo paragraph about buoys and wind at dawn."),),
+            content_digest(second_body): (PageText(1, "Delta paragraph, the only replacement page here."),),
+        }
+    )
+    runtime = _runtime(tmp_path, engine, ControlledLanguages())
+    _run(monkeypatch, tmp_path, runtime)
+    index_path = tmp_path / "index.db"
+    _reindex(runtime.out_dir, index_path)
+    assert len(_search(runtime.out_dir, index_path, "Bravo").hits) == 1
+
+    _write_corpus(tmp_path / "corpus", {URL: second_body})
+    _run(monkeypatch, tmp_path, runtime)
+
+    stale = _search(runtime.out_dir, index_path, "Bravo")
+    assert stale.available is False, "the index no longer matches the declared chunks"
+    assert stale.hits == (), "no stale text is returned while the index is out of date"
+    assert "index-search" in stale.reason
+    assert _search(runtime.out_dir, index_path, "Delta").available is False, "a fresh chunk is not served from a stale index"
+
+    _reindex(runtime.out_dir, index_path)
+    assert _search(runtime.out_dir, index_path, "Bravo").hits == ()
+    delta = _search(runtime.out_dir, index_path, "Delta")
+    assert delta.available is True
+    assert [hit.page_number for hit in delta.hits] == [1]
+    assert delta.hits[0].digest == content_digest(second_body)
+
+
+def test_a_removal_is_not_searchable_until_the_index_is_rebuilt(monkeypatch, tmp_path) -> None:
+    second_url = "https://example.org/second.pdf"
+    first_body = FIXTURE.read_bytes()
+    second_body = first_body + b"\n% a second, unrelated source\n"
+    _write_corpus(tmp_path / "corpus", {URL: first_body, second_url: second_body})
+    engine = ControlledEngine(
+        {
+            content_digest(first_body): (PageText(1, "Alpine meteorology over the northern range."),),
+            content_digest(second_body): (PageText(1, "Brighton buoy reports swell and wind at dawn."),),
+        }
+    )
+    runtime = _runtime(tmp_path, engine, ControlledLanguages())
+    _run(monkeypatch, tmp_path, runtime)
+    index_path = tmp_path / "index.db"
+    _reindex(runtime.out_dir, index_path)
+
+    _keep_only(tmp_path / "corpus", {second_url})
+    _run(monkeypatch, tmp_path, runtime)
+
+    stale = _search(runtime.out_dir, index_path, "meteorology")
+    assert stale.available is False
+    assert stale.hits == (), "a removed Document cannot supply stale evidence"
+    assert "index-search" in stale.reason
+
+    _reindex(runtime.out_dir, index_path)
+    assert _search(runtime.out_dir, index_path, "meteorology").hits == ()
+    assert len(_search(runtime.out_dir, index_path, "Brighton").hits) == 1
+
+
+def test_reading_an_index_never_opens_it_read_write(tmp_path) -> None:
+    """A reader that created or repaired the database would be a second writer (ADR-0008)."""
+    from finepdfs.domain.search import SearchQuery, SearchUnavailable
+    from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
+
+    empty = tmp_path / "empty" / "search.db"
+    empty.parent.mkdir()
+    empty.write_bytes(b"")
+
+    with pytest.raises(SearchUnavailable, match="empty"):
+        SqliteFtsSearchIndex(empty).search(SearchQuery(text="alpine"))
+    assert empty.read_bytes() == b"", "a 0-byte index stays 0 bytes"
+
+    missing = tmp_path / "missing" / "search.db"
+    with pytest.raises(SearchUnavailable, match="no search index"):
+        SqliteFtsSearchIndex(missing).state()
+    assert not missing.exists(), "reading must not create an index"
+    assert not missing.parent.exists(), "reading must not create the index directory"
+
+    schema_less = tmp_path / "schema-less.db"
+    sqlite3.connect(schema_less).execute("CREATE TABLE unrelated (x TEXT)").connection.close()
+    with pytest.raises(SearchUnavailable, match="index-search"):
+        SqliteFtsSearchIndex(schema_less).state()
+    with pytest.raises(SearchUnavailable):
+        SqliteFtsSearchIndex(schema_less).search(SearchQuery(text="alpine"))
+    tables = sqlite3.connect(schema_less).execute("SELECT name FROM sqlite_master ORDER BY name").fetchall()
+    sqlite3.connect(schema_less).close()
+    assert tables == [("unrelated",)], "a reader must not create or migrate schema"
+
+
+def test_chunks_are_declared_only_when_search_is_enabled(monkeypatch, tmp_path) -> None:
+    """The spec says "chunks when search is enabled": a plain ingestion run declares no chunk export."""
+    body = FIXTURE.read_bytes()
+    _write_corpus(tmp_path / "corpus", {URL: body})
+    engine = ControlledEngine(
+        {content_digest(body): (PageText(1, "Alpine meteorology over the northern range."),)}
+    )
+    enabled = _runtime(tmp_path, engine, ControlledLanguages())
+    _run(monkeypatch, tmp_path, enabled)
+    assert _chunks_path(tmp_path / "out", URL).is_file()
+    assert _pages_path(tmp_path / "out", URL).is_file(), "pages are ingestion output, not search output"
+
+    plain = _runtime(tmp_path, engine, ControlledLanguages(), search=False)
+    _run(monkeypatch, tmp_path, plain)
+
+    assert not _chunks_path(tmp_path / "out", URL).exists(), (
+        "a run without search retracts the chunks it no longer declares"
+    )
+    assert _pages_path(tmp_path / "out", URL).is_file()
+    assert _reindex(tmp_path / "out", tmp_path / "index.db").chunks == 0
+    assert _search(tmp_path / "out", tmp_path / "index.db", "Alpine").available is False
+
+
+def test_the_search_setting_comes_from_the_documented_variable(monkeypatch, tmp_path) -> None:
+    from finepdfs.infrastructure.cocoindex.runtime import runtime_from_environment
+
+    assert runtime_from_environment({"FINEPDFS_SEARCH": "1"}).search_enabled is True
+    assert runtime_from_environment({"FINEPDFS_SEARCH": "true"}).search_enabled is True
+    assert runtime_from_environment({"FINEPDFS_SEARCH": ""}).search_enabled is False
+    assert runtime_from_environment({"FINEPDFS_SEARCH": "0"}).search_enabled is False

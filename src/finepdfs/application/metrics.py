@@ -13,9 +13,7 @@ writer exists beside it.
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 
 SCHEMA_VERSION = 1
 
@@ -26,10 +24,6 @@ EXCLUSION_KINDS = ("dropped", "failed", "exact-duplicate", "near-duplicate")
 _ExtractionKey = tuple[str, str, str]
 
 
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
 @dataclass
 class RunMetrics:
     """One run's counters, carried by the Runtime that the flow reads.
@@ -38,10 +32,6 @@ class RunMetrics:
     the run that owns it. Each update is a single assignment on the event loop, so no lock is needed.
     """
 
-    started_at: float = field(default_factory=time.monotonic)
-    started_wall: datetime = field(default_factory=_utc_now)
-    finished_at: float | None = None
-    finished_wall: datetime | None = None
     routed_native: int = 0
     routed_ocr: int = 0
     published_documents: int = 0
@@ -95,16 +85,14 @@ class RunMetrics:
         engine_name: str,
         engine_identity: str,
     ) -> dict:
-        """The run summary, in the shape a read-only browser can consume without recomputing anything."""
-        self.finished_at = time.monotonic()
-        self.finished_wall = _utc_now()
+        """The declared counters, and nothing that makes two identical runs differ.
+
+        No timestamp, duration, host path or lease id lands here: a published record must be
+        reproducible, so an unchanged rerun rewrites these exact bytes and target state does not
+        change. Wall-clock observation belongs to the command wrapper that measures the run.
+        """
         return {
             "schema_version": SCHEMA_VERSION,
-            "run": {
-                "started_at": _isoformat(self.started_wall),
-                "finished_at": _isoformat(self.finished_wall),
-                "elapsed_seconds": round(max(self.finished_at - self.started_at, 0.0), 3),
-            },
             "corpus": {
                 "crawl_id": crawl_id,
                 "domain": domain,
@@ -128,7 +116,3 @@ class RunMetrics:
             },
             "engine": {"name": engine_name, "identity": engine_identity},
         }
-
-
-def _isoformat(moment: datetime | None) -> str:
-    return moment.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z") if moment else ""

@@ -166,6 +166,55 @@ def test_a_run_prints_the_measured_summary_it_declared(monkeypatch, tmp_path, ca
     assert (tmp_path / "out" / "run-summary.json").exists()
 
 
+def test_the_run_records_observed_timing_beside_the_declared_outputs(monkeypatch, tmp_path, capsys) -> None:
+    """The flow declares reproducible counters; the command observes wall time in a file nobody declares."""
+    import hashlib
+
+    from finepdfs.infrastructure.corpus.manifest import CorpusEntry, CorpusManifest, relative_pdf_path
+    from finepdfs.interfaces import cli
+
+    body = (Path(__file__).resolve().parent.parent / "fixtures" / "warc_payload.bin").read_bytes()
+    digest = hashlib.sha256(body).hexdigest()
+    corpus_dir = tmp_path / "corpus"
+    (corpus_dir / "pdfs").mkdir(parents=True)
+    (corpus_dir / relative_pdf_path(digest)).write_bytes(body)
+    CorpusManifest(
+        crawl_id="CC-MAIN-2026-39",
+        domain="a.example",
+        entries=[
+            CorpusEntry(
+                url="https://a.example/one.pdf",
+                digest=digest,
+                file=relative_pdf_path(digest),
+                bytes=len(body),
+                crawl_id="CC-MAIN-2026-39",
+                warc_filename="crawl-data/CC-MAIN-2026-39/segments/x/warc/y.warc.gz",
+                offset=1,
+                length=len(body),
+            )
+        ],
+    ).save(corpus_dir / "manifest.json")
+    monkeypatch.setenv("FINEPDFS_DB", str(tmp_path / "runs.db"))
+    out_dir = tmp_path / "out"
+    argv = ["run", "--corpus", str(corpus_dir), "--out", str(out_dir), "--engine", "pymupdf"]
+
+    # Three runs: the cold one is a different run, the next two are identical by construction.
+    assert cli.main(argv) == 0
+    assert cli.main(argv) == 0
+    declared = (out_dir / "run-summary.json").read_bytes()
+    assert cli.main(argv) == 0
+
+    assert (out_dir / "run-summary.json").read_bytes() == declared, (
+        "a rerun over the same state rewrites the same declared bytes"
+    )
+    observed = json.loads((out_dir / "last-run.json").read_text())
+    assert observed["observed"] is True
+    assert "not declared target state" in observed["note"]
+    assert observed["elapsed_seconds"] >= 0
+    assert observed["finished_at"].endswith("Z")
+    assert "(observed)" in capsys.readouterr().out
+
+
 def test_the_search_flags_reach_the_commands() -> None:
     index = build_parser().parse_args(
         ["search", "--index", "i.db", "--top-k", "3", "--language", "eng", "--engine", "docling@cli",
@@ -245,21 +294,81 @@ def test_the_fallback_search_is_usable_from_the_command_line(tmp_path, capsys) -
     printed = capsys.readouterr().out
     assert "2 chunks from 2 documents" in printed
 
-    assert cli.main(["search", "--index", str(index), "harbour"]) == 0
+    assert cli.main(["search", "--out", str(out_dir), "--index", str(index), "harbour"]) == 0
     printed = capsys.readouterr().out
     assert "p.4" in printed
     assert "https://example.org/page-4.pdf" in printed
     assert "<mark>Harbour</mark>" in printed
 
-    assert cli.main(["search", "--index", str(index), "--json", "harbour"]) == 0
+    assert cli.main(["search", "--out", str(out_dir), "--index", str(index), "--json", "harbour"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["total"] == 1
     hit = payload["hits"][0]
     assert set(hit) >= {"doc_id", "chunk_id", "source_url", "digest", "page_number", "text", "snippet", "score"}
     assert hit["page_number"] == 4
 
-    assert cli.main(["search", "--index", str(index), "--language", "fra", "harbour"]) == 0
+    assert cli.main(["search", "--out", str(out_dir), "--index", str(index), "--language", "fra", "harbour"]) == 0
     assert "no matches" in capsys.readouterr().out
+
+
+def test_a_stale_index_is_refused_by_the_search_command(tmp_path, capsys) -> None:
+    """A stale index is an operator state, not a hit list: no stale text reaches the terminal."""
+    from finepdfs.interfaces import cli
+
+    out_dir = tmp_path / "out"
+    _write_declared_chunks(out_dir)
+    index = tmp_path / "search.db"
+    assert cli.main(["index-search", "--out", str(out_dir), "--index", str(index)]) == 0
+    capsys.readouterr()
+
+    for path in (out_dir / "chunks").glob("*.jsonl"):
+        path.unlink()
+
+    assert cli.main(["search", "--out", str(out_dir), "--index", str(index), "harbour"]) == 2
+    captured = capsys.readouterr()
+    assert "index-search" in captured.err
+    assert "Harbour" not in captured.out, "no stale hit text is printed"
+
+
+def test_the_search_index_path_comes_from_one_resolver_that_honours_the_environment(monkeypatch) -> None:
+    from finepdfs.interfaces.search_paths import resolve_search_index
+
+    monkeypatch.setenv("FINEPDFS_SEARCH_INDEX", "/data/configured.db")
+    assert resolve_search_index() == Path("/data/configured.db")
+    assert resolve_search_index(out=Path("o")) == Path("/data/configured.db"), (
+        "the documented variable wins over the output directory's default name"
+    )
+    assert resolve_search_index(out=Path("o"), index=Path("flag.db")) == Path("flag.db"), (
+        "an explicit flag wins over the environment"
+    )
+
+    monkeypatch.delenv("FINEPDFS_SEARCH_INDEX")
+    assert resolve_search_index(out=Path("o")) == Path("o/search.db")
+
+
+def test_ask_honours_the_documented_search_index_variable(tmp_path, capsys, monkeypatch) -> None:
+    """ask used to ignore FINEPDFS_SEARCH_INDEX; it now resolves the path the same way search does."""
+    from finepdfs.infrastructure.corpus.index import document_key
+    from finepdfs.interfaces import cli
+
+    out_dir = tmp_path / "out"
+    _write_declared_chunks(out_dir)
+    configured = tmp_path / "configured.db"
+    assert cli.main(["index-search", "--out", str(out_dir), "--index", str(configured)]) == 0
+    capsys.readouterr()
+    monkeypatch.setenv("FINEPDFS_SEARCH_INDEX", str(configured))
+    monkeypatch.setattr(
+        cli, "ChatCompletionsClient", lambda *args, **kwargs: _ask_model(document_key("https://example.org/page-9.pdf"))
+    )
+    args = build_parser().parse_args(
+        [
+            "ask", "--question", "q", "--base-url", "http://[::1]:11434/v1", "--model", "m",
+            "--out", str(out_dir),
+        ]
+    )
+
+    assert cli._ask(args) == 0
+    assert "no search index" not in capsys.readouterr().err
 
 
 def test_indexing_a_directory_that_holds_no_run_is_an_operator_error(tmp_path, capsys) -> None:

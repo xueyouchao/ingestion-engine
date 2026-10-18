@@ -23,6 +23,7 @@ from finepdfs.domain.chunks import chunk_page_records
 from finepdfs.domain.publishing import PageRecord
 from finepdfs.infrastructure.corpus.index import document_key
 from finepdfs.infrastructure.corpus.manifest import CorpusEntry, CorpusManifest, relative_pdf_path
+from finepdfs.infrastructure.publishing.disk import PublishedCorpus
 from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
 from finepdfs.interfaces import explorer as explorer_module
 from finepdfs.interfaces.explorer import Explorer, ExplorerError, explorer_for
@@ -33,8 +34,8 @@ EXCLUDED_URL = "https://a.example/duplicate.pdf"
 SECOND_EXCLUDED_URL = "https://a.example/failed.pdf"
 SUMMARY = {
     "schema_version": 1,
-    "run": {"started_at": "2026-10-18T02:07:42Z", "finished_at": "2026-10-18T02:07:51Z", "elapsed_seconds": 8.311},
-    # Deliberately not the file counts below: the browser shows the measured summary it was given.
+    # Deliberately not the file counts below, and deliberately no timing: the browser shows the
+    # measured, reproducible summary the flow declared.
     "corpus": {"crawl_id": "CC-MAIN-2026-39", "domain": "a.example", "crawl_records": 19, "documents": 18},
     "routing": {"documents": 18, "native": 16, "ocr": 2},
     "extraction": {"requested": 18, "calls": 0, "reused": 18},
@@ -345,9 +346,94 @@ def test_the_html_carries_the_filter_and_detail_contract(tmp_path) -> None:
         assert "read-only" in html
         assert "/api/documents" in html
         assert "finished_at" in html
+        assert "not recorded" in html
         assert "#page=" in html
         assert "Engine Identity" in html
         assert "Accepted pages" in html
+
+
+def test_absent_run_timing_is_reported_as_not_recorded(tmp_path) -> None:
+    """Timing is observed beside the outputs, never declared: its absence is a state, not a zero."""
+    out, corpus, _ = _completed_output(tmp_path)
+
+    with _serving(explorer_for(out, corpus)) as base:
+        observed = _json(base + "/api/observed-run")
+
+        assert observed["recorded"] is False
+        assert observed["elapsed_seconds"] is None
+        assert "not recorded" in observed["note"]
+
+
+def test_a_recorded_observation_carries_elapsed_labelled_observed(tmp_path) -> None:
+    out, corpus, _ = _completed_output(tmp_path)
+    (out / "last-run.json").write_text(
+        json.dumps(
+            {
+                "observed": True,
+                "note": "observed wall-clock timing of one run; it is not declared target state and is not reproducible",
+                "started_at": "2026-10-18T02:07:42Z",
+                "finished_at": "2026-10-18T02:07:51Z",
+                "elapsed_seconds": 8.311,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with _serving(explorer_for(out, corpus)) as base:
+        observed = _json(base + "/api/observed-run")
+        summary = _json(base + "/api/summary")
+
+    assert observed["recorded"] is True
+    assert observed["elapsed_seconds"] == 8.311
+    assert observed["finished_at"] == "2026-10-18T02:07:51Z"
+    assert "not declared target state" in observed["note"]
+    assert summary == SUMMARY, "the observation never leaks into the declared summary"
+
+
+def test_a_zero_byte_index_is_unavailable_and_stays_zero_bytes(tmp_path) -> None:
+    """Serving the explorer must not create, rebuild or migrate the index it reads."""
+    out, corpus, _digest = _completed_output(tmp_path)
+    index_path = out / "search.db"
+    index_path.write_bytes(b"")
+
+    with _serving(explorer_for(out, corpus)) as base:
+        payload = _json(base + "/api/search?query=alpine")
+
+    assert payload["available"] is False
+    assert payload["hits"] == []
+    assert "index-search" in payload["reason"]
+    assert index_path.read_bytes() == b"", "a read-only reader leaves a 0-byte index alone"
+
+
+def test_a_stale_index_is_unavailable_until_it_is_rebuilt(tmp_path) -> None:
+    out, corpus, _digest = _completed_output(tmp_path)
+    key = document_key(URL)
+    index_path = _write_search_index(out, key, _digest)
+    assert _json_path(index_path, out)["available"] is True
+
+    # The flow declares a replacement: the chunk file on disk now differs from what was indexed.
+    (out / "chunks" / f"{key}.jsonl").unlink()
+
+    with _serving(explorer_for(out, corpus)) as base:
+        payload = _json(base + "/api/search?query=alpine")
+
+    assert payload["available"] is False
+    assert payload["hits"] == [], "removed evidence is never served from a stale index"
+    assert "stale" in payload["reason"]
+    assert "index-search" in payload["reason"]
+
+
+def _json_path(index_path: Path, out: Path) -> dict:
+    """Read the index through the same contract the browser does, without a server."""
+    from finepdfs.application.search import SearchAcceptedEvidence
+    from finepdfs.infrastructure.publishing.disk import PublishedCorpus
+    from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
+
+    declared = PublishedCorpus(out)
+    return SearchAcceptedEvidence(
+        SqliteFtsSearchIndex(index_path), declared.read_declared_chunks
+    ).search("alpine").as_json()
 
 
 def test_search_returns_the_shared_contract_from_the_index(tmp_path) -> None:
@@ -439,8 +525,15 @@ def _write_search_index(out: Path, key: str, digest: str) -> Path:
     chunks = tuple(
         chunk for page in pages for chunk in chunk_page_records((page,), language="eng")
     )
+    # The flow's declared chunk export is the index's only input, so the fixture declares it too:
+    # an index built from anything else is stale by definition.
+    declared = out / "chunks"
+    declared.mkdir(exist_ok=True)
+    (declared / f"{key}.jsonl").write_text(
+        PublishedCorpus(out).chunks_payload(chunks), encoding="utf-8"
+    )
     index_path = out / "search.db"
-    reindex_search(SqliteFtsSearchIndex(index_path), chunks)
+    reindex_search(SqliteFtsSearchIndex(index_path), PublishedCorpus(out).read_declared_chunks())
     return index_path
 
 
