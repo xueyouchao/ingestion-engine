@@ -608,7 +608,10 @@ def test_a_controlled_mixed_language_document_drops_the_page_in_the_other_script
     markdown = (tmp_path / "out" / "docs" / f"{document_key(MIXED)}.md").read_text()
     assert "English" in markdown
     assert "español" in markdown
-    assert "Чесапикского" not in markdown, "the Cyrillic page is not published"
+    # The Russian page really carries Cyrillic (`mixed_language.pdf` page 3), so a Cyrillic-free
+    # Markdown is evidence of the drop rather than an assertion that could not fail.
+    assert "Эта страница написана на русском языке" not in markdown, "the Cyrillic page is not published"
+    assert not any("\u0400" <= character <= "\u04ff" for character in markdown)
 
 
 def test_a_corpus_file_that_no_longer_matches_its_digest_fails(monkeypatch, tmp_path) -> None:
