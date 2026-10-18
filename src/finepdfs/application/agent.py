@@ -98,10 +98,18 @@ READ_SCHEMA = {
 
 TOOL_SCHEMAS = (SEARCH_SCHEMA, READ_SCHEMA)
 
+# The one citation format the prompt asks for and the contract enforces, and the example it shows.
+CITATION_FORMAT = "[DOC p.PAGE]"
+_CITATION_EXAMPLE = "[9bf665589f7333a8 p.8]"
+
 _CITATION = re.compile(
     rf'["\']?({SOURCE_IDENTITY_DIGITS})["\']?\s*(?:,\s*)?(?:p\.|page\s+)\s*(\d+)',
     re.IGNORECASE,
 )
+# The cleanup every stripped answer shares, so the two paths below cannot drift apart.
+_RUN_OF_SPACES = re.compile(r"[ \t]{2,}")
+_SPACE_BEFORE_PUNCTUATION = re.compile(r"\s+([.,;:!?])")
+_EMPTY_BRACKETS = re.compile(r"\[\s*\]|\(\s*\)")
 # The prompt names the citation format as [DOC p.PAGE]; a model that copies the placeholder back has
 # written no doc_id, so the tag names no document. It is stripped as an unverified marker, never
 # resolved to whichever page happened to be read: that would invent a citation the model never wrote.
@@ -345,9 +353,9 @@ def _system_prompt(max_tool_calls: int) -> str:
         "original page. If a snippet does not contain the answer, read the page it points at before "
         "answering.\n"
         f"You have at most {max_tool_calls} tool calls in total. Every call and every result is visible.\n"
-        "Cite every factual claim in plain text as [DOC p.PAGE], where DOC is the exact 16-character "
-        "doc_id a tool returned and PAGE is the original page number, for example "
-        "[9bf665589f7333a8 p.8]. That bracketed pair is the only citation format: never write the "
+        f"Cite every factual claim in plain text as {CITATION_FORMAT}, where DOC is the exact "
+        "16-character doc_id a tool returned and PAGE is the original page number, for example "
+        f"{_CITATION_EXAMPLE}. That bracketed pair is the only citation format: never write the "
         "placeholder text 'doc_id', never cite a page without its doc_id, and never wrap a citation in "
         "another tag. Cite only a page that read_pdf_page returned as accepted: a search snippet "
         "locates a page but does not verify what that page says. A page number written in prose, such "
@@ -360,7 +368,7 @@ def _system_prompt(max_tool_calls: int) -> str:
 
 _BUDGET_PROMPT = (
     "The tool budget is exhausted. Answer now from the evidence already returned, citing each claim "
-    "as [DOC p.PAGE] in plain text, where DOC is the exact doc_id a tool returned and PAGE the page "
+    f"as {CITATION_FORMAT} in plain text, where DOC is the exact doc_id a tool returned and PAGE the page "
     "number, or reply exactly 'INSUFFICIENT EVIDENCE: <what is missing>'. Do not request another tool, "
     "never cite a page without its doc_id, and do not wrap citations in other tags. Cite only a page "
     "read_pdf_page returned; if no returned page supports the claim, reply INSUFFICIENT EVIDENCE."
@@ -369,7 +377,7 @@ _BUDGET_PROMPT = (
 _REPAIR_PROMPT = (
     "Your answer is not backed by a page you read, so it cannot stand. Call read_pdf_page with the "
     "doc_id and page_number of the page that supports the claim, then answer again citing it as "
-    "[DOC p.PAGE] with that exact doc_id and page number. A page number written in prose or cited "
+    f"{CITATION_FORMAT} with that exact doc_id and page number. A page number written in prose or cited "
     "without its doc_id is not a citation. If no page already returned by the tools supports the "
     "claim, reply exactly 'INSUFFICIENT EVIDENCE: <what is missing>'."
 )
@@ -532,19 +540,21 @@ def _only_verified_citations(
         return answer, tuple(found)
     for start, end in sorted(spans, reverse=True):
         answer = answer[:start] + answer[end:]
-    answer = re.sub(r"[ \t]{2,}", " ", answer)
-    answer = re.sub(r"\s+([.,;:!?])", r"\1", answer)
-    answer = re.sub(r"\[\s*\]|\(\s*\)", "", answer)
-    return answer.strip(), tuple(found)
+    return _tidy(answer).strip(), tuple(found)
 
 
 def _without_citations(answer: str) -> str:
     """An insufficient-evidence reply cites nothing, so every marker is removed from it."""
     answer = _CITATION.sub("", answer)
     answer = _PLACEHOLDER_CITATION.sub("", answer)
-    answer = re.sub(r"\[\s*\]|\(\s*\)", "", answer)
-    answer = re.sub(r"[ \t]{2,}", " ", answer)
-    return re.sub(r"\s+([.,;:!?])", r"\1", answer).strip()
+    return _tidy(answer).strip()
+
+
+def _tidy(answer: str) -> str:
+    """The whitespace and empty-bracket cleanup that removing a citation marker leaves behind."""
+    answer = _RUN_OF_SPACES.sub(" ", answer)
+    answer = _SPACE_BEFORE_PUNCTUATION.sub(r"\1", answer)
+    return _EMPTY_BRACKETS.sub("", answer)
 
 
 def _span_with_brackets(text: str, start: int, end: int) -> tuple[int, int]:

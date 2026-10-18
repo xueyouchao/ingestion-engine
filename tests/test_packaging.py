@@ -33,3 +33,24 @@ def test_docling_is_a_pinned_optional_extra_not_an_unpinned_torch() -> None:
             assert not pin.lower().startswith("torch"), (
                 f"the {name} extra must not carry an unpinned torch; document the CPU install instead"
             )
+
+
+def test_the_base_install_pins_the_working_versions() -> None:
+    """The spec says pin the working dependencies: an unpinned floor can reproduce different bytes."""
+    assert _project()["dependencies"] == ["cocoindex==1.0.25", "pymupdf==1.28.2"]
+
+
+DEMO_REQUIREMENTS = Path(__file__).resolve().parents[1] / "docs" / "demo" / "requirements-demo.txt"
+CPU_WHEEL_INDEX = "https://download.pytorch.org/whl/cpu"
+
+
+def test_the_demo_requirements_record_the_working_environment() -> None:
+    """A fresh install must be able to reproduce page text, chunk ids and citations."""
+    recorded = DEMO_REQUIREMENTS.read_text(encoding="utf-8")
+
+    for pin in ("docling==2.140.0", "torch==2.10.0+cpu", "easyocr==1.7.2"):
+        assert pin in recorded, f"the demo environment must record {pin}"
+    assert CPU_WHEEL_INDEX in recorded, "the CPU wheel index is part of the install, not folklore"
+    assert "docling" not in " ".join(_project()["dependencies"]).lower(), (
+        "recording the demo environment must not make the base install model-bearing"
+    )

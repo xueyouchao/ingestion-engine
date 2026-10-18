@@ -7,6 +7,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from finepdfs.domain.publishing import CurationOutcome
+
 DuplicateKind = Literal["exact", "near"]
 
 _SIGNATURE_SEED = b"finepdfs-minhash-v1"
@@ -148,4 +150,95 @@ def plan_deduplication(
     return DedupPlan(
         keepers=tuple(url for url in sorted(keeper_by_url) if url not in duplicated),
         duplicates=tuple(sorted(duplicates, key=lambda decision: decision.url)),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class InheritedFate:
+    """The disposition an exact duplicate inherits when its digest keeper was never published.
+
+    It is not a duplicate of a published Document, so it is recorded with the keeper's own fate -- the
+    Publish Policy's disposition and reason -- rather than being pointed at a keeper that does not exist
+    (ADR-0006).
+    """
+
+    url: str
+    kind: str
+    keeper: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class Deduplication:
+    """The corpus-wide duplicate decision: who is published, who duplicates whom, and each fate."""
+
+    plan: DedupPlan
+    inherited: tuple[InheritedFate, ...] = ()
+
+    def duplicates_by_url(self) -> dict[str, DuplicateDecision]:
+        return self.plan.duplicates_by_url()
+
+    def inherited_by_url(self) -> dict[str, InheritedFate]:
+        return {fate.url: fate for fate in self.inherited}
+
+
+def decide_duplicates(
+    digests_by_url: Mapping[str, str],
+    outcomes: Mapping[str, CurationOutcome],
+    similarity_threshold: float = 0.8,
+) -> Deduplication:
+    """Decide both kinds of duplicate for the whole corpus, in one pass over values.
+
+    This is the only place the decision is made, so the flow's declared exclusions and the `dry-run`
+    cannot disagree about what a duplicate duplicates or what kind it is. It reads what curation
+    produced and nothing else: an exact duplicate costs no Extraction, because it is decided from the
+    digest it shares rather than from its own text.
+
+    ``digests_by_url`` covers every Document in the corpus, including the exact duplicates that were
+    never read; ``outcomes`` holds what curating a Document produced. An exact duplicate follows its
+    digest keeper's near decision when the keeper is itself a near-duplicate loser, and inherits the
+    keeper's disposition when the keeper was dropped or failed, because in neither case did the run
+    publish a keeper it could honestly name (ADR-0006).
+    """
+    plan = plan_deduplication(
+        [
+            PublishedDocumentView(url=url, digest=digest, text=outcomes[url].markdown)
+            for url, digest in digests_by_url.items()
+            if url in outcomes and outcomes[url].published
+        ],
+        similarity_threshold=similarity_threshold,
+    )
+    near_by_url = {decision.url: decision for decision in plan.duplicates if decision.kind == "near"}
+    exact: list[DuplicateDecision] = []
+    inherited: list[InheritedFate] = []
+    keeper_by_url = exact_duplicate_keepers(digests_by_url)
+    for url in sorted(digests_by_url):
+        keeper = keeper_by_url[url]
+        if keeper == url:
+            continue
+        near = near_by_url.get(keeper)
+        if near is not None:
+            exact.append(
+                DuplicateDecision(
+                    url=url, kind="near", duplicate_of=near.duplicate_of, similarity=near.similarity
+                )
+            )
+            continue
+        keeper_outcome = outcomes.get(keeper)
+        if keeper_outcome is None or not keeper_outcome.published:
+            kind = keeper_outcome.status if keeper_outcome is not None else "failed"
+            reason = (
+                keeper_outcome.reason
+                if keeper_outcome is not None
+                else "it was not read and declared nothing"
+            )
+            inherited.append(InheritedFate(url=url, kind=kind, keeper=keeper, reason=reason))
+            continue
+        exact.append(DuplicateDecision(url=url, kind="exact", duplicate_of=keeper, similarity=1.0))
+    return Deduplication(
+        plan=DedupPlan(
+            keepers=plan.keepers,
+            duplicates=tuple(sorted([*plan.duplicates, *exact], key=lambda decision: decision.url)),
+        ),
+        inherited=tuple(inherited),
     )

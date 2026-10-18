@@ -17,7 +17,7 @@ from finepdfs.application.agent import (
 )
 from finepdfs.application.search import reindex_search, search_pdfs
 from finepdfs.domain.crawl import CrawlQuery
-from finepdfs.domain.dedup import PublishedDocumentView, exact_duplicate_keepers, plan_deduplication
+from finepdfs.domain.dedup import decide_duplicates, exact_duplicate_keepers
 from finepdfs.domain.document import Document
 from finepdfs.domain.search import DEFAULT_TOP_K, SearchFilters
 from finepdfs.infrastructure.cocoindex.runtime import Runtime, runtime_from_environment
@@ -49,14 +49,14 @@ from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
 from finepdfs.interfaces import explorer as explorer_module
 from finepdfs.interfaces import search_paths
 from finepdfs.interfaces.restore import restore_pinned_corpus
-from finepdfs.interfaces.run_log import RunClock, read_observed_run, write_observed_run
-from finepdfs.interfaces.summary import format_run_summary
+from finepdfs.interfaces.run_log import RunClock
+from finepdfs.interfaces.summary import conclude_run
 
 DEFAULT_CORPUS = Path("corpus")
-DEFAULT_OUT = Path("out")
-# The index path has one resolver (interfaces/search_paths.py) shared by index-search, search, explore
-# and ask, so FINEPDFS_SEARCH_INDEX means the same thing to all four.
-DEFAULT_SEARCH_INDEX = search_paths.DEFAULT_OUT / search_paths.SEARCH_INDEX_NAME
+# The output directory and the index path have one resolver (interfaces/search_paths.py) shared by
+# index-search, search, explore and ask, so FINEPDFS_OUT and FINEPDFS_SEARCH_INDEX mean the same thing
+# to all four. No command carries a default of its own: a non-None default is what silently overrode
+# the environment before.
 ASK_API_KEY = "FINEPDFS_ASK_API_KEY"
 
 # Flag name to environment variable. "engine_command" is deliberately not called "command": a
@@ -115,13 +115,18 @@ def build_parser() -> argparse.ArgumentParser:
     explore = commands.add_parser(
         "explore", help="serve a read-only local browser over completed declared outputs"
     )
-    explore.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    explore.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="the published output directory to serve; default is $FINEPDFS_OUT or out/",
+    )
     explore.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
     explore.add_argument(
         "--index",
         type=Path,
         default=None,
-        help=f"the search index the page reads; default is <out>/{search_paths.SEARCH_INDEX_NAME}",
+        help=f"the search index to read; default is $FINEPDFS_SEARCH_INDEX or <out>/{search_paths.SEARCH_INDEX_NAME}",
     )
     explore.add_argument("--host", default=explorer_module.DEFAULT_HOST)
     explore.add_argument("--port", type=int, default=explorer_module.DEFAULT_PORT)
@@ -171,7 +176,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="OpenAI-compatible base URL, for example http://[::1]:11434/v1 or https://api.example/v1",
     )
     ask.add_argument("--model", required=True, help="the chat model name the endpoint serves")
-    ask.add_argument("--out", type=Path, default=DEFAULT_OUT, help="the published output directory")
+    ask.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="the published output directory; default is $FINEPDFS_OUT or out/",
+    )
     ask.add_argument(
         "--index",
         type=Path,
@@ -357,6 +367,7 @@ def _search(args: argparse.Namespace) -> int:
 
 def _ask(args: argparse.Namespace) -> int:
     """Ask the accepted evidence through two bounded tools and an OpenAI-compatible chat endpoint."""
+    out_dir = search_paths.resolve_out_dir(args.out)
     index_path = _search_index_path(args)
     if not index_path.is_file():
         print(f"no search index at {index_path}; run finepdfs index-search first", file=sys.stderr)
@@ -372,8 +383,8 @@ def _ask(args: argparse.Namespace) -> int:
     try:
         tools = AcceptedEvidenceTools(
             SqliteFtsSearchIndex(index_path),
-            DiskPageReader(args.out),
-            PublishedCorpus(args.out).read_declared_chunks,
+            DiskPageReader(out_dir),
+            PublishedCorpus(out_dir).read_declared_chunks,
             default_top_k=args.top_k,
         )
         client = ChatCompletionsClient(args.base_url, args.model, api_key=api_key)
@@ -521,21 +532,54 @@ def _dry_run_in_process(runtime: Runtime) -> int:
         outcome = use_case.run(Document(name=document.url, content=document.path.read_bytes()))
         curated[document.url] = (document, outcome)
 
-    plan = plan_deduplication(
-        [
-            PublishedDocumentView(url=document.url, digest=document.digest, text=outcome.markdown)
-            for document, outcome in curated.values()
-            if outcome.published
-        ],
-        similarity_threshold=runtime.similarity_threshold,
+    # The same decision the flow declares (domain/dedup.decide_duplicates): a dry run is a view of what
+    # a run would decide, so it must not decide exact duplicates its own way.
+    decision = decide_duplicates(
+        {document.url: document.digest for document in documents},
+        {url: outcome for url, (_, outcome) in curated.items()},
+        runtime.similarity_threshold,
     )
-    near_duplicate = {decision.url: decision for decision in plan.duplicates if decision.kind == "near"}
+    duplicates = decision.duplicates_by_url()
+    inherited = decision.inherited_by_url()
 
     print(f"{'status':<14} {'engine':<22} {'language':<9} {'pages':>5} {'chars':>7}  {'url':<45}  reason")
     for document in documents:
-        keeper = keepers[document.url]
-        if keeper != document.url:
-            _print_row("exact-duplicate", "-", "-", 0, 0, document.url, f"identical bytes to {keeper}")
+        fate = inherited.get(document.url)
+        if fate is not None:
+            _print_row(
+                fate.kind,
+                "-",
+                "-",
+                0,
+                0,
+                document.url,
+                f"identical bytes to {fate.keeper}, which was {fate.kind}: {fate.reason}",
+            )
+            continue
+        duplicate = duplicates.get(document.url)
+        if duplicate is not None and duplicate.kind == "exact":
+            _print_row(
+                "exact-duplicate",
+                "-",
+                "-",
+                0,
+                0,
+                document.url,
+                f"identical bytes to {duplicate.duplicate_of}",
+            )
+            continue
+        if duplicate is not None:
+            outcome = curated.get(document.url, (None, None))[1]
+            record = outcome.record if outcome is not None else None
+            _print_row(
+                "near-duplicate",
+                record.engine if record else "-",
+                record.language if record else "-",
+                record.page_count if record else 0,
+                record.character_count if record else 0,
+                document.url,
+                f"near-duplicate of {duplicate.duplicate_of}",
+            )
             continue
         outcome = curated[document.url][1]
         record = outcome.record
@@ -543,25 +587,19 @@ def _dry_run_in_process(runtime: Runtime) -> int:
         language = record.language if record else "-"
         pages = record.page_count if record else 0
         characters = record.character_count if record else 0
-        decision = near_duplicate.get(document.url)
-        if decision is not None:
-            _print_row(
-                "near-duplicate",
-                engine,
-                language,
-                pages,
-                characters,
-                document.url,
-                f"near-duplicate of {decision.duplicate_of}",
-            )
-            continue
         _print_row(outcome.status, engine, language, pages, characters, document.url, outcome.reason)
 
-    byte_identical = len(documents) - len(curated)
-    print(
-        f"{len(plan.keepers)} of {len(documents)} documents would be published "
-        f"({len(near_duplicate)} near-duplicates of another, {byte_identical} byte-identical)"
+    # Counted from the decision, not from "documents minus read ones": an exact duplicate whose digest
+    # keeper is unpublished is honestly a near or inherited row and must not be counted as exact.
+    exact = sum(1 for duplicate in decision.plan.duplicates if duplicate.kind == "exact")
+    near = sum(1 for duplicate in decision.plan.duplicates if duplicate.kind == "near")
+    line = (
+        f"{len(decision.plan.keepers)} of {len(documents)} documents would be published "
+        f"({near} near-duplicates of another, {exact} byte-identical)"
     )
+    if inherited:
+        line += f", {len(inherited)} sharing bytes with an unpublished keeper"
+    print(line)
     return 0
 
 
@@ -589,14 +627,13 @@ def _run(args: argparse.Namespace) -> int:
     clock = RunClock()
     with coco.runtime():
         build_app().update_blocking(report_to_stdout=True)
-    observed = write_observed_run(runtime.out_dir, clock.stop())
+    summary_line, observed = conclude_run(runtime.out_dir, clock)
 
     published = PublishedCorpus(runtime.out_dir)
     records = published.read_records()
     exclusions = published.read_exclusions()
-    summary = published.read_summary()
-    if summary is not None:
-        print(format_run_summary(summary, read_observed_run(runtime.out_dir)))
+    if summary_line is not None:
+        print(summary_line)
         print(f"observed timing: {observed} (not declared target state)")
     else:
         failed = sum(1 for exclusion in exclusions if exclusion.get("kind") == "failed")
@@ -609,15 +646,16 @@ def _run(args: argparse.Namespace) -> int:
 
 def _explore(args: argparse.Namespace) -> int:
     """Serve the completed outputs read-only; an absent run summary is a clean refusal."""
+    out_dir = search_paths.resolve_out_dir(args.out)
     index_path = _search_index_path(args)
     try:
-        explorer = explorer_module.explorer_for(args.out, args.corpus, index_path=index_path)
+        explorer = explorer_module.explorer_for(out_dir, args.corpus, index_path=index_path)
     except explorer_module.ExplorerError as error:
         print(error, file=sys.stderr)
         return 2
 
     search_state = "" if index_path.is_file() else f" (no search index at {index_path}; run index-search)"
-    print(f"exploring {args.out} read-only at http://{args.host}:{args.port}/{search_state}")
+    print(f"exploring {out_dir} read-only at http://{args.host}:{args.port}/{search_state}")
     try:
         explorer_module.serve_explorer(explorer, host=args.host, port=args.port)
     except KeyboardInterrupt:

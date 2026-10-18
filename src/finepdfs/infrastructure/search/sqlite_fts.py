@@ -26,7 +26,7 @@ from collections.abc import Collection, Iterator, Sequence
 from contextlib import contextmanager
 from urllib.parse import quote
 
-from finepdfs.domain.chunks import Chunk
+from finepdfs.domain.chunks import CHUNK_FIELDS, Chunk
 from finepdfs.domain.search import IndexFailure, IndexState, SearchHit, SearchQuery, SearchUnavailable
 
 SNIPPET_START = "<mark>"
@@ -83,32 +83,17 @@ INSERT INTO index_meta (key, value) VALUES (:key, :value)
 ON CONFLICT (key) DO UPDATE SET value = excluded.value
 """
 
-_UPSERT = """
-INSERT INTO chunks (
-    chunk_id, doc_id, source_url, digest, engine, language, chunking_version,
-    ordinal, page_number, start_offset, end_offset, text
-) VALUES (
-    :chunk_id, :doc_id, :source_url, :digest, :engine, :language, :chunking_version,
-    :ordinal, :page_number, :start_offset, :end_offset, :text
-)
+# The projection is built from the domain's own field list, so the store cannot drift from what a
+# Chunk is: a new field either appears here or the tests fail, never silently missing from an index.
+_UPSERT = f"""
+INSERT INTO chunks ({", ".join(CHUNK_FIELDS)})
+VALUES ({", ".join(":" + field for field in CHUNK_FIELDS)})
 ON CONFLICT (chunk_id) DO UPDATE SET
-    doc_id = excluded.doc_id,
-    source_url = excluded.source_url,
-    digest = excluded.digest,
-    engine = excluded.engine,
-    language = excluded.language,
-    chunking_version = excluded.chunking_version,
-    ordinal = excluded.ordinal,
-    page_number = excluded.page_number,
-    start_offset = excluded.start_offset,
-    end_offset = excluded.end_offset,
-    text = excluded.text
+    {", ".join(f"{field} = excluded.{field}" for field in CHUNK_FIELDS if field != "chunk_id")}
 """
 
-_SELECT = """
-SELECT c.chunk_id, c.doc_id, c.source_url, c.digest, c.engine, c.language,
-       c.chunking_version, c.ordinal, c.page_number, c.start_offset, c.end_offset,
-       c.text,
+_SELECT = f"""
+SELECT {", ".join("c." + field for field in CHUNK_FIELDS)},
        snippet(chunks_fts, 0, :snippet_start, :snippet_end, :snippet_ellipsis, :snippet_tokens) AS snippet,
        bm25(chunks_fts) AS rank
 FROM chunks_fts
@@ -257,20 +242,7 @@ def _require_readable(path: pathlib.Path) -> None:
 
 
 def _parameters(chunk: Chunk) -> dict[str, object]:
-    return {
-        "chunk_id": chunk.chunk_id,
-        "doc_id": chunk.doc_id,
-        "source_url": chunk.source_url,
-        "digest": chunk.digest,
-        "engine": chunk.engine,
-        "language": chunk.language,
-        "chunking_version": chunk.chunking_version,
-        "ordinal": chunk.ordinal,
-        "page_number": chunk.page_number,
-        "start_offset": chunk.start_offset,
-        "end_offset": chunk.end_offset,
-        "text": chunk.text,
-    }
+    return {field: getattr(chunk, field) for field in CHUNK_FIELDS}
 
 
 def _match_expression(text: str) -> str | None:
@@ -281,37 +253,7 @@ def _match_expression(text: str) -> str | None:
 
 
 def _hit(row: tuple) -> SearchHit:
-    (
-        chunk_id,
-        doc_id,
-        source_url,
-        digest,
-        engine,
-        language,
-        chunking_version,
-        ordinal,
-        page_number,
-        start_offset,
-        end_offset,
-        text,
-        snippet,
-        rank,
-    ) = row
-    return SearchHit(
-        chunk=Chunk(
-            chunk_id=chunk_id,
-            doc_id=doc_id,
-            source_url=source_url,
-            digest=digest,
-            engine=engine,
-            language=language,
-            chunking_version=chunking_version,
-            ordinal=ordinal,
-            page_number=page_number,
-            start_offset=start_offset,
-            end_offset=end_offset,
-            text=text,
-        ),
-        snippet=snippet,
-        score=-float(rank),
-    )
+    """One row of ``_SELECT``: the chunk fields in ``CHUNK_FIELDS`` order, then snippet and rank."""
+    chunk = Chunk(**dict(zip(CHUNK_FIELDS, row, strict=False)))
+    snippet, rank = row[len(CHUNK_FIELDS) :]
+    return SearchHit(chunk=chunk, snippet=snippet, score=-float(rank))

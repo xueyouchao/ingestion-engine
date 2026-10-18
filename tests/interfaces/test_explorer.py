@@ -669,3 +669,31 @@ def _json(url: str) -> dict:
     with urllib.request.urlopen(url) as response:
         assert response.headers["Content-Type"].startswith("application/json")
         return json.loads(response.read())
+
+
+def test_a_stale_page_export_is_not_shown_as_accepted_text(tmp_path) -> None:
+    """The view parses pages through the same reader read_pdf_page uses, not a weaker parser.
+
+    A replacement leaves the page export naming an older digest until the run rewrites it; showing that
+    text would let the browser serve exactly what read_pdf_page rejects as stale.
+    """
+    from finepdfs.application.page_reads import read_pdf_page
+    from finepdfs.infrastructure.publishing.disk import DiskPageReader
+
+    out, corpus, _digest = _completed_output(tmp_path)
+    key = document_key(URL)
+    path = out / "pages" / f"{key}.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    for row in rows:
+        row["digest"] = "f" * 64
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    explorer = explorer_for(out, corpus)
+    detail = explorer.document(key)
+
+    assert detail["pages"] == [], "the browser never shows text read_pdf_page rejects as stale"
+    table = {row["key"]: row for row in explorer.documents()}
+    assert table[key]["text"] == "", "the status table's text is the same accepted pages"
+    answer = read_pdf_page(DiskPageReader(out), key, 1)
+    assert answer.status == "unsupported"
+    assert "stale" in answer.reason

@@ -86,12 +86,16 @@ Check the tool versions; these are the answers on the rehearsal host:
 | `python -c "import easyocr; print(easyocr.__version__)"` | 1.7.2 |
 | `nproc`, `lscpu`, `free -g` | 4 vCPU (AMD EPYC 9354P), 15 GiB RAM, no GPU |
 
-Check the install with the documented commands rather than assuming it:
+Check the install with the documented commands rather than assuming it. The base install is pinned
+exactly (`cocoindex==1.0.25`, `pymupdf==1.28.2`) and the OCR tooling this rehearsal used is recorded in
+[`requirements-demo.txt`](requirements-demo.txt), so a fresh install reproduces the same page text,
+chunk ids and citations:
 
 ```bash
 .venv/bin/pip install -e ".[docling]"        # pinned: docling==2.140.0, never a base dependency
-.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
-.venv/bin/python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+.venv/bin/pip install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/pip install -r docs/demo/requirements-demo.txt
+.venv/bin/python -c "import torch, easyocr; print(torch.__version__, torch.cuda.is_available(), easyocr.__version__)"
 ```
 
 Docling was installed in an isolated CPU virtualenv, so the repository environment is untouched; the
@@ -284,6 +288,13 @@ the accepted, cleaned text. The April capture is keeper; the May capture is decl
  "reason": "near-duplicate of https://buoybay.noaa.gov/.../2024-04/NCBOWinter202324SeasonalSummary.pdf (similarity 0.969)"}
 ```
 
+A Document can be both: its bytes are identical to another Document's, but that digest keeper is
+itself a near-duplicate loser. The two kinds then conflict, because the honest row is `near-duplicate`
+naming the published near keeper -- not `exact-duplicate` pointing at a Document the run did not
+publish. Honesty wins: `domain/dedup.decide_duplicates` reclassifies the row and never invents a kind
+to keep a label that would be false, and `tests/infrastructure/test_flow_exact_duplicates.py` pins it.
+The same decision feeds `dry-run`, so the estimate cannot disagree with the declaration.
+
 Bad input: the pinned Corpus contains no bad Document (the truncated captures in this crawl slice
 cannot be restored), so this was rehearsed with the controlled `tests/fixtures/not_a_pdf.pdf` added
 to a copy of the Corpus and labelled controlled. One Document became a `failed` exclusion with the
@@ -394,9 +405,10 @@ rather than an error when a valid query finds nothing.
 
 One resolver (`src/finepdfs/interfaces/search_paths.py`) gives `index-search`, `search`, `explore` and
 `ask` the same index path: an explicit `--index`, else `FINEPDFS_SEARCH_INDEX`, else `<out>/search.db`.
-`search` also needs `--out` (or `FINEPDFS_OUT`) because it compares the index against the chunks that
-are declared there; before this helper `ask` ignored `FINEPDFS_SEARCH_INDEX` and each command resolved
-the path differently.
+The same file resolves `<out>`: an explicit `--out`, else `FINEPDFS_OUT`, else `out/`. `search`,
+`explore` and `ask` need that directory because it holds the chunks, pages and index they compare
+against; before this helper `ask` ignored `FINEPDFS_SEARCH_INDEX`, `index-search` preferred `--out`
+over it, and `explore`/`ask` hard-coded `out/`, so `FINEPDFS_OUT` never named what they served.
 
 The index is derived state, not declared by the flow, and it now records a **fingerprint of the
 declared chunk set it was built from**. Every read compares that fingerprint with the current declared

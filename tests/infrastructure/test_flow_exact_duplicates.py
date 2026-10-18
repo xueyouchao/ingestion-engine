@@ -258,3 +258,26 @@ def test_an_exact_duplicate_of_a_dropped_keeper_is_not_reported_as_duplicating_i
     assert DROPPED_KEEPER in exclusions[DROPPED_DUPLICATE]["reason"]
     assert runtime.published().read_records() == []
     assert engine.calls == 1, "the exact duplicate is skipped before reading"
+
+
+FAILED_KEEPER = "https://a.example/broken.pdf"
+FAILED_DUPLICATE = "https://b.example/broken.pdf"
+
+
+def test_an_exact_duplicate_of_a_failed_keeper_inherits_the_failure(monkeypatch, tmp_path) -> None:
+    """A digest keeper that cannot be read is not a keeper; its duplicate is a visible failure too."""
+    broken = (Path(__file__).resolve().parents[1] / "fixtures" / "not_a_pdf.pdf").read_bytes()
+    runtime, engine = _corpus(
+        tmp_path, monkeypatch, {FAILED_KEEPER: broken, FAILED_DUPLICATE: broken}
+    )
+
+    _run(runtime)
+
+    assert _report(runtime, "duplicates.jsonl") == [], "nothing was published, so nothing was duplicated"
+    assert _report(runtime, "kept.jsonl") == []
+    exclusions = {entry["url"]: entry for entry in runtime.published().read_exclusions()}
+    assert set(exclusions) == {FAILED_KEEPER, FAILED_DUPLICATE}
+    assert exclusions[FAILED_KEEPER]["kind"] == "failed"
+    assert exclusions[FAILED_DUPLICATE]["kind"] == "failed", "the honest disposition, not a false keeper"
+    assert FAILED_KEEPER in exclusions[FAILED_DUPLICATE]["reason"]
+    assert engine.calls == 0, "an unreadable keeper and its duplicate cost no Extraction call"

@@ -3,7 +3,11 @@ name = "finepdfs-cocoindex"
 version = "0.1.0"
 description = "FinePDFs-style PDF curation on CocoIndex: real Common Crawl PDFs, pluggable OCR engines, incremental processing."
 requires-python = ">=3.11"
-dependencies = ["cocoindex>=1.0.25", "pymupdf>=1.24"]
+# Pinned exactly, not floored: the spec's P0 asks for the working dependencies to be pinned, and a
+# different CocoIndex or PyMuPDF can change page text, chunk ids and every citation built on them. The
+# observed working versions are CocoIndex 1.0.25 and PyMuPDF 1.28.2. Bump both in one reviewed change
+# with the demo evidence it was re-measured from.
+dependencies = ["cocoindex==1.0.25", "pymupdf==1.28.2"]
 
 [project.optional-dependencies]
 # The dev extra installs the tools the CI lint gate runs, so `pip install -e '.[dev]'` is enough to
@@ -11,9 +15,10 @@ dependencies = ["cocoindex>=1.0.25", "pymupdf>=1.24"]
 dev = ["pytest>=8", "ruff>=0.6"]
 # Docling is the CPU OCR Engine the demo runbook validates (README "Engines"). It is pinned and
 # optional on purpose: the base install stays model-free and the offline suite needs no weights. Docling
-# pulls torch as its own dependency; install a CPU build explicitly when a GPU is not wanted
-# (`pip install torch --index-url https://download.pytorch.org/whl/cpu` after this extra). No unpinned
-# torch is listed here, so the base install cannot silently pull a GPU build.
+# pulls torch as its own dependency; the observed working CPU environment -- docling 2.140.0, torch
+# 2.10.0+cpu, easyocr 1.7.2 -- is recorded in docs/demo/requirements-demo.txt with the CPU wheel index
+# it was installed from. No unpinned torch is listed here, so the base install cannot silently pull a
+# GPU build.
 docling = ["docling==2.140.0"]
 # The original fasttext-wheel 0.9.2 raises on `predict` under NumPy 2 ("Unable to avoid copy while
 # creating an array as requested"); this is the same library built against the NumPy 2 headers, and it is
