@@ -38,9 +38,13 @@ rented worker starts, serves, and is given back.
 
 ### The worker is a command script, with the vendor SDK or REST inside it
 
-The integration boundary stays `CommandGpuProvider`. A Python `start` script creates one worker, waits
-for readiness, prints exactly one JSON object, records the vendor lease ID in a state file, and exits.
-A Python `stop` script reads that state and terminates the worker; it is safe to run twice.
+The integration boundary stays `CommandGpuProvider`. A Python `start` script creates one worker, saves
+the vendor lease ID in a state file immediately, then waits for readiness, prints exactly one JSON
+object, and exits. Saving the ID before the readiness wait is deliberate: if readiness fails or the start
+command times out, `CommandGpuProvider` still runs the stop command, and stop needs an ID to terminate a
+worker that may already be billing. A Python `stop` script reads that state and terminates the worker;
+it is safe to run twice, and it must tolerate a partially started worker whose endpoint never became
+ready.
 
 The vendor-specific implementation lives outside the package:
 
@@ -64,12 +68,15 @@ using the endpoint; a start command that stays in the foreground would deadlock 
 The JSON contract is:
 
 ```json
-{"base_url":"https://...","model":"PaddleOCR-VL-1.6","detail":"paddleocr-vl@1.6:weights-<digest>:image-<digest>"}
+{"base_url":"https://worker.example/v1","model":"PaddleOCR-VL-1.6","detail":"paddleocr-vl@1.6:weights-<digest>:image-<digest>"}
 ```
 
-`base_url` is the ephemeral address. `detail` is the deployment half of the Engine Identity and must name
-the model and its version — weights and/or image digest — and never the URL. Credentials come from the
-environment and are never committed. The start script writes nothing secret to stdout or logs.
+`base_url` is the ephemeral OpenAI-compatible base URL and **must include `/v1`**. `ChatEndpoint` appends
+only `/chat/completions`, so returning a bare host would send OCR requests to the wrong route; the worker
+must serve both `/v1/chat/completions` and `/v1/models`. `detail` is the deployment half of the Engine
+Identity and must name the model and its version — weights and/or image digest — and never the URL.
+Credentials come from the environment and are never committed. The start script writes nothing secret to
+stdout or logs.
 
 No new port is introduced. `GpuProvider` remains the port and `CommandGpuProvider` remains the adapter.
 If a native adapter is later justified, it is one entry in the existing `PROVIDERS` registration point,
@@ -92,11 +99,11 @@ The acceptance evidence is ordered from cheapest to most expensive:
 
 | Gate | Evidence | What it proves |
 |---|---|---|
-| Contract | Fake start/stop commands; one JSON object; start detaches; stop runs on success and failure | The lease and provider contract, without a GPU |
+| Contract | Fake start/stop commands; one JSON object; start detaches; ID saved before readiness; stop runs on success, readiness failure and failure | The lease and provider contract, without a GPU |
 | Worker | Modal health/`/v1/models`; one real image-only page | The worker actually serves PaddleOCR-VL |
 | Page mapping | The genuine 1-page and 2-page AOML scans | OCR runs, pages survive, original numbering is preserved |
 | Incremental run | Full pinned NOAA corpus cold, then the same command with a new lease | The second run makes 0 extraction calls and reuses everything |
-| Teardown | Start failure, run failure, stop failure; provider console/API afterwards | No worker is left billing |
+| Teardown | Start failure, readiness failure after creation, run failure, stop failure; provider console/API afterwards | No worker is left billing |
 | Downstream | Index and read/search an OCR page | Accepted OCR text is usable evidence, not just an extraction result |
 
 The two genuine scans are the minimum real-OCR preflight, not the whole validation:
