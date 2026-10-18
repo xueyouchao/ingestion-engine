@@ -9,6 +9,12 @@ import os
 import sys
 from pathlib import Path
 
+from finepdfs.application.agent import (
+    DEFAULT_AGENT_TOP_K,
+    MAX_TOOL_CALLS,
+    AcceptedEvidenceTools,
+    run_agent,
+)
 from finepdfs.application.search import reindex_search, search_pdfs
 from finepdfs.domain.crawl import CrawlQuery
 from finepdfs.domain.dedup import PublishedDocumentView, exact_duplicate_keepers, plan_deduplication
@@ -37,16 +43,19 @@ from finepdfs.infrastructure.corpus.fetch import fetch_corpus, restore_corpus
 from finepdfs.infrastructure.corpus.index import CorpusIndex
 from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifest
 from finepdfs.infrastructure.engines.registry import KNOWN_ENGINES
-from finepdfs.infrastructure.publishing.disk import PublishedCorpus
+from finepdfs.infrastructure.llm.chat_completions import ChatCompletionsClient, ChatCompletionsError
+from finepdfs.infrastructure.publishing.disk import DiskPageReader, PublishedCorpus
 from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
 from finepdfs.interfaces import explorer as explorer_module
 from finepdfs.interfaces.summary import format_run_summary
 
 DEFAULT_CORPUS = Path("corpus")
 DEFAULT_OUT = Path("out")
-SEARCH_INDEX_NAME = "search.db"
+# The index layout name has one owner, the explorer that reads it; `index-search` writes the same one.
+SEARCH_INDEX_NAME = explorer_module.SEARCH_INDEX_NAME
 DEFAULT_SEARCH_INDEX = DEFAULT_OUT / SEARCH_INDEX_NAME
 SEARCH_INDEX_VARIABLE = "FINEPDFS_SEARCH_INDEX"
+ASK_API_KEY = "FINEPDFS_ASK_API_KEY"
 
 # Flag name to environment variable. "engine_command" is deliberately not called "command": a
 # subparser argument with that name would overwrite the name of the chosen subcommand. The names the GPU
@@ -99,6 +108,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     explore.add_argument("--out", type=Path, default=DEFAULT_OUT)
     explore.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
+    explore.add_argument(
+        "--index",
+        type=Path,
+        default=None,
+        help=f"the search index the page reads; default is <out>/{SEARCH_INDEX_NAME}",
+    )
     explore.add_argument("--host", default=explorer_module.DEFAULT_HOST)
     explore.add_argument("--port", type=int, default=explorer_module.DEFAULT_PORT)
 
@@ -124,6 +139,43 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--doc-id", dest="doc_id", default=None, help="only chunks of this source identity")
     search.add_argument("--json", action="store_true", help="print the shared search contract as JSON")
     search.add_argument("query", nargs="+", help="words to look for")
+
+    # The agent stage reads the same accepted evidence through two tools and an OpenAI-compatible
+    # chat endpoint; the key comes from the environment by default so it does not land in shell history.
+    ask = commands.add_parser(
+        "ask", help="ask accepted evidence with a bounded, visible tool-calling model"
+    )
+    ask.add_argument("--question", required=True, help="the question to answer from accepted pages")
+    ask.add_argument(
+        "--base-url",
+        required=True,
+        help="OpenAI-compatible base URL, for example http://[::1]:11434/v1 or https://api.example/v1",
+    )
+    ask.add_argument("--model", required=True, help="the chat model name the endpoint serves")
+    ask.add_argument("--out", type=Path, default=DEFAULT_OUT, help="the published output directory")
+    ask.add_argument(
+        "--index", type=Path, default=None, help=f"the index to read; default is <out>/{SEARCH_INDEX_NAME}"
+    )
+    ask.add_argument(
+        "--top-k",
+        dest="top_k",
+        type=int,
+        default=DEFAULT_AGENT_TOP_K,
+        help="hits each search_pdfs call returns when the model does not ask for a count",
+    )
+    ask.add_argument(
+        "--max-tool-calls",
+        dest="max_tool_calls",
+        type=int,
+        default=MAX_TOOL_CALLS,
+        help=f"hard cap on tool executions per question (default: {MAX_TOOL_CALLS})",
+    )
+    ask.add_argument(
+        "--api-key",
+        default=None,
+        help=f"bearer token; prefer {ASK_API_KEY} in the environment so it is not printed or stored",
+    )
+    ask.add_argument("--json", action="store_true", help="print the answer, citations and tool trace as JSON")
 
     return parser
 
@@ -224,6 +276,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _index_search(args)
     if args.command == "search":
         return _search(args)
+    if args.command == "ask":
+        return _ask(args)
     raise AssertionError(f"unhandled command {args.command}")
 
 
@@ -275,6 +329,89 @@ def _search(args: argparse.Namespace) -> int:
         print(f"    {hit.source_url}")
         print(f"    {' '.join(hit.snippet.split())}")
     return 0
+
+
+def _ask(args: argparse.Namespace) -> int:
+    """Ask the accepted evidence through two bounded tools and an OpenAI-compatible chat endpoint."""
+    index_path = args.index if args.index is not None else args.out / SEARCH_INDEX_NAME
+    if not index_path.is_file():
+        print(f"no search index at {index_path}; run finepdfs index-search first", file=sys.stderr)
+        return 2
+    if args.max_tool_calls < 1:
+        print(f"--max-tool-calls must be at least 1, not {args.max_tool_calls}", file=sys.stderr)
+        return 2
+    if args.top_k < 1:
+        print(f"--top-k must be at least 1, not {args.top_k}", file=sys.stderr)
+        return 2
+
+    api_key = args.api_key if args.api_key is not None else os.environ.get(ASK_API_KEY, "")
+    try:
+        tools = AcceptedEvidenceTools(
+            SqliteFtsSearchIndex(index_path),
+            DiskPageReader(args.out),
+            default_top_k=args.top_k,
+        )
+        client = ChatCompletionsClient(args.base_url, args.model, api_key=api_key)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 2
+
+    def show(event: dict) -> None:
+        print(f"[tool {event['index']}] {event['tool']} {json.dumps(event['arguments'], ensure_ascii=False)}")
+        print(f"  -> {_describe_tool_result(event['tool'], event['result'])}")
+
+    try:
+        answer = run_agent(
+            args.question,
+            client,
+            tools,
+            max_tool_calls=args.max_tool_calls,
+            on_event=None if args.json else show,
+        )
+    except ChatCompletionsError as error:
+        print(error, file=sys.stderr)
+        return 3
+
+    if args.json:
+        print(json.dumps(answer.as_json(), indent=2, ensure_ascii=False))
+        return 0
+
+    print()
+    print(answer.answer)
+    if answer.citations:
+        print("\nCitations:")
+        for citation in answer.citations:
+            state = "page read" if citation.verified else "snippet only; page not read"
+            print(f"- {citation.citation}  {citation.source_url}  ({state})")
+    else:
+        print("\nCitations: none (no evidence page was cited)")
+    budget = " (tool budget exhausted)" if answer.budget_exhausted else ""
+    print(f"\nTool calls: {len(answer.tool_calls)} of {args.max_tool_calls}{budget}")
+    if answer.insufficient_evidence:
+        print("The agent reported insufficient evidence.")
+    return 0
+
+
+def _describe_tool_result(tool: str, result: dict) -> str:
+    """A visible one-line result: what the call returned, not a paraphrase of the evidence."""
+    if "error" in result:
+        return f"error: {result['error']}"
+    if tool == "search_pdfs":
+        hits = result.get("hits") or []
+        if not hits:
+            return f"0 of {result.get('total', 0)} hits"
+        listed = ", ".join(f"{hit.get('doc_id')} p.{hit.get('page_number')}" for hit in hits[:3])
+        more = "" if len(hits) <= 3 else f", +{len(hits) - 3} more"
+        return f"{len(hits)} hits: {listed}{more}"
+    if tool == "read_pdf_page":
+        if result.get("status") == "accepted":
+            characters = len(result.get("text", ""))
+            return (
+                f"accepted page {result.get('page_number')} of {result.get('doc_id')} "
+                f"({characters} chars)"
+            )
+        return f"{result.get('status')}: {result.get('reason')}"
+    return json.dumps(result, ensure_ascii=False)[:200]
 
 
 def _fetch_corpus(args: argparse.Namespace) -> int:
@@ -453,13 +590,15 @@ def _run(args: argparse.Namespace) -> int:
 
 def _explore(args: argparse.Namespace) -> int:
     """Serve the completed outputs read-only; an absent run summary is a clean refusal."""
+    index_path = args.index if args.index is not None else args.out / SEARCH_INDEX_NAME
     try:
-        explorer = explorer_module.explorer_for(args.out, args.corpus)
+        explorer = explorer_module.explorer_for(args.out, args.corpus, index_path=index_path)
     except explorer_module.ExplorerError as error:
         print(error, file=sys.stderr)
         return 2
 
-    print(f"exploring {args.out} read-only at http://{args.host}:{args.port}/")
+    search_state = "" if index_path.is_file() else f" (no search index at {index_path}; run index-search)"
+    print(f"exploring {args.out} read-only at http://{args.host}:{args.port}/{search_state}")
     try:
         explorer_module.serve_explorer(explorer, host=args.host, port=args.port)
     except KeyboardInterrupt:

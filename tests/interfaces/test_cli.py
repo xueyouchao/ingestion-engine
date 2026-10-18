@@ -247,3 +247,190 @@ def test_indexing_a_directory_that_holds_no_run_is_an_operator_error(tmp_path, c
 
     assert cli.main(["index-search", "--out", str(tmp_path / "nothing"), "--index", str(tmp_path / "i.db")]) == 2
     assert "no published output" in capsys.readouterr().err
+
+
+class _FakeChatModel:
+    """A scripted OpenAI-compatible model; each request is kept so the loop's wire shape is inspectable."""
+
+    def __init__(self, responses: list[dict]) -> None:
+        self._responses = list(responses)
+        self.requests: list[dict] = []
+
+    def complete(self, messages, tools=()):
+        self.requests.append({"messages": list(messages), "tools": list(tools)})
+        return self._responses.pop(0)
+
+
+def _ask_model(doc_id: str) -> _FakeChatModel:
+    return _FakeChatModel(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "search_pdfs", "arguments": '{"query": "alpine"}'},
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": f"Alpine meteorology is reported [{doc_id} p.9].",
+            },
+        ]
+    )
+
+
+def test_the_ask_flags_reach_the_command() -> None:
+    args = build_parser().parse_args(
+        [
+            "ask",
+            "--question",
+            "Where is alpine meteorology?",
+            "--base-url",
+            "http://[::1]:11434/v1",
+            "--model",
+            "qwen3:1.7b",
+            "--out",
+            "o",
+            "--top-k",
+            "2",
+            "--max-tool-calls",
+            "4",
+            "--json",
+        ]
+    )
+
+    assert args.command == "ask"
+    assert args.question.startswith("Where")
+    assert args.base_url == "http://[::1]:11434/v1"
+    assert args.model == "qwen3:1.7b"
+    assert (args.out.name, args.top_k, args.max_tool_calls, args.json) == ("o", 2, 4, True)
+    assert args.index is None
+
+
+def test_ask_refuses_a_missing_index_without_calling_a_model(tmp_path, capsys, monkeypatch) -> None:
+    from finepdfs.interfaces import cli
+
+    def must_not_build(*args, **kwargs):
+        raise AssertionError("ask must not build a model client without an index")
+
+    monkeypatch.setattr(cli, "ChatCompletionsClient", must_not_build)
+    args = build_parser().parse_args(
+        [
+            "ask",
+            "--question",
+            "q",
+            "--base-url",
+            "http://[::1]:11434/v1",
+            "--model",
+            "m",
+            "--out",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert cli._ask(args) == 2
+    assert "no search index" in capsys.readouterr().err
+
+
+def test_ask_refuses_a_non_positive_top_k(tmp_path, capsys, monkeypatch) -> None:
+    from finepdfs.interfaces import cli
+
+    out_dir = tmp_path / "out"
+    _write_declared_chunks(out_dir)
+    index = tmp_path / "search.db"
+    assert cli.main(["index-search", "--out", str(out_dir), "--index", str(index)]) == 0
+    capsys.readouterr()
+    args = build_parser().parse_args(
+        [
+            "ask", "--question", "q", "--base-url", "http://[::1]:11434/v1", "--model", "m",
+            "--out", str(out_dir), "--index", str(index), "--top-k", "0",
+        ]
+    )
+
+    assert cli._ask(args) == 2
+    assert "--top-k must be at least 1" in capsys.readouterr().err
+
+
+def test_ask_prints_visible_tool_calls_and_citations(tmp_path, capsys, monkeypatch) -> None:
+    from finepdfs.infrastructure.corpus.index import document_key
+    from finepdfs.interfaces import cli
+
+    out_dir = tmp_path / "out"
+    _write_declared_chunks(out_dir)
+    index = tmp_path / "search.db"
+    assert cli.main(["index-search", "--out", str(out_dir), "--index", str(index)]) == 0
+    capsys.readouterr()
+    doc_id = document_key("https://example.org/page-9.pdf")
+    model = _ask_model(doc_id)
+    monkeypatch.setattr(cli, "ChatCompletionsClient", lambda *args, **kwargs: model)
+    args = build_parser().parse_args(
+        [
+            "ask",
+            "--question",
+            "Where is alpine meteorology?",
+            "--base-url",
+            "http://[::1]:11434/v1",
+            "--model",
+            "qwen3:1.7b",
+            "--out",
+            str(out_dir),
+            "--index",
+            str(index),
+        ]
+    )
+    args.api_key = "sk-this-must-not-be-printed"
+
+    assert cli._ask(args) == 0
+
+    printed = capsys.readouterr()
+    assert "[tool 1] search_pdfs" in printed.out
+    assert "-> 1 hits" in printed.out
+    assert f"- {doc_id} p.9" in printed.out
+    assert "https://example.org/page-9.pdf" in printed.out
+    assert "Tool calls: 1 of 6" in printed.out
+    assert "sk-this-must-not-be-printed" not in printed.out + printed.err
+    # The tool result round trip reached the model, and the schemas were offered on the first turn.
+    assert model.requests[0]["tools"]
+    assert [message["role"] for message in model.requests[1]["messages"]][-1] == "tool"
+
+
+def test_ask_json_carries_the_answer_citations_and_trace(tmp_path, capsys, monkeypatch) -> None:
+    from finepdfs.infrastructure.corpus.index import document_key
+    from finepdfs.interfaces import cli
+
+    out_dir = tmp_path / "out"
+    _write_declared_chunks(out_dir)
+    index = tmp_path / "search.db"
+    assert cli.main(["index-search", "--out", str(out_dir), "--index", str(index)]) == 0
+    capsys.readouterr()
+    doc_id = document_key("https://example.org/page-9.pdf")
+    monkeypatch.setattr(cli, "ChatCompletionsClient", lambda *args, **kwargs: _ask_model(doc_id))
+    args = build_parser().parse_args(
+        [
+            "ask",
+            "--question",
+            "Where is alpine meteorology?",
+            "--base-url",
+            "http://[::1]:11434/v1",
+            "--model",
+            "qwen3:1.7b",
+            "--out",
+            str(out_dir),
+            "--index",
+            str(index),
+            "--json",
+        ]
+    )
+
+    assert cli._ask(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["answer"].startswith("Alpine meteorology")
+    assert payload["citations"][0]["doc_id"] == doc_id
+    assert payload["citations"][0]["page_number"] == 9
+    assert payload["tool_calls"][0]["tool"] == "search_pdfs"
+    assert payload["insufficient_evidence"] is False

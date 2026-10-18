@@ -100,8 +100,8 @@ What this Corpus does and does not demonstrate is stated in
 [`pdf-demo-corpus.md#what-this-does-and-does-not-demonstrate`](pdf-demo-corpus.md#what-this-does-and-does-not-demonstrate).
 In short: it demonstrates routing, real OCR, cleaning, duplicates, exclusions and incrementality on a
 small fixed input. It does **not** demonstrate retrieval quality or ranking at corpus scale; 18
-Documents is not a corpus-scale claim. Search is covered below as the budget-driven local fallback; the
-browser stage is outside this runbook.
+Documents is not a corpus-scale claim. Search, the browser's search view and the agent tools are
+covered below as the budget-driven local fallback over the same accepted records.
 
 ## Measured runs
 
@@ -352,7 +352,22 @@ the ordering is meaningful). `finepdfs/application/search.py` exposes `SearchAcc
 for the browser and `search_pdfs(index, query, filters, top_k)` for the agent; both validate a
 non-empty query, bound `top_k` to 100 and accept the same `SearchFilters(language, engine, doc_id)`.
 The SQLite adapter lives in `finepdfs/infrastructure/search/sqlite_fts.py` and satisfies the
-`SearchIndex` port. `interfaces/explorer.py` belongs to the browser ticket and is not touched here.
+`SearchIndex` port. `interfaces/explorer.py` reads this contract for the browser: `GET /api/search`
+takes `query`, optional `language`, `engine` and `doc_id` filters, and `top_k`, and returns the same
+`available`/`query`/`filters`/`total`/`hits` shape. The page has a search box and a results region; an
+absent index is an explicit `{"available": false, "reason": "... run finepdfs index-search ..."}` with
+no hits, and the view never builds or repairs the index it reads.
+
+```bash
+# the same read through the browser view; --index defaults to <out>/search.db
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli explore \
+  --out .demo/out --corpus .demo/corpus --index .demo/out/search.db
+# then open http://127.0.0.1:8765/ and search accepted evidence
+```
+
+The explorer is still read-only: searching opens the existing index and writes nothing. The page renders
+the highlighted snippet by building text nodes around `<mark>`, so extracted text is never injected as
+HTML.
 
 ### Add, replace and remove, seen through search
 
@@ -379,8 +394,77 @@ The SQLite adapter lives in `finepdfs/infrastructure/search/sqlite_fts.py` and s
   query.
 * **The index is derived and local.** It must be rebuilt after a run; deleting it costs one
   `index-search`, no Extraction.
-* **Page reads are a separate gate.** `read_pdf_page(doc_id, page_number)` belongs to the agent ticket;
-  the contract here already carries the page number and offsets it needs.
+* **Page reads are the agent's second tool.** `read_pdf_page(doc_id, page_number)` reads the declared
+  page export, not Markdown and not the index; it refuses an absent, excluded, duplicate, unpublished,
+  retracted or stale page explicitly. See [Agent tools](#agent-tools-search-and-inspect-accepted-pages).
+
+## Agent tools: search and inspect accepted pages
+
+The agent stage is a small bounded loop over the same accepted evidence, not a second writer and not a
+second search backend. Two tools are exposed to an OpenAI-compatible chat model:
+
+* `search_pdfs(query, filters, top_k)` reads the shared search contract and returns ranked current hits
+  with `doc_id`, `chunk_id`, source URL, PDF digest, original page number, snippet/text and score.
+* `read_pdf_page(doc_id, page_number)` returns the exact accepted Page Text of one original page. An
+  absent, excluded, duplicate, unpublished, retracted or stale page is an explicit
+  `status: not-found`/`unsupported` result with a reason, never text reconstructed from Markdown.
+
+Both are application functions (`finepdfs/application/search.py` and
+`finepdfs/application/page_reads.py`), so the CLI, the loop and the tests share one contract. The loop
+(`finepdfs/application/agent.py`) caps tool executions at six by default, prints every call and result,
+and asks the model to cite `[<doc_id> p.<page_number>]`. Citations are filtered against the pages the
+tools actually returned, so a fabricated document or page is dropped rather than printed as evidence.
+Each citation is marked **page read** only when `read_pdf_page` returned that exact page; a citation
+seen only in a search snippet is printed as unverified. When the tool budget is spent, one final
+completion without tools is allowed to force an answer or an explicit insufficient-evidence reply.
+
+### Commands
+
+```bash
+# ask over the current declared evidence; the index must exist first
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli ask \
+  --question "What rate of wind-speed increase over 24 hours counts as rapid intensification?" \
+  --base-url 'http://[::1]:11434/v1' --model qwen3:1.7b \
+  --out .demo/out --index .demo/out/search.db --max-tool-calls 6
+
+# the same answer, citations and full tool trace as JSON
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli ask \
+  --question "..." --base-url 'http://[::1]:11434/v1' --model qwen3:1.7b \
+  --out .demo/out --index .demo/out/search.db --json
+```
+
+`ask` exits 2 when the index is absent (run `index-search` first) or a flag is invalid, and 3 when the
+chat endpoint cannot answer. The API key comes from `FINEPDFS_ASK_API_KEY` by default, or `--api-key`;
+it is sent as a bearer header and never printed. `--top-k` sets the hits a search call returns when the
+model does not ask for a count.
+
+### Model capability, checked rather than assumed
+
+The rehearsal host serves `qwen3:1.7b` from Ollama at `http://[::1]:11434` (IPv6; the IPv4 address timed
+out). A model list is not evidence of tool support, so the check was an actual inference with a tool
+schema: the model returned real `tool_calls` with schema-valid arguments in **12.12 s**, and a
+tool-result round trip produced a final answer. `qwen3:1.7b` then called both `search_pdfs` and
+`read_pdf_page` on the demo's real index and page exports. No cloud-tagged model was needed.
+
+The five answerable questions and one unanswerable control are in
+[`agent-questions.md`](agent-questions.md); the observed answers, citations, tool traces, timings and
+model-quality limitations are in [`agent-evidence.md`](agent-evidence.md). Summary of that run:
+
+| # | Result | Citation | Verified page read? |
+| --- | --- | --- | --- |
+| 1 | correct answer; **wrong page cited** (`p.10`; the sentence is on `p.8`) | `9bf665589f7333a8 p.10` | no |
+| 2 | correct | `6dd127bebc737740 p.5` | no |
+| 3 | correct, with a contradictory trailing `INSUFFICIENT EVIDENCE` line | `24564fdbfbb89e55 p.1`, `p.3` | no |
+| 4 | correct; citation only in prose ("page 37"), so none structured | none | n/a |
+| 5 | correct | `8cc4c231717ef28f p.33` | yes |
+| 6 | `INSUFFICIENT EVIDENCE`, no citation | none | n/a |
+
+The agent evidence state is the text-layer run (15 published Documents / 310 page records / 590
+chunks), so those answers are not OCR evidence; the two scans were dropped. The questions avoid them.
+The Q1/page-attribution error and the Q3 contradiction are reported rather than presented as success:
+tool calling, the round trip, the budget and citation filtering are verified, while answer and citation
+precision belong to the small model. No retrieval-quality claim is made from 15 Documents.
+
 
 ## Dry run is not a free estimate
 

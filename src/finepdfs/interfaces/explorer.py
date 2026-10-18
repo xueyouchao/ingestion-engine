@@ -1,8 +1,10 @@
 """A read-only local explorer over a completed run's declared outputs.
 
-The flow is the only writer. This module reads `out/run-summary.json`, the declared record, page and
-exclusion exports, and the corpus manifest that maps a digest to `pdfs/<digest>.pdf`. It never curates,
-deduplicates or publishes, and it never writes: the browser is a view, not a second writer.
+The flow is the only writer. This module reads `out/run-summary.json`, the declared record, page,
+chunk and exclusion exports, the derived local search index and the corpus manifest that maps a digest
+to `pdfs/<digest>.pdf`. It never curates, deduplicates or publishes, and it never writes: the browser is
+a view, not a second writer. Searching reads the index the CLI's `index-search` built; an absent index is
+an explicit empty state, never a crash and never a silent rebuild.
 
     PYTHONPATH=src python -m finepdfs.interfaces.cli explore --out out --corpus corpus
 
@@ -15,13 +17,16 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
+from finepdfs.application.search import SearchAcceptedEvidence
+from finepdfs.domain.search import DEFAULT_TOP_K, SearchFilters
 from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifest
 from finepdfs.infrastructure.corpus.manifest import pdf_path as retained_pdf_path
 from finepdfs.infrastructure.publishing.disk import (
@@ -30,6 +35,7 @@ from finepdfs.infrastructure.publishing.disk import (
     RECORDS,
     PublishedCorpus,
 )
+from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
 
 KEY_PATTERN = re.compile(r"^[0-9a-f]{16}$")
 DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -38,6 +44,8 @@ _UNSET = object()
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+# The CLI's index-search writes this name beside the published output; the explorer reads it.
+SEARCH_INDEX_NAME = "search.db"
 
 
 class ExplorerError(Exception):
@@ -48,13 +56,23 @@ class UnknownDocument(ExplorerError):
     """The requested key is not one of the documents this run declared."""
 
 
+class SearchRequestError(ExplorerError):
+    """The search request itself is invalid; the caller has to fix it, not the index."""
+
+
 class Explorer:
     """Read-only access to one completed run's declared outputs."""
 
-    def __init__(self, out_dir: Path | str, corpus_dir: Path | str) -> None:
+    def __init__(
+        self,
+        out_dir: Path | str,
+        corpus_dir: Path | str,
+        index_path: Path | str | None = None,
+    ) -> None:
         self._out = Path(out_dir)
         self._corpus = Path(corpus_dir)
         self._published = PublishedCorpus(self._out)
+        self._index = Path(index_path) if index_path is not None else self._out / SEARCH_INDEX_NAME
         self._manifest_lock = threading.Lock()
         self._manifest_signature: object = _UNSET
         self._by_url: dict[str, Any] = {}
@@ -68,6 +86,43 @@ class Explorer:
     @property
     def corpus_dir(self) -> Path:
         return self._corpus
+
+    @property
+    def index_path(self) -> Path:
+        return self._index
+
+    def search(
+        self,
+        text: str,
+        *,
+        filters: SearchFilters | None = None,
+        top_k: int = DEFAULT_TOP_K,
+    ) -> dict[str, Any]:
+        """Read the shared search contract from the local index; absent or unreadable is a state.
+
+        The explorer never builds or repairs the index: it is derived state written by `index-search`
+        after a run, and a view that silently reindexed would be a second writer of search state.
+        """
+        query = text.strip()
+        if not query:
+            raise SearchRequestError("a search needs a non-empty query")
+        if top_k < 1:
+            raise SearchRequestError(f"top_k must be at least 1, not {top_k}")
+        if not self._index.is_file():
+            return _unavailable(
+                query,
+                filters,
+                f"no search index at {self._index}; run finepdfs index-search after a completed run",
+            )
+        try:
+            results = SearchAcceptedEvidence(SqliteFtsSearchIndex(self._index)).search(
+                query, filters=filters, top_k=top_k
+            )
+        except (sqlite3.Error, OSError) as error:
+            return _unavailable(query, filters, f"the search index at {self._index} could not be read: {error}")
+        payload = results.as_json()
+        payload["available"] = True
+        return payload
 
     def summary(self) -> dict[str, Any]:
         """The measured counters exactly as the flow declared them, never recomputed."""
@@ -271,12 +326,38 @@ class Explorer:
         return "\n".join(texts)
 
 
-def explorer_for(out_dir: Path | str, corpus_dir: Path | str) -> Explorer:
+def explorer_for(
+    out_dir: Path | str,
+    corpus_dir: Path | str,
+    index_path: Path | str | None = None,
+) -> Explorer:
     """Build an explorer, refusing a directory that has no completed run summary."""
-    explorer = Explorer(out_dir, corpus_dir)
+    explorer = Explorer(out_dir, corpus_dir, index_path=index_path)
     explorer.summary()
     explorer._manifest_state()
     return explorer
+
+
+def _unavailable(text: str, filters: SearchFilters | None, reason: str) -> dict[str, Any]:
+    """An explicit "no search available" answer: the same shape, with nothing pretending to be a hit."""
+    filters = filters or SearchFilters()
+    return {
+        "available": False,
+        "reason": reason,
+        "query": text,
+        "filters": {
+            "language": filters.language,
+            "engine": filters.engine,
+            "doc_id": filters.doc_id,
+        },
+        "total": 0,
+        "hits": [],
+    }
+
+
+def _first(parameters: dict[str, list[str]], name: str) -> str | None:
+    values = parameters.get(name)
+    return values[0] if values else None
 
 
 def _load_manifest(corpus_dir: Path) -> CorpusManifest:
@@ -349,6 +430,8 @@ class ExplorerRequestHandler(BaseHTTPRequestHandler):
                 self._json({"records": self.explorer.records()}, head=head)
             elif path == "/api/exclusions":
                 self._json({"exclusions": self.explorer.exclusions()}, head=head)
+            elif path == "/api/search":
+                self._search(urlsplit(self.path).query, head=head)
             elif path.startswith("/api/documents/"):
                 self._json(self.explorer.document(path.removeprefix("/api/documents/")), head=head)
             elif path.startswith("/api/pages/"):
@@ -360,8 +443,25 @@ class ExplorerRequestHandler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.NOT_FOUND, "not found", head=head)
         except UnknownDocument as error:
             self._error(HTTPStatus.NOT_FOUND, str(error), head=head)
+        except SearchRequestError as error:
+            self._error(HTTPStatus.BAD_REQUEST, str(error), head=head)
         except ExplorerError as error:
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, str(error), head=head)
+
+    def _search(self, query_string: str, *, head: bool) -> None:
+        parameters = parse_qs(query_string, keep_blank_values=True)
+        text = _first(parameters, "query") or ""
+        raw_top_k = _first(parameters, "top_k") or str(DEFAULT_TOP_K)
+        try:
+            top_k = int(raw_top_k)
+        except ValueError as error:
+            raise SearchRequestError(f"top_k must be an integer, not {raw_top_k!r}") from error
+        filters = SearchFilters(
+            language=_first(parameters, "language") or None,
+            engine=_first(parameters, "engine") or None,
+            doc_id=_first(parameters, "doc_id") or None,
+        )
+        self._json(self.explorer.search(text, filters=filters, top_k=top_k), head=head)
 
     def _json(self, payload: Any, *, head: bool) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -536,6 +636,42 @@ EXPLORER_HTML = """<!doctype html>
     padding: .75rem;
   }
   .filters label { display: grid; gap: .2rem; font-size: .8rem; color: var(--muted); }
+  .search {
+    margin-top: .9rem;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: .5rem;
+    padding: .75rem;
+  }
+  .search form { display: flex; flex-wrap: wrap; gap: .6rem; align-items: end; }
+  .search label { display: grid; gap: .2rem; font-size: .8rem; color: var(--muted); }
+  #search-query { min-width: 20rem; }
+  #search-doc { min-width: 10rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #search-top-k { width: 6rem; }
+  #search-results { margin-top: .75rem; }
+  .hit { border-top: 1px solid var(--line); padding: .75rem 0; }
+  .hit h3 { margin: 0 0 .2rem; font-size: 1rem; }
+  .hit .meta { font-size: .85rem; overflow-wrap: anywhere; }
+  .hit p.snippet { margin: .35rem 0; }
+  .hit mark { background: color-mix(in srgb, var(--warn) 35%, transparent); color: inherit; }
+  .hit details { margin-top: .35rem; }
+  .hit pre {
+    margin: .4rem 0 0;
+    padding: .6rem;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: .35rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .hit a, .hit button.link {
+    color: var(--accent);
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    cursor: pointer;
+  }
   input, select, button {
     font: inherit;
     color: var(--ink);
@@ -622,6 +758,30 @@ EXPLORER_HTML = """<!doctype html>
   </label>
   <button id="refresh" type="button">Refresh now</button>
   <span id="refresh-state" class="meta" role="status" aria-live="polite"></span>
+</section>
+<section class="search" aria-label="Accepted evidence search">
+  <form id="search-form" role="search">
+    <label for="search-query">Accepted evidence search
+      <input id="search-query" type="search" placeholder="words from accepted pages">
+    </label>
+    <label for="search-language">Language / script
+      <input id="search-language" type="search" placeholder="any">
+    </label>
+    <label for="search-engine">Engine Identity
+      <input id="search-engine" type="search" placeholder="any">
+    </label>
+    <label for="search-doc">Source Identity
+      <input id="search-doc" type="search" placeholder="any" spellcheck="false">
+    </label>
+    <label for="search-top-k">Top K
+      <input id="search-top-k" type="number" min="1" max="100" value="10">
+    </label>
+    <button id="search-submit" type="submit">Search</button>
+  </form>
+  <p id="search-state" class="meta" role="status" aria-live="polite">
+    Search reads the local index built by finepdfs index-search after a completed run.
+  </p>
+  <div id="search-results"></div>
 </section>
 <main>
   <table id="status-table">
@@ -883,9 +1043,89 @@ function startPolling() {
   }, 5000);
 }
 
+function snippetFragment(snippet) {
+  const fragment = document.createDocumentFragment();
+  const parts = String(snippet || "").split(new RegExp("<mark>|</mark>"));
+  let highlighted = false;
+  parts.forEach((part) => {
+    if (part === "<mark>") { highlighted = true; return; }
+    if (part === "</mark>") { highlighted = false; return; }
+    if (part) fragment.append(textNode(highlighted ? "mark" : "span", part));
+  });
+  return fragment;
+}
+
+function searchHit(hit, index) {
+  const article = document.createElement("article");
+  article.className = "hit";
+  article.append(textNode("h3", (index + 1) + ". " + hit.doc_id + " p." + hit.page_number
+    + " (score " + Number(hit.score).toFixed(3) + ")"));
+  article.append(textNode("p", hit.source_url + " · chunk " + hit.chunk_id + " · "
+    + (hit.engine || "-") + " · " + (hit.language || "-"), "meta"));
+  const snippet = document.createElement("p");
+  snippet.className = "snippet";
+  snippet.append(snippetFragment(hit.snippet));
+  const details = document.createElement("details");
+  details.append(textNode("summary", "Matched chunk text"));
+  const text = document.createElement("pre");
+  text.textContent = hit.text || "";
+  details.append(text);
+  const inspect = document.createElement("button");
+  inspect.type = "button";
+  inspect.className = "link";
+  inspect.textContent = "Inspect " + hit.doc_id + " p." + hit.page_number;
+  inspect.addEventListener("click", () => showDetail(hit.doc_id));
+  article.append(snippet, details, inspect);
+  return article;
+}
+
+function renderSearch(payload) {
+  const state = byId("search-state");
+  const results = byId("search-results");
+  results.replaceChildren();
+  state.classList.remove("error");
+  if (!payload.available) {
+    state.textContent = payload.reason || "Search is unavailable.";
+    state.classList.add("error");
+    return;
+  }
+  const hits = Array.isArray(payload.hits) ? payload.hits : [];
+  state.textContent = hits.length
+    ? hits.length + ' hit(s) for "' + payload.query + '" from accepted, current chunks'
+    : 'No accepted evidence matched "' + payload.query + '".';
+  hits.forEach((hit, index) => results.append(searchHit(hit, index)));
+}
+
+async function searchEvidence(event) {
+  event.preventDefault();
+  const query = byId("search-query").value.trim();
+  const state = byId("search-state");
+  if (!query) {
+    state.textContent = "Type words to search accepted evidence.";
+    return;
+  }
+  const params = new URLSearchParams({ query, top_k: byId("search-top-k").value || "10" });
+  [["language", "search-language"], ["engine", "search-engine"], ["doc_id", "search-doc"]]
+    .forEach(([name, id]) => {
+      const value = byId(id).value.trim();
+      if (value) params.set(name, value);
+    });
+  state.classList.remove("error");
+  state.textContent = "Searching accepted evidence...";
+  try {
+    const response = await fetch("/api/search?" + params.toString(), { cache: "no-store" });
+    if (!response.ok) throw new Error("search failed with HTTP " + response.status);
+    renderSearch(await response.json());
+  } catch (error) {
+    state.textContent = "Error: " + (error && error.message ? error.message : error);
+    state.classList.add("error");
+  }
+}
+
 ["filter-url", "filter-language", "filter-routing", "filter-kind"].forEach((id) => {
   byId(id).addEventListener("input", renderTable);
 });
+byId("search-form").addEventListener("submit", searchEvidence);
 byId("refresh").addEventListener("click", () => refresh("manual"));
 refresh("initial");
 startPolling();
