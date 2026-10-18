@@ -6,6 +6,7 @@ evidence; it is a small, deterministic set on which routing, real OCR, cleaning,
 duplicate decisions and incrementality can be demonstrated and inspected.
 
 - **Manifest:** [`pdf-demo-corpus-manifest.json`](pdf-demo-corpus-manifest.json)
+- **Rehearsal:** [`pdf-demo-runbook.md`](pdf-demo-runbook.md) -- the commands, measured runs, OCR page evidence and limitations
 - **Crawl:** `CC-MAIN-2026-39`
 - **Records / Documents:** 19 Crawl Records, 18 distinct content digests
 - **Pages / bytes:** 325 pages, 27,116,937 PDF bytes

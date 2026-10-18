@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from finepdfs.interfaces.cli import build_parser
@@ -117,3 +119,45 @@ def test_an_engine_command_failure_reaches_the_traceback(monkeypatch) -> None:
 
     with pytest.raises(CommandFailed):
         cli.main(["inspect"])
+
+
+def test_a_run_prints_the_measured_summary_it_declared(monkeypatch, tmp_path, capsys) -> None:
+    """The summary is a declared output; the terminal print is a view of it, not a second writer."""
+    import hashlib
+
+    from finepdfs.infrastructure.corpus.manifest import CorpusEntry, CorpusManifest, relative_pdf_path
+    from finepdfs.interfaces import cli
+
+    body = (Path(__file__).resolve().parent.parent / "fixtures" / "warc_payload.bin").read_bytes()
+    digest = hashlib.sha256(body).hexdigest()
+    corpus_dir = tmp_path / "corpus"
+    (corpus_dir / "pdfs").mkdir(parents=True)
+    (corpus_dir / relative_pdf_path(digest)).write_bytes(body)
+    CorpusManifest(
+        crawl_id="CC-MAIN-2026-39",
+        domain="a.example",
+        entries=[
+            CorpusEntry(
+                url="https://a.example/one.pdf",
+                digest=digest,
+                file=relative_pdf_path(digest),
+                bytes=len(body),
+                crawl_id="CC-MAIN-2026-39",
+                warc_filename="crawl-data/CC-MAIN-2026-39/segments/x/warc/y.warc.gz",
+                offset=1,
+                length=len(body),
+            )
+        ],
+    ).save(corpus_dir / "manifest.json")
+    monkeypatch.setenv("FINEPDFS_DB", str(tmp_path / "runs.db"))
+
+    args = cli.build_parser().parse_args(
+        ["run", "--corpus", str(corpus_dir), "--out", str(tmp_path / "out"), "--engine", "pymupdf"]
+    )
+    assert cli._run(args) == 0
+
+    printed = capsys.readouterr().out
+    assert "run summary:" in printed
+    assert "extraction calls=1 reused=0" in printed
+    assert "published=1 documents" in printed
+    assert (tmp_path / "out" / "run-summary.json").exists()

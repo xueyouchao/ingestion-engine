@@ -35,6 +35,7 @@ from finepdfs.infrastructure.corpus.index import CorpusIndex
 from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifest
 from finepdfs.infrastructure.engines.registry import KNOWN_ENGINES
 from finepdfs.infrastructure.publishing.disk import PublishedCorpus
+from finepdfs.interfaces.summary import format_run_summary
 
 DEFAULT_CORPUS = Path("corpus")
 DEFAULT_OUT = Path("out")
@@ -343,11 +344,15 @@ def _run(args: argparse.Namespace) -> int:
     published = PublishedCorpus(runtime.out_dir)
     records = published.read_records()
     exclusions = published.read_exclusions()
-    failed = sum(1 for exclusion in exclusions if exclusion.get("kind") == "failed")
-    print(
-        f"recorded {len(records)} published documents, {failed} failed documents and "
-        f"{len(exclusions) - failed} other exclusions under {runtime.out_dir}"
-    )
+    summary = published.read_summary()
+    if summary is not None:
+        print(format_run_summary(summary))
+    else:
+        failed = sum(1 for exclusion in exclusions if exclusion.get("kind") == "failed")
+        print(
+            f"recorded {len(records)} published documents, {failed} failed documents and "
+            f"{len(exclusions) - failed} other exclusions under {runtime.out_dir}"
+        )
     return 1 if exclusions and not records else 0
 
 
