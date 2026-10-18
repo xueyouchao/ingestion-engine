@@ -409,6 +409,7 @@ def test_a_start_after_a_crashed_start_can_still_rent(tmp_path, capsys) -> None:
 
     try:
         holder.wait_until_holding()
+        assert reservation_path(path).exists(), "the live child's lock file is on disk"
 
         blocked = FakeModal(lease_dir, object_id="sb-blocked")
         assert start.main(values, sdk=blocked, opener=RecordingOpener()) == 1
@@ -421,7 +422,7 @@ def test_a_start_after_a_crashed_start_can_still_rent(tmp_path, capsys) -> None:
         if holder.process.poll() is None:  # pragma: no cover - only on a failed assertion above
             holder.kill()
 
-    assert status == 1, "the child died holding the reservation rather than releasing it"
+    assert status == 1, "the child died holding the reservation rather than releasing it first"
     assert reservation_path(path).exists(), "the dead start's lock file is still on disk"
 
     assert start.main(values, sdk=FakeModal(lease_dir), opener=RecordingOpener()) == 0

@@ -7,8 +7,9 @@ deadlock risk (and a ``DeprecationWarning`` since 3.12).
 
 Both sides are bounded, so a child that never comes up fails the test instead of hanging it: the child
 gives up after a deadline of its own, and the parent waits with a timeout. The child leaves with
-``os._exit`` -- no ``finally``, no context-manager cleanup -- which is what a process killed mid-rent
-leaves behind: a lock held by a process that no longer exists.
+``os._exit`` *inside* the reservation -- no ``finally``, no context-manager cleanup -- which is what a
+process killed mid-rent leaves behind: a lock held by a process that no longer exists. Exiting after the
+``with`` would close the descriptor first and quietly turn every crash test into a clean release.
 
 The program is a string rather than a module because it is that short, and because it must import
 ``deploy.gpu.contract`` from the repository being tested, not from whatever the child's cwd happens to be.
@@ -42,7 +43,7 @@ with lease_reservation(lease):
         if time.monotonic() > float(deadline):
             os._exit(2)
         time.sleep(0.01)
-os._exit(1)
+    os._exit(1)
 """
 
 

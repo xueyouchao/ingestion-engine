@@ -377,18 +377,20 @@ def test_a_crashed_holder_releases_the_reservation_when_its_process_dies(tmp_pat
     that can free the lock is the OS releasing it with the process.
     """
     path = tmp_path / "manual.json"
+    lock_file = tmp_path / "manual.json.lock"
     holder = hold_reservation_then_die(path, tmp_path)
 
     try:
         holder.wait_until_holding()
+        assert lock_file.exists(), "the live child's lock file is on disk while it holds the lock"
         _second_start_is_refused(path)
         status = holder.die_holding()
     finally:
         if holder.process.poll() is None:  # pragma: no cover - only on a failed assertion above
             holder.kill()
 
-    assert status == 1, "the child died holding the reservation rather than releasing it"
-    assert contract.reservation_path(path).exists(), "the dead start's lock file is still there"
+    assert status == 1, "the child died holding the reservation rather than releasing it first"
+    assert lock_file.exists(), "the dead start's lock file is still there"
 
-    with contract.lease_reservation(path) as reservation:
-        assert reservation.exists(), "and it is not the lock: the reservation is granted again"
+    with contract.lease_reservation(path) as granted:
+        assert granted == lock_file, "and it is not the lock: the reservation is granted again"
