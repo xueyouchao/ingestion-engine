@@ -14,6 +14,7 @@ import logging
 import os
 import shlex
 import sys
+import uuid
 from collections.abc import Callable, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -42,6 +43,9 @@ GPU_DETAIL = "FINEPDFS_GPU_DETAIL"
 GPU_START_COMMAND = "FINEPDFS_GPU_START_COMMAND"
 GPU_STOP_COMMAND = "FINEPDFS_GPU_STOP_COMMAND"
 GPU_TIMEOUT = "FINEPDFS_GPU_TIMEOUT"
+# The identity of one lease, minted here and passed to both of that lease's commands. It is the same
+# name the deploy-side worker scripts read (``deploy/gpu/contract.py``), pinned by a deploy test.
+GPU_LEASE_ID = "FINEPDFS_GPU_LEASE_ID"
 
 NONE = "none"
 STATIC = "static"
@@ -135,6 +139,11 @@ class CommandGpuProvider:
     one it is derived from the command line and the model, which is stable across runs and changes when
     either does.
 
+    Every lease mints its own identity and passes it to both commands, in ``FINEPDFS_GPU_LEASE_ID``.
+    A worker belongs to one run (ADR-0007), so the identity is what lets a start and its stop find the
+    same worker while a concurrent run finds its own: without it two runs shared one state file, one
+    run refused to start, and the other run's stop terminated a live worker.
+
     The stop command's result is checked rather than discarded: a worker it could not give back is
     still billing, which is the cost ADR-0007 exists to remove.
     """
@@ -155,9 +164,10 @@ class CommandGpuProvider:
         # operator has to act on is the start. A command that cannot even be split is not this case: it
         # never ran, so there is nothing to give back.
         argv = _argv(self.start_command)
+        lease_environment = {GPU_LEASE_ID: uuid.uuid4().hex}
         try:
             try:
-                started = self.runner.run(argv)
+                started = self.runner.run(argv, environ=lease_environment)
                 require_success(started)
                 endpoint = endpoint_from_start_output(started.stdout, self.start_command, self.model)
             except CommandFailed as error:
@@ -169,9 +179,11 @@ class CommandGpuProvider:
             # a plain `with`, or -- under CocoIndex -- never thrown in at all: the lifespan generator is
             # resumed with `next()` while the failed update is still unwinding, so the `yield` above sees
             # no exception to catch and the release has to read the traceback in flight instead.
-            self._release_reporting(sys.exc_info()[1])
+            self._release_reporting(sys.exc_info()[1], lease_environment)
 
-    def _release_reporting(self, run_error: BaseException | None) -> None:
+    def _release_reporting(
+        self, run_error: BaseException | None, lease_environment: Mapping[str, str]
+    ) -> None:
         """Give the worker back, and report a stop that failed without hiding the run's own error.
 
         A stop that fails after a run that otherwise finished is the provider's failure, so
@@ -181,7 +193,7 @@ class CommandGpuProvider:
         operator has to act on (ADR-0007).
         """
         try:
-            self._release()
+            self._release(lease_environment)
         except Exception as leak:
             if run_error is None:
                 raise
@@ -192,7 +204,7 @@ class CommandGpuProvider:
             )
             run_error.add_note(f"the GPU stop command also failed: {leak}")
 
-    def _release(self) -> None:
+    def _release(self, lease_environment: Mapping[str, str]) -> None:
         """Run the stop command, and refuse to pass a failure over in silence.
 
         The command is the provider's own, so a failure here is the provider's fault and not an engine's,
@@ -203,7 +215,7 @@ class CommandGpuProvider:
         if not self.stop_command:
             return
         try:
-            require_success(self.runner.run(_argv(self.stop_command)))
+            require_success(self.runner.run(_argv(self.stop_command), environ=lease_environment))
         except CommandFailed as error:
             raise GpuStopFailed(f"the GPU stop command failed: {error}") from error
 
@@ -289,9 +301,10 @@ def _timeout_seconds(values: Mapping[str, str]) -> float:
     A typo in ``FINEPDFS_GPU_TIMEOUT`` is a provider that cannot run, so it has to reach the CLI as
     ``MisconfiguredGpuProvider`` and exit 2 rather than escape as a bare ``ValueError`` traceback: no
     CLI except clause names that, and ADR-0007 promises the operator a message. The variable and the
-    value come with it so the message points at the typo.
+    value come with it so the message points at the typo. An empty or blank value is not a typo: every
+    other optional variable here reads empty as absent, so it means the default.
     """
-    raw = values.get(GPU_TIMEOUT, "1800")
+    raw = values.get(GPU_TIMEOUT, "").strip() or "1800"
     try:
         return float(raw)
     except ValueError as error:

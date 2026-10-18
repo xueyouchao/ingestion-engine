@@ -8,7 +8,8 @@ the whole corpus again -- which is the cost the memo exists to remove.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+import sys
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -41,7 +42,11 @@ from finepdfs.infrastructure.compute.providers import (
 )
 from finepdfs.infrastructure.engines.registry import EngineConfig, build_engine
 from finepdfs.infrastructure.engines.stable_identity import StableIdentity
-from finepdfs.infrastructure.engines.subprocess_support import CommandFailed, CommandResult
+from finepdfs.infrastructure.engines.subprocess_support import (
+    CommandFailed,
+    CommandResult,
+    SubprocessRunner,
+)
 from finepdfs.interfaces.cli import ENVIRONMENT_FOR_ENGINE, build_parser, main
 
 START = "start-worker"
@@ -63,9 +68,16 @@ class RecordingRunner:
         self.stop_returncode = stop_returncode
         self.stop_error = stop_error
         self.calls: list[tuple[str, ...]] = []
+        self.environments: list[Mapping[str, str] | None] = []
 
-    def run(self, argv: Sequence[str], cwd: Path | None = None) -> CommandResult:
+    def run(
+        self,
+        argv: Sequence[str],
+        cwd: Path | None = None,
+        environ: Mapping[str, str] | None = None,
+    ) -> CommandResult:
         self.calls.append(tuple(argv))
+        self.environments.append(environ)
         starting = argv[0] == START
         if starting:
             return CommandResult(argv=tuple(argv), returncode=self.returncode, stdout=self.stdout)
@@ -227,6 +239,43 @@ def test_a_command_provider_parses_the_endpoint_and_gives_it_back() -> None:
     assert [call[0] for call in runner.calls] == [START, STOP]
 
 
+def test_each_lease_hands_its_own_identity_to_both_its_commands() -> None:
+    """A per-run lease identity, given to the start *and* the stop command of that same lease.
+
+    The identity is what keeps two runs apart at the state file: without it both commands of both runs
+    read one path, so a stop in one run finds -- and terminates -- the other run's worker.
+    """
+    runner = RecordingRunner(stdout="https://rented.example/v1")
+    provider = CommandGpuProvider(start_command=START, stop_command=STOP, runner=runner)
+
+    with provider.lease():
+        pass
+    with provider.lease():
+        pass
+
+    first_start, first_stop, second_start, second_stop = runner.environments
+    assert first_start[providers.GPU_LEASE_ID] == first_stop[providers.GPU_LEASE_ID]
+    assert second_start[providers.GPU_LEASE_ID] == second_stop[providers.GPU_LEASE_ID]
+    assert first_start[providers.GPU_LEASE_ID] != second_start[providers.GPU_LEASE_ID]
+    assert len(first_start[providers.GPU_LEASE_ID]) == 32, "one random identity, not a path or a counter"
+
+
+def test_the_real_runner_adds_the_lease_identity_to_the_command_environment() -> None:
+    """The mapping is additive, not a replacement: the command keeps PATH and gains the identity."""
+    program = (
+        "import os;"
+        "print(os.environ.get('FINEPDFS_GPU_LEASE_ID', ''));"
+        "print('PATH' if os.environ.get('PATH') else 'NO-PATH')"
+    )
+
+    result = SubprocessRunner(timeout_seconds=30).run(
+        [sys.executable, "-c", program], environ={providers.GPU_LEASE_ID: "lease-abc"}
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == ["lease-abc", "PATH"]
+
+
 def test_a_command_provider_gives_the_worker_back_even_when_the_run_failed() -> None:
     """A leaked GPU bills by the hour, so the stop command runs on the way out, not only on success."""
     runner = RecordingRunner(stdout="https://rented.example/v1")
@@ -377,8 +426,13 @@ def test_an_interrupted_start_gives_the_worker_back(stop_returncode, caplog) -> 
     interruption = KeyboardInterrupt()
 
     class InterruptedRunner(RecordingRunner):
-        def run(self, argv: Sequence[str], cwd: Path | None = None) -> CommandResult:
-            result = super().run(argv, cwd)
+        def run(
+            self,
+            argv: Sequence[str],
+            cwd: Path | None = None,
+            environ: Mapping[str, str] | None = None,
+        ) -> CommandResult:
+            result = super().run(argv, cwd, environ)
             if argv[0] == START:
                 raise interruption
             return result
@@ -691,3 +745,21 @@ def test_a_new_worker_without_a_key_does_not_inherit_the_previous_servers_secret
 
     assert environ["FINEPDFS_ENGINE_BASE_URL"] == "https://rented.example/v1"
     assert "FINEPDFS_ENGINE_API_KEY" not in environ
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_an_empty_gpu_timeout_is_the_unset_value_not_a_typo(value: str) -> None:
+    """``float("")`` raised, so one exported-but-empty variable broke every command-provider run.
+
+    Every optional value here reads empty as absent -- the state file, the pinned detail -- and the
+    numeric ones have to agree: empty means the documented default, and only a real typo is an error.
+    """
+    provider = gpu_provider_from_environment(
+        {
+            "FINEPDFS_GPU_PROVIDER": "command",
+            "FINEPDFS_GPU_START_COMMAND": START,
+            "FINEPDFS_GPU_TIMEOUT": value,
+        }
+    )
+
+    assert isinstance(provider, CommandGpuProvider)

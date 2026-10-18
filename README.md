@@ -242,6 +242,15 @@ bytes go; the detail is the deployment half of what is remembered. So a lease re
 and `--engine-detail` pins one by hand. Without that, a moving address would re-read the whole corpus on
 every run -- the one thing this pipeline is built not to do. See ADR-0007.
 
+The shipped Modal worker rents **one detached Sandbox per run** behind `command`, records its lease in
+its own state file, and never leaves a deployment serving between runs. Its start and stop commands, the
+lease identity that keeps two concurrent runs apart, and the GPU validation gates are in
+[`docs/deploy/modal-worker-runbook.md`](docs/deploy/modal-worker-runbook.md) and
+[ADR-0009](docs/adr/0009-command-workers-and-image-only-validation.md). The worker has now run: four L4
+Sandboxes were leased and released on 2026-10-18, and
+[`docs/deploy/modal-worker-evidence.md`](docs/deploy/modal-worker-evidence.md) records what was observed
+and what is still unverified (the live failure paths, OCR quality, RunPod and production cost).
+
 ## Configuration
 
 Every run is configured by environment variables, because `cocoindex update main.py` takes no
@@ -403,6 +412,8 @@ the whole crawl.
 * [PDF workflow demo plan](docs/spec/pdf-workflow-demo.md) -- two-day priorities, acceptance criteria and optional search
 * [`docs/demo/pdf-demo-corpus.md`](docs/demo/pdf-demo-corpus.md) -- the pinned 19-record / 18-Document Corpus and what it does not demonstrate
 * [`docs/demo/pdf-demo-runbook.md`](docs/demo/pdf-demo-runbook.md) -- the rehearsal: commands, versions, measured runs, OCR page evidence, mutations and limitations
+* [`docs/deploy/modal-worker-runbook.md`](docs/deploy/modal-worker-runbook.md) -- the rented Modal GPU worker: per-run Sandbox, per-lease state, budget gate, and the GPU validation gates
+* [`docs/deploy/modal-worker-evidence.md`](docs/deploy/modal-worker-evidence.md) -- what the four real L4 runs on 2026-10-18 observed, and what remains unverified (failure teardown, OCR quality, RunPod, cost)
 * `docs/GLOSSARY.md` -- the vocabulary, kept deliberately small
 * `docs/adr/0001..0009` -- the decisions, with the alternatives that lost
 * `research/` -- the research behind the design, including `paddleocr-vl-mineru-adapters.md`

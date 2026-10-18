@@ -4,19 +4,38 @@ Date: 2026-10-18
 
 ## Status
 
-Accepted. This fixes the worker shape and the acceptance gate before implementation; the worker itself
-is still to be built.
+Accepted. The worker is implemented as the command scripts under `deploy/`: a pinned Modal image, a
+start and a stop script, a per-lease state file, and the contract tests behind them.
+
+Amended 2026-10-18, after the first real runs. Four L4 Sandboxes were leased and released through those
+commands -- a direct one-page read, a one-page pipeline run, and the pinned Corpus cold then warm -- and
+the observed evidence is [the Modal worker evidence record](../deploy/modal-worker-evidence.md). That
+moves the validation gates below to:
+
+| Gate | State |
+|---|---|
+| Contract | Implemented and validated offline: the fake start/stop commands and the provider's failure paths, without a GPU. |
+| Worker | Validated for real: `/v1/models` served PaddleOCR-VL-1.6 and one image-only page came back non-empty. |
+| Page mapping | Validated for real: the two-page scan kept pages 1 and 2 distinct, in original 1-based numbering. |
+| Incremental run | Validated for real: the Corpus cold made 17 calls and reused 1, the warm run made 0 and reused all 18, with one unchanged Engine Identity. |
+| Teardown | **Open on the failure paths.** The successful path ran for real four times (stop, an idempotent second stop, no active container, empty lease directory). A start failure, a readiness failure after creation, a run failure and a stop failure have only ever run against the offline fakes. |
+| Downstream | Validated for real: 594 chunks over 17 documents, with `Danny` served from both OCR Documents and from page 2 of the two-page scan as its own Chunk. |
+
+This is not a production acceptance. OCR quality is unmeasured -- the pipeline's accepted text for the
+one-page scan lost the table rows the direct call returned -- and the worker has only ever run on Modal:
+RunPod and production cost remain open. See [Consequences](#consequences).
 
 ## Context
 
 ADR-0007 already put the rented GPU behind a provider port. The seam exists and is tested: `none`,
 `static` and `command` providers, a `GpuEndpoint` that separates the address from the memo identity, and
-a lease that wraps the whole CocoIndex update. What does not exist is a real worker to put behind it.
+a lease that wraps the whole CocoIndex update. What did not exist is a real worker to put behind it.
 
 The deferred worker ticket asks for a Modal app and a RunPod app that serve an OCR engine and print
 their endpoint as one JSON object, wired through `FINEPDFS_GPU_START_COMMAND` /
 `FINEPDFS_GPU_STOP_COMMAND`, with a stable model-and-version identity and a released lease. It is blocked
-on a GPU account and on choosing which engine to serve.
+on a GPU account and on choosing which engine to serve. The Modal half is now implemented (see
+Decision); the RunPod half remains deferred.
 
 Three implementation shapes are available:
 
@@ -65,6 +84,42 @@ error handling.
 The start command must detach. `CommandGpuProvider` runs it synchronously and waits for it to exit before
 using the endpoint; a start command that stays in the foreground would deadlock the lease.
 
+### One lease, one worker, one state file
+
+The lease state is per lease, not per machine. `CommandGpuProvider` mints an identity for each lease,
+passes it in the environment to that lease's start *and* stop command, and the scripts record it at
+`$FINEPDFS_GPU_STATE_DIR/<identity>.json` (default `~/.cache/finepdfs/gpu-workers`). A single shared
+file broke ADR-0007's per-run lease in the two ways a shared file always does: a second run refused to
+start, and then its unconditional stop terminated the first run's live worker and cleared the first
+run's lease. An identity the provider chooses, rather than a path an operator must remember to set, is
+what makes two concurrent runs independent. A start run by hand has no provider to mint one and records
+under the fixed `manual` name, so `start` then `stop` from one shell still meet.
+
+Two hand-run starts therefore name the same file, and an identity cannot tell them apart. A start takes
+that file's reservation for its whole read-check-create-write sequence: an `fcntl.flock` exclusive,
+non-blocking lock on a sibling `<identity>.json.lock`. A second start inside the window exits nonzero
+saying another start is reserving the lease, and it is not told a pid, because a lock file says nothing
+about who holds the lock now. The kernel releases the lock when the holding process ends -- closed
+normally, killed, or crashed -- so recovery from a crash is the OS's job rather than a reader's guess.
+The lock file is closed and never unlinked: unlinking would let the next start create a new file and lock
+a different inode while the old one is still held. A leftover `.lock` is bookkeeping, never a lease (every
+reader here looks for `*.json`).
+
+Two earlier designs were rejected. An `O_EXCL` file holding the start's pid made recovery depend on pid
+liveness, and a recycled pid belonging to an unrelated live process blocked the lease for ever. Using a
+single `flock` descriptor, or one inherited across a `fork`, would not conflict between two threads of one
+process; a fresh `os.open` per acquisition does, because `flock` locks are per open file description.
+
+### The Modal unit is a detached Sandbox, not a deployed app
+
+A Modal lease is **one detached `modal.Sandbox`** created per run from the pinned image, with a GPU, an
+encrypted tunnel on the worker port, a TCP readiness probe and a lifetime cap. It outlives the start
+process, so the provider is not deadlocked, and it is terminated by id from the stop process. `modal
+deploy` was rejected: a deployed app or function leaves a URL and its own lifecycle serving (and
+billing) between runs, adds deployment state this design has nowhere to record, and gives concurrency a
+second meaning — two runs would share one deployment instead of renting two workers. The lifetime cap
+is the automatic backstop if stop never runs, and the runbook's teardown check is the human one.
+
 The JSON contract is:
 
 ```json
@@ -74,9 +129,12 @@ The JSON contract is:
 `base_url` is the ephemeral OpenAI-compatible base URL and **must include `/v1`**. `ChatEndpoint` appends
 only `/chat/completions`, so returning a bare host would send OCR requests to the wrong route; the worker
 must serve both `/v1/chat/completions` and `/v1/models`. `detail` is the deployment half of the Engine
-Identity and must name the model and its version — weights and/or image digest — and never the URL.
-Credentials come from the environment and are never committed. The start script writes nothing secret to
-stdout or logs.
+Identity, and the contract now *enforces* its shape: one token, `model@version[:attribute...]`, so a
+detail that names no model or no version is refused where it is produced instead of entering a memo key
+that silently means nothing. It carries the weights revision and image digest and never the URL.
+Credentials come from the environment and are never committed. The start script writes nothing secret
+to stdout or logs, and both scripts mask any URL before printing an error: the leased
+tunnel URL is itself the credential, so a diagnostic may name the failure and not the address.
 
 No new port is introduced. `GpuProvider` remains the port and `CommandGpuProvider` remains the adapter.
 If a native adapter is later justified, it is one entry in the existing `PROVIDERS` registration point,
@@ -99,12 +157,16 @@ The acceptance evidence is ordered from cheapest to most expensive:
 
 | Gate | Evidence | What it proves |
 |---|---|---|
-| Contract | Fake start/stop commands; one JSON object; start detaches; ID saved before readiness; stop runs on success, readiness failure and failure | The lease and provider contract, without a GPU |
+| Contract | Fake start/stop commands; one JSON object; start detaches; ID saved before readiness; stop runs on success, readiness failure and failure; two leases cannot stop each other's worker | The lease and provider contract, without a GPU |
 | Worker | Modal health/`/v1/models`; one real image-only page | The worker actually serves PaddleOCR-VL |
 | Page mapping | The genuine 1-page and 2-page AOML scans | OCR runs, pages survive, original numbering is preserved |
 | Incremental run | Full pinned NOAA corpus cold, then the same command with a new lease | The second run makes 0 extraction calls and reuses everything |
 | Teardown | Start failure, readiness failure after creation, run failure, stop failure; provider console/API afterwards | No worker is left billing |
 | Downstream | Index and read/search an OCR page | Accepted OCR text is usable evidence, not just an extraction result |
+
+What each gate actually showed on 2026-10-18 is in
+[the Modal worker evidence record](../deploy/modal-worker-evidence.md); the table above says what a gate
+must show, not what happened.
 
 The two genuine scans are the minimum real-OCR preflight, not the whole validation:
 
@@ -117,7 +179,11 @@ Docling character counts are not acceptance criteria for this engine.
 
 The full-corpus run is the actual incremental gate. It must show the scans routed to OCR, native
 documents staying native, a cold run with real extraction calls, and a warm run with zero calls and an
-unchanged Engine Identity. The identity must contain no Modal URL.
+unchanged Engine Identity. The identity must contain no Modal URL. Reusing *everything* on the warm run
+means `reused` = the cold run's `calls` + its `reused` = every Document, not `reused` = cold `calls`: a
+cold run that is not the first run of its memo may itself reuse a Document the same engine already read,
+and then the two counts legitimately differ (measured: cold 17 calls + 1 reused, warm 0 calls + 18
+reused).
 
 Failure is part of the feature: a start that cannot rent a worker exits as an operator problem, a run
 that loses its worker still releases the lease, and a stop that fails after an otherwise good run is
@@ -131,6 +197,9 @@ each run.
 
 ## Consequences
 
+* The lease state is one file per lease, named by an identity the provider mints and gives to both
+  commands. Two concurrent runs record two workers and can only give back their own; no shared path is
+  configured, so no operator mistake can make them collide again.
 * The base install stays model-free and vendor-free. Modal and RunPod dependencies live in the deploy
   environment; nothing in `domain/`, `application/`, the flow or the engines imports either vendor.
 * RunPod later is either a second pair of start/stop scripts implementing the same stdout contract, or,
@@ -139,11 +208,15 @@ each run.
 * The start script is testable with a fake runner, but real readiness and teardown remain provider
   behaviour: they must be checked against the provider, not inferred from exit codes.
 * A warm rerun still leases a worker even when the memo makes zero extraction calls. That is accepted
-  for this gate; avoiding the lease when no OCR is needed would be a separate optimisation.
+  for this gate; avoiding the lease when no OCR is needed would be a separate optimisation. Measured, it
+  costs about a start: 167 s cold against 153 s warm on the same Corpus.
 * The validation corpus has only two genuine image-only scans. The evidence proves the worker, routing,
-  page mapping and incrementality, not OCR quality across languages or layouts.
-* A native SDK adapter remains a possible follow-up, not a prerequisite. The decision is deferred until
-  the command path has a real successful run.
+  page mapping and incrementality, not OCR quality across languages or layouts. The one-page scan in
+  particular lost its numeric table rows on the pipeline read, so no character count here is an accuracy
+  claim.
+* A native SDK adapter remains a possible follow-up, not a prerequisite. The command path now has real
+  successful runs behind it, which was the condition for revisiting it; none of those runs showed
+  something the command boundary cannot express, so it stays deferred rather than rejected.
 
 ## Alternatives considered
 
@@ -170,5 +243,7 @@ each run.
 
 * [ADR-0005: Memoise the engine call only](0005-memoise-the-engine-call-only.md)
 * [ADR-0007: Rent the GPU behind a provider](0007-rent-the-gpu-behind-a-provider.md)
+* [Modal GPU worker: measured evidence](../deploy/modal-worker-evidence.md)
+* [Modal GPU worker runbook](../deploy/modal-worker-runbook.md)
 * [FinePDFs integration spec](../spec/finepdfs-integration.md)
 * [Glossary](../GLOSSARY.md)

@@ -58,15 +58,40 @@ the name says which Engine ran, the detail names the deployment behind it. A mod
 version change moves the detail and re-reads the corpus; a rented worker's new address does not
 (ADR-0005, ADR-0007).
 
-**Provider** — what supplies the Endpoint an Engine is reached at for a run. Three ship: none (the
-offline default, which supplies nothing and rents nothing), static (a server that already exists and
-outlives the run) and command (a start command that rents a worker, a stop command that gives it back).
-Modal and RunPod are another Provider behind the same seam, and no Engine knows about either (ADR-0007).
+**GpuProvider** — the port that supplies the Endpoint an Engine is reached at for a run and the Lease
+that holds it. Three adapters ship: none (the offline default, which supplies nothing and rents
+nothing), static (a server that already exists and outlives the run) and command (a start command that
+rents a Worker, a stop command that gives it back). "Provider" here always means this port (ADR-0007).
 
-**Lease** — the hold a run takes on a Provider's Endpoint, released on the way out, including when the
-run fails: a rented worker is given back either way, because a leaked GPU bills by the hour.
+**Vendor** — who rents the GPU, if anything is rented: Modal today, RunPod later. A Vendor lives inside
+a GpuProvider's command or adapter, and nothing in the pipeline names one.
 
-**Endpoint** — the bundle a Provider supplies for a run: the base URL, model and API key where the bytes
+**Worker** — the rented process that serves an Engine for one Lease: started by a GpuProvider's start
+command, given back by its stop command, and gone when the run ends. A Worker is not an Engine: the
+Engine is the adapter, the Worker is where the weights run.
+
+**Sandbox** — Modal's unit of a Worker: one detached process created per Lease, reachable through its
+own encrypted tunnel and terminated by id. A Sandbox is not a deployment: nothing serves between runs.
+Other Vendors have their own name for the same role.
+
+**Lease Identity** — the id a GpuProvider gives one Lease and passes to both of that Lease's commands,
+so a start and its stop find the same Worker and two runs never share one.
+
+**Lease State** — the on-disk record of one Lease: the GpuProvider that owns it and the Worker id to
+terminate. Written before the Worker is known to be ready, removed once it is given back, and named
+after the Lease Identity so two runs cannot read, clear or stop each other's.
+
+**Lease Reservation** — a start's exclusive hold on one Lease State file, taken before that file is read
+and released once the Worker id is recorded. It is an operating-system lock on a sibling file
+(`<identity>.json.lock`), not a claim about which process is alive: a second start is refused while the lock
+is held, and the OS releases it when the holding process ends, normally or by crashing. The lock file may
+outlive its holder and is harmless bookkeeping — a Lease Reservation is never a Lease State and is never
+read as one.
+
+**Lease** — the hold a run takes on a GpuProvider's Endpoint, released on the way out, including when
+the run fails: a rented Worker is given back either way, because a leaked GPU bills by the hour.
+
+**Endpoint** — the bundle a GpuProvider supplies for a run: the base URL, model and API key where the bytes
 go right now, and the detail the memo remembers about the deployment behind them. The address moves with
 a rented worker; the detail must not move with it. It is the detail half of the Engine Identity, whose
 name says which Engine ran (ADR-0007).
