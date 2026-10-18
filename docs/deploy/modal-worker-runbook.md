@@ -128,6 +128,11 @@ the weights revision and image digest and never the address. `start` refuses to 
 lease: run `stop` first, so a previous worker is never orphaned. If a start fails after creating the
 worker, the id is already on disk and `stop` is the next command.
 
+Two hand-run starts would name the same `manual.json`, so a start reserves it for its whole
+read-check-create-write sequence (`manual.json.lock`, holding that start's pid). A second start in that
+window exits nonzero and names the pid that holds the lease; a `.lock` left by a start that died is
+reclaimed by the next start, so it never has to be removed by hand.
+
 The tunnel URL is the credential: both scripts mask any URL before they print it (the scheme stays, the
 host does not), so an error names what failed and never the address. The one place the address appears is the endpoint JSON on
 stdout, which the provider consumes -- keep it out of notes, issues and PRs.

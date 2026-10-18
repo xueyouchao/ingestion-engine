@@ -81,6 +81,11 @@ so a start and its stop find the same Worker and two runs never share one.
 terminate. Written before the Worker is known to be ready, removed once it is given back, and named
 after the Lease Identity so two runs cannot read, clear or stop each other's.
 
+**Lease Reservation** — a start's exclusive hold on one Lease State file, taken before that file is read
+and released once the Worker id is recorded. It keeps two starts that would name the same file from both
+passing the check and renting a Worker, and it is not durable state: a reservation whose holder is gone is
+reclaimed by the next start, so a crash never blocks the Lease.
+
 **Lease** — the hold a run takes on a GpuProvider's Endpoint, released on the way out, including when
 the run fails: a rented Worker is given back either way, because a leaked GPU bills by the hour.
 

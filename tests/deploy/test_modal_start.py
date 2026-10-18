@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from pathlib import Path
 
 import pytest
@@ -29,9 +30,10 @@ from deploy.gpu.contract import (
     LeaseState,
     lease_file,
     read_lease,
+    reservation_path,
     write_lease,
 )
-from deploy.modal import start
+from deploy.modal import start, stop
 from deploy.modal.image import HF_CACHE_PATH, HF_CACHE_VOLUME
 from finepdfs.infrastructure.compute.providers import CommandGpuProvider, GpuStartFailed
 
@@ -171,8 +173,26 @@ def test_an_existing_lease_blocks_a_second_start(tmp_path, capsys) -> None:
     assert "stop" in error.lower(), "the message says how to clear it"
 
 
-def test_a_lease_that_cannot_be_written_terminates_the_worker(tmp_path, capsys) -> None:
+def test_a_lease_that_cannot_be_written_terminates_the_worker(tmp_path, capsys, monkeypatch) -> None:
     """No lease means stop could never find it, so the just-created worker is given back here."""
+    lease_dir = _leases(tmp_path)
+    values = worker_environment(lease_dir)
+    modal = FakeModal(lease_dir)
+
+    def unreachable(path, state):
+        raise OSError("the state directory went away")
+
+    monkeypatch.setattr(start, "write_lease", unreachable)
+
+    assert start.main(values, sdk=modal, opener=RecordingOpener()) == 1
+
+    assert modal.sandbox.terminated is True
+    assert "could not be written" in capsys.readouterr().err
+    assert not reservation_path(lease_dir / "manual.json").exists(), "the reservation is released"
+
+
+def test_a_state_directory_that_cannot_be_reserved_rents_no_worker(tmp_path, capsys) -> None:
+    """The reservation comes first, so a lease that cannot even be reserved costs no GPU at all."""
     blocker = tmp_path / "blocker"
     blocker.write_text("not a directory", encoding="utf-8")
     lease_dir = blocker / "leases"
@@ -181,8 +201,8 @@ def test_a_lease_that_cannot_be_written_terminates_the_worker(tmp_path, capsys) 
 
     assert start.main(values, sdk=modal, opener=RecordingOpener()) == 1
 
-    assert modal.sandbox.terminated is True
-    assert "could not be written" in capsys.readouterr().err
+    assert modal.created == {}, "nothing is rented when there is nowhere to record it"
+    assert "reservation" in capsys.readouterr().err
 
 
 def test_a_secret_in_a_vendor_error_is_redacted(tmp_path, capsys) -> None:
@@ -321,3 +341,82 @@ def test_an_empty_worker_lifetime_is_the_default(tmp_path, value: str) -> None:
     assert start.main(values, sdk=modal, opener=RecordingOpener()) == 0
 
     assert modal.created["timeout"] == start.LIFETIME_DEFAULT
+
+
+def test_two_overlapping_manual_starts_rent_one_worker(tmp_path, capsys) -> None:
+    """Two hand-run starts share ``manual.json``, so the gate and the create must be one critical section.
+
+    Without a reservation both read no lease before either writes, both create a worker, and the later
+    write drops the earlier id: stop can only find the later worker, and the earlier GPU bills until its
+    lifetime cap. The first start is parked inside ``Sandbox.create`` -- exactly the window the old code
+    left open -- while the second start runs to completion.
+    """
+    lease_dir = _leases(tmp_path)
+    values = worker_environment(lease_dir)
+    creating = threading.Event()
+    release = threading.Event()
+
+    class SlowCreateModal(FakeModal):
+        def _create(self, **kwargs):
+            sandbox = super()._create(**kwargs)
+            creating.set()
+            assert release.wait(timeout=10), "the first start was never released"
+            return sandbox
+
+    first_modal = SlowCreateModal(lease_dir, object_id="sb-first")
+    outcome: dict[str, int] = {}
+    first = threading.Thread(
+        target=lambda: outcome.update(code=start.main(values, sdk=first_modal, opener=RecordingOpener())),
+        daemon=True,
+    )
+    first.start()
+    try:
+        assert creating.wait(timeout=10), "the first start never reached Sandbox.create"
+
+        second_modal = FakeModal(lease_dir, object_id="sb-second")
+        assert start.main(values, sdk=second_modal, opener=RecordingOpener()) == 1
+
+        assert second_modal.created == {}, "the second start must not rent a second worker"
+        assert "reserv" in capsys.readouterr().err, "the start says another one holds the lease"
+    finally:
+        release.set()
+        first.join(timeout=10)
+
+    assert not first.is_alive()
+    assert outcome["code"] == 0, "the first start still succeeds"
+    assert read_lease(lease_file(values)).worker_id == "sb-first", "the first worker's id survives"
+    assert not reservation_path(lease_file(values)).exists()
+
+
+def test_a_start_reclaims_a_stale_reservation_left_by_a_dead_process(tmp_path) -> None:
+    """A crashed start must not block the lease for ever: the dead holder's reservation is taken over."""
+    lease_dir = _leases(tmp_path)
+    values = worker_environment(lease_dir)
+    stale = reservation_path(lease_file(values))
+    stale.parent.mkdir(parents=True)
+    stale.write_text("999999", encoding="utf-8")
+
+    assert start.main(values, sdk=FakeModal(lease_dir), opener=RecordingOpener()) == 0
+
+    assert not stale.exists()
+    assert read_lease(lease_file(values)).worker_id == "sb-abc123"
+
+
+def test_a_successful_start_leaves_no_reservation_and_stop_frees_the_lease_for_the_next_one(tmp_path) -> None:
+    lease_dir = _leases(tmp_path)
+    values = worker_environment(lease_dir)
+    path = lease_file(values)
+    reservation = reservation_path(path)
+
+    assert start.main(values, sdk=FakeModal(lease_dir), opener=RecordingOpener()) == 0
+
+    assert not reservation.exists(), "the reservation ends when the lease records the worker"
+    assert path.exists()
+
+    assert stop.main(values, sdk=FakeStopModal()) == 0
+    assert not path.exists()
+
+    assert start.main(values, sdk=FakeModal(lease_dir, object_id="sb-def456"), opener=RecordingOpener()) == 0
+
+    assert read_lease(path).worker_id == "sb-def456"
+    assert not reservation.exists()

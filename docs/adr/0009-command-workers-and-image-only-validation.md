@@ -95,6 +95,12 @@ run's lease. An identity the provider chooses, rather than a path an operator mu
 what makes two concurrent runs independent. A start run by hand has no provider to mint one and records
 under the fixed `manual` name, so `start` then `stop` from one shell still meet.
 
+Two hand-run starts therefore name the same file, and an identity cannot tell them apart. A start
+reserves that file for its whole read-check-create-write sequence: a sibling `<identity>.json.lock`
+created with `O_EXCL` and holding the start's pid. A second start inside the window exits nonzero naming
+the pid that holds it, and a reservation whose pid is gone is reclaimed, so a crashed start cannot hold a
+lease for ever. `flock` was rejected for this: it does not conflict between two threads of one process.
+
 ### The Modal unit is a detached Sandbox, not a deployed app
 
 A Modal lease is **one detached `modal.Sandbox`** created per run from the pinned image, with a GPU, an

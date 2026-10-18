@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 from pathlib import Path
 
@@ -292,3 +293,54 @@ def test_a_detail_that_carries_a_url_is_refused_without_repeating_it() -> None:
         contract.endpoint_payload(contract.base_url_with_v1(TUNNEL), detail=f"paddleocr-vl@1.6:{TUNNEL}")
 
     assert TUNNEL not in str(caught.value)
+
+
+def test_a_lease_reservation_is_held_until_the_lease_is_written_and_is_never_read_as_a_lease(tmp_path) -> None:
+    """Reading the lease and creating the worker must be one critical section, so the gate is owned."""
+    path = tmp_path / "leases" / "manual.json"
+    reservation = contract.reservation_path(path)
+
+    with contract.lease_reservation(path):
+        assert reservation.exists()
+        assert reservation.read_text(encoding="utf-8") == str(os.getpid())
+        assert sorted(path.parent.glob("*.json")) == [], "a reservation is not a lease"
+
+    assert not reservation.exists(), "the reservation is released with the start"
+
+
+def test_a_lease_reservation_is_released_when_the_start_fails(tmp_path) -> None:
+    """Sandbox.create or write_lease failing must not leave a reservation nobody can clear."""
+    path = tmp_path / "manual.json"
+
+    with pytest.raises(RuntimeError, match="quota"), contract.lease_reservation(path):
+        raise RuntimeError("quota exceeded")
+
+    assert not contract.reservation_path(path).exists()
+
+
+def test_a_live_reservation_refuses_a_second_one_and_names_the_holder(tmp_path) -> None:
+    """O_EXCL, not flock: two starts in one process, and two processes, both conflict."""
+    path = tmp_path / "manual.json"
+
+    with (
+        contract.lease_reservation(path),
+        pytest.raises(contract.WorkerContractError, match="reserv") as caught,
+        contract.lease_reservation(path),
+    ):
+        raise AssertionError("a second reservation must not be granted")
+
+    assert str(os.getpid()) in str(caught.value), "the message names the start that holds it"
+
+
+@pytest.mark.parametrize("stale", ["999999", "", "not-a-pid", "0"])
+def test_a_reservation_left_by_a_dead_or_unreadable_holder_is_reclaimed(tmp_path, stale: str) -> None:
+    """A crash must not block the lease for ever: no lock a dead process holds, no unreadable lock."""
+    path = tmp_path / "manual.json"
+    reservation = contract.reservation_path(path)
+    reservation.parent.mkdir(parents=True, exist_ok=True)
+    reservation.write_text(stale, encoding="utf-8")
+
+    with contract.lease_reservation(path):
+        assert reservation.read_text(encoding="utf-8") == str(os.getpid())
+
+    assert not reservation.exists()

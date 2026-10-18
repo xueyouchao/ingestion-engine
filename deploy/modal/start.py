@@ -7,13 +7,17 @@ survives this process exiting, and is terminated by id from the stop command. No
 
 Ordering is the contract:
 
-1. create the Sandbox;
-2. write its id to the lease state *immediately*, before any readiness wait, so a start that times out
+1. reserve this lease's file, and keep the reservation until its worker id is recorded: a hand-run start
+   has no provider identity, so two of them share ``manual.json`` and without the reservation both pass
+   the gate, both rent a worker, and the later write drops the earlier id -- a GPU billing with no handle
+   stop can find;
+2. create the Sandbox;
+3. write its id to the lease state *immediately*, before any readiness wait, so a start that times out
    or fails readiness still leaves the stop command something to terminate. The file is the one named
    by this lease's identity (``FINEPDFS_GPU_LEASE_ID``), which is what keeps a concurrent run's worker
    out of reach;
-3. wait for the readiness probe and verify ``/v1/models`` names the pinned model;
-4. print exactly one JSON object on stdout and exit.
+4. wait for the readiness probe and verify ``/v1/models`` names the pinned model;
+5. print exactly one JSON object on stdout and exit.
 
 The stop command is not run from here on a readiness failure: ``CommandGpuProvider`` runs it after the
 start command exits nonzero, and running it twice would hide which side failed. Diagnostics go to
@@ -27,6 +31,7 @@ import os
 import sys
 import urllib.request
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 from deploy.gpu.contract import (
@@ -39,6 +44,7 @@ from deploy.gpu.contract import (
     emit_endpoint,
     endpoint_payload,
     lease_file,
+    lease_reservation,
     positive_seconds,
     read_lease,
     redact,
@@ -85,7 +91,18 @@ def _import_sdk() -> Any:
 
 
 def _create_worker(modal: Any, environ: Mapping[str, str]) -> Any:
+    """Rent one worker while holding this lease's reservation, from the gate until its id is recorded.
+
+    The reservation is the lock (``lease_reservation``): it covers the read/check below and the
+    ``Sandbox.create`` that follows, so two hand-run starts cannot both pass the gate. It is released
+    when the lease file has the id, or when either step fails.
+    """
     path = lease_file(environ)
+    with lease_reservation(path):
+        return _rent_worker(modal, environ, path)
+
+
+def _rent_worker(modal: Any, environ: Mapping[str, str], path: Path) -> Any:
     existing = read_lease(path)
     if existing is not None:
         raise WorkerContractError(
