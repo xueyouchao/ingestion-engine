@@ -6,12 +6,14 @@ the same interface, which is why the pipeline can be exercised with no network, 
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Protocol
 
+from finepdfs.domain.chunks import Chunk
 from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, TextLayerQuality
 from finepdfs.domain.language import PageLanguage
+from finepdfs.domain.search import IndexFailure, SearchHit, SearchQuery
 
 
 class CrawlSource(Protocol):
@@ -48,3 +50,21 @@ class LanguageIdentifier(Protocol):
     """
 
     def identify(self, text: str, page_number: int) -> PageLanguage: ...
+
+
+class SearchIndex(Protocol):
+    """A lexical index over declared chunks. It never decides what is published or accepted.
+
+    ``upsert`` is an idempotent write of the chunks it is given and reports every chunk it could not
+    store; ``retain`` deletes every stored chunk whose id is not in the current declared set, which is
+    how replacements, fewer pages, exclusions and removed sources stop being searchable. ``search``
+    answers the shared contract.
+    """
+
+    def upsert(self, chunks: Sequence[Chunk]) -> Sequence[IndexFailure]: ...
+
+    def retain(self, chunk_ids: Collection[str]) -> int:
+        """Delete the chunks that are no longer declared; return how many were removed."""
+        ...
+
+    def search(self, query: SearchQuery) -> Sequence[SearchHit]: ...

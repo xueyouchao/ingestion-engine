@@ -19,6 +19,7 @@ from cocoindex.connectors import localfs
 
 from finepdfs.application.curate import CurationOutcome, ExtractionResult, RoutingPlan
 from finepdfs.application.metrics import RunMetrics
+from finepdfs.domain.chunks import chunk_page_records
 from finepdfs.domain.dedup import (
     DedupPlan,
     DuplicateDecision,
@@ -255,11 +256,19 @@ def _declare(
     localfs.declare_file(
         published.record_path(document.key), published.record_payload(outcome.record), create_parent_dirs=True
     )
-    # Only a published Document declares page records, so an exclusion, a duplicate or a Crawl Record
-    # that left the manifest stops declaring them and the target state retracts the old file.
+    # Only a published Document declares page and chunk records, so an exclusion, a duplicate or a
+    # Crawl Record that left the manifest stops declaring them and the target state retracts the old
+    # files. The chunks are derived from the accepted pages that were just declared, so a replacement
+    # with fewer pages retracts the chunks of the pages that no longer exist.
+    pages = _page_records(document, outcome)
     localfs.declare_file(
         published.pages_path(document.key),
-        published.pages_payload(_page_records(document, outcome)),
+        published.pages_payload(pages),
+        create_parent_dirs=True,
+    )
+    localfs.declare_file(
+        published.chunks_path(document.key),
+        published.chunks_payload(chunk_page_records(pages, language=outcome.record.language)),
         create_parent_dirs=True,
     )
     metrics.count_published(len(outcome.pages))
