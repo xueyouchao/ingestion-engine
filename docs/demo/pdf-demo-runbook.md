@@ -577,8 +577,9 @@ output; the "no browser" wording this file used to carry was wrong. Chrome was G
 148.0.7778.96 driven by `chrome-devtools-axi` 0.1.44. Serve a completed run and open the page:
 
 ```bash
-# one completed current-head run; pymupdf was the only engine installed on the verification host
-PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --root <root> --engine pymupdf
+# one completed current-head run with search chunks; pymupdf was the only engine installed
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --root <root> --engine pymupdf --search
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli index-search --out <root>/out
 PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli explore \
   --out <root>/out --corpus <root>/corpus --host 127.0.0.1 --port 8791
 # then open http://127.0.0.1:8791/
@@ -600,15 +601,28 @@ Observed:
 * **Refresh:** an unchanged warm rerun (0 calls, 18 reused, same counters) moved the observed
   elapsed from 1.5 s to 1.4 s and the finish timestamp; the page's poll and `Refresh now` both
   showed the new observation while the declared counters stayed identical.
+* **Search highlight:** `storm` returned 5 hits over the 590 current chunks, and the snippets held
+  5 real `<mark>` elements (each `storm`, computed background
+  `color(srgb 0.541176 0.294118 0 / 0.35)`), not plain text.
+* **Refresh after a completed update:** with the 15-Document / 590-chunk run indexed, a stricter
+  policy (`--min-characters 32000`, still 0 calls / 18 reused) removed the Documents behind all
+  5 `storm` hits; the page's poll, then `Refresh now`, each re-asked the active query, cleared the
+  hits and showed the API's "the search index is stale: ... run finepdfs index-search" state.
+  After `index-search` rebuilt that run's 347 chunks (243 retracted), refresh returned 1 hit and
+  1 `<mark>`; restoring the default policy and rebuilding the 590-chunk index returned 5 hits and
+  5 `<mark>` from the current chunks.
 * **Console:** no messages, so no console errors; every request answered 200.
 
-Screenshots were temporary evidence under `/tmp/pdf-demo-browser-verify/` (`01-status-table.png`,
-`02-document-detail.png`, `03-pdf-page2.png`, `04-filter-text.png`,
-`05-filter-near-duplicate.png`) and are not committed. Limitations: the verification host had no
+Screenshots were temporary evidence under `/tmp/pdf-demo-greptile-b/`
+(`01-search-highlighted.png`, `02-refresh-stale-search-cleared.png`,
+`03-refresh-rerun-highlight.png`; the earlier table/detail/PDF/filter captures are under
+`/tmp/pdf-demo-browser-verify/`) and are not committed. Limitations: the verification host had no
 Docling, so the two OCR-routed scans produced no text and were dropped by the publish floor -- the
 routing filter therefore offered only `text-layer`, and an `ocr` routing reason and a Docling Engine
-Identity were not re-verified here. Search was not exercised either: that run declared no chunks and
-no index (P1 does not require search), so the search view showed its "no index" state.
+Identity were not re-verified here. The stale-hit refresh used a publish-policy change; a removed
+Crawl Record reaches the same declared-chunk freshness check but was not repeated in the browser.
+Search here shows the citation and freshness architecture of 15 Documents, not retrieval quality at
+corpus scale.
 
 
 ## Dry run is not a free estimate
