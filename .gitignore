@@ -4,6 +4,8 @@
 /out/
 /cocoindex.db/
 /cocoindex.db
+# The demo command's isolated state: corpus, output and warm CocoIndex database. Persistent by design.
+/.demo/
 
 # Python
 __pycache__/

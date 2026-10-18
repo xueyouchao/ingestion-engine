@@ -16,7 +16,12 @@ import pymupdf
 import pytest
 
 from finepdfs.domain.document import Document
-from finepdfs.infrastructure.engines.docling_engine import DoclingEngine, DoclingError, pages_from_markdown
+from finepdfs.infrastructure.engines.docling_engine import (
+    DoclingEngine,
+    DoclingError,
+    DoclingVersionError,
+    pages_from_docling_json,
+)
 from finepdfs.infrastructure.engines.mineru import (
     MineruEngine,
     MineruError,
@@ -82,17 +87,20 @@ class StubModelServer:
 class RecordingRunner:
     """A command runner that records the command and can write the files the tool would write."""
 
-    def __init__(self, on_run=None, returncode: int = 0, stderr: str = "") -> None:
+    def __init__(self, on_run=None, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
         self.argv: list[str] | None = None
         self._on_run = on_run
         self._returncode = returncode
+        self._stdout = stdout
         self._stderr = stderr
 
     def run(self, argv, cwd=None) -> CommandResult:
         self.argv = list(argv)
         if self._on_run is not None:
             self._on_run(list(argv))
-        return CommandResult(argv=tuple(argv), returncode=self._returncode, stdout="", stderr=self._stderr)
+        return CommandResult(
+            argv=tuple(argv), returncode=self._returncode, stdout=self._stdout, stderr=self._stderr
+        )
 
 
 def _two_page_pdf() -> bytes:
@@ -269,32 +277,109 @@ def test_content_list_from_response_refuses_an_answer_without_one() -> None:
         content_list_from_response({"results": {"document.pdf": {"md_content": "only markdown"}}})
 
 
-def test_the_docling_engine_runs_the_command_and_reads_the_markdown(tmp_path) -> None:
-    def write_markdown(argv: list[str]) -> None:
+def test_the_docling_engine_reads_the_page_aware_json_it_asked_for(tmp_path) -> None:
+    def write_json(argv: list[str]) -> None:
+        if "--output" not in argv:
+            return
         output_dir = Path(argv[argv.index("--output") + 1])
         output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "document.md").write_text("# Title\n\nbody text")
+        (output_dir / "document.json").write_text(
+            (FIXTURES / "docling_2_140_0_cc_scan_trimmed.json").read_text()
+        )
 
-    runner = RecordingRunner(on_run=write_markdown)
-    engine = DoclingEngine(work_dir=tmp_path, runner=runner)
+    command = str(tmp_path / "docling")
+    runner = RecordingRunner(on_run=write_json, stdout="Docling version: 2.140.0\n")
+    engine = DoclingEngine(command=command, work_dir=tmp_path, runner=runner)
 
     extracted = engine.extract(Document(name="x", content=b"%PDF-1.7 fake"))
 
-    assert runner.argv[0] == "docling"
-    assert runner.argv[1:3] == ["--to", "md"]
+    assert runner.argv[0] == command
+    assert runner.argv[1] == "convert"
+    assert runner.argv[2:4] == ["--to", "json"]
+    assert runner.argv[runner.argv.index("--image-export-mode") + 1] == "placeholder"
+    assert [page.number for page in extracted.pages] == [1, 2]
+    assert extracted.pages[0].text.split("\n\n")[0] == "Flight ID"
+    assert "Murilk" in extracted.pages[0].text
+    assert "GPS Dropwindsonde Scientist Log (Revised 5/2002}" in extracted.pages[1].text
+    assert "Sonde | Tle (JTC) | Iat" in extracted.pages[1].text
+    assert "WxwxA Dannyl" not in "\n".join(page.text for page in extracted.pages)
     assert extracted.engine.name == "docling"
-    assert extracted.pages[0].text == "# Title\n\nbody text"
+    assert extracted.engine.detail == "cli:docling:v2.140.0"
+
+
+def test_a_docling_version_probe_that_cannot_answer_is_a_named_error(tmp_path) -> None:
+    """The version is part of the memo key, so a probe with no answer must not degrade to a bare name.
+
+    ADR-0005 keys Extraction on the Engine Identity; an identity that silently drops the tool version
+    would let an upgraded Docling reuse an Extraction the old one produced.
+    """
+    engine = DoclingEngine(
+        command=str(tmp_path / "docling"), runner=RecordingRunner(returncode=1, stderr="boom")
+    )
+
+    with pytest.raises(DoclingVersionError, match="version probe"):
+        assert engine.identity
+
+
+def test_repeated_identity_calls_probe_the_tool_once(tmp_path) -> None:
+    probes: list[list[str]] = []
+    runner = RecordingRunner(on_run=lambda argv: probes.append(argv), stdout="Docling version: 2.140.0\n")
+    engine = DoclingEngine(command=str(tmp_path / "docling"), runner=runner)
+
+    assert engine.identity.detail == "cli:docling:v2.140.0"
+    assert engine.identity.detail == "cli:docling:v2.140.0"
+    assert len(probes) == 1, "a tool version is a property of the installed executable"
 
 
 def test_the_docling_engine_fails_loudly_when_nothing_was_written(tmp_path) -> None:
+    runner = RecordingRunner(stdout="Docling version: 2.140.0\n")
     with pytest.raises(DoclingError):
-        DoclingEngine(work_dir=tmp_path, runner=RecordingRunner()).extract(Document(name="x", content=b"%PDF"))
+        DoclingEngine(work_dir=tmp_path, runner=runner).extract(Document(name="x", content=b"%PDF"))
 
 
-def test_docling_page_markers_are_honoured_when_the_tool_writes_them() -> None:
-    pages = pages_from_markdown("<!-- page: 1 -->\nfirst\n<!-- page: 2 -->\nsecond")
+def test_the_docling_engine_refuses_json_it_cannot_parse(tmp_path) -> None:
+    def write_broken_json(argv: list[str]) -> None:
+        if "--output" not in argv:
+            return
+        output_dir = Path(argv[argv.index("--output") + 1])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "document.json").write_text("{not json")
 
-    assert [page.text for page in pages] == ["first", "second"]
+    engine = DoclingEngine(
+        work_dir=tmp_path,
+        runner=RecordingRunner(on_run=write_broken_json, stdout="Docling version: 2.140.0\n"),
+    )
+
+    with pytest.raises(DoclingError, match="invalid JSON"):
+        engine.extract(Document(name="x", content=b"%PDF"))
+
+
+def test_docling_json_keeps_the_original_page_numbers_of_a_sparse_document() -> None:
+    payload = {
+        "body": {"children": [{"$ref": "#/texts/0"}, {"$ref": "#/texts/1"}]},
+        "texts": [
+            {"label": "text", "text": "first", "prov": [{"page_no": 1}]},
+            {"label": "text", "text": "third", "prov": [{"page_no": 3}]},
+        ],
+    }
+
+    pages = pages_from_docling_json(payload)
+
+    assert [(page.number, page.text) for page in pages] == [(1, "first"), (3, "third")]
+
+
+def test_docling_json_skips_unplaceable_items_and_reads_the_fallback_text_items() -> None:
+    payload = {
+        "body": {"children": [{"$ref": "#/texts/9"}, "not a reference"]},
+        "texts": [
+            {"label": "text", "text": "has no provenance"},
+            {"label": "text", "text": "second page", "prov": [{"page_no": 2}]},
+        ],
+    }
+
+    pages = pages_from_docling_json(payload)
+
+    assert [(page.number, page.text) for page in pages] == [(2, "second page")]
 
 
 def test_strip_model_preamble_removes_an_echoed_prompt_and_code_fences() -> None:

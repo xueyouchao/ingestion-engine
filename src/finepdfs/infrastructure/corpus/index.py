@@ -2,25 +2,25 @@
 
 from __future__ import annotations
 
-import hashlib
 import pathlib
 from dataclasses import dataclass
 
+from finepdfs.domain.source_identity import source_identity
 from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifest
 
 
 def document_key(url: str) -> str:
-    """A short, stable, filesystem-safe name for one document.
+    """The key one document's published outputs are named after: its Source Identity.
 
-    The first 16 hex digits of the SHA-256 of the URL: the same idea as the PDFs, which are named by
-    their content digest, so a second run writes the same names.
+    Derived in one place only -- ``finepdfs.domain.source_identity`` -- so the manifest, the output
+    layout and a citation cannot disagree about which document a file belongs to.
     """
-    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+    return source_identity(url)
 
 
 @dataclass(frozen=True, slots=True)
 class CorpusDocument:
-    """One document in the corpus, with the key the flow mounts it under."""
+    """One document in the corpus, with the key its published outputs are named after."""
 
     key: str
     url: str

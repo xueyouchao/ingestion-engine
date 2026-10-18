@@ -1,0 +1,16 @@
+# The observed working demo environment, pinned so a fresh install reproduces the same page text,
+# chunk ids and citations. The base install stays model-free (pyproject.toml dependencies); everything
+# below is the optional OCR and CPU tooling the runbook's measured runs used.
+#
+# Install the base first, then the CPU wheels from the CPU index, then this file:
+#
+#   .venv/bin/pip install -e .
+#   .venv/bin/pip install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu
+#   .venv/bin/pip install -r docs/demo/requirements-demo.txt
+#
+# torch is pinned with the CPU local version, so plain PyPI cannot satisfy it: the CPU wheel index is
+# https://download.pytorch.org/whl/cpu and the install must name it. The EasyOCR and Docling layout
+# weights are downloaded on first use, not committed.
+docling==2.140.0
+torch==2.10.0+cpu
+easyocr==1.7.2

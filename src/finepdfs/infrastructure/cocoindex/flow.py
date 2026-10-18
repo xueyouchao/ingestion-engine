@@ -18,13 +18,15 @@ import cocoindex as coco
 from cocoindex.connectors import localfs
 
 from finepdfs.application.curate import CurationOutcome, ExtractionResult, RoutingPlan
+from finepdfs.application.metrics import RunMetrics
+from finepdfs.domain.chunks import chunk_page_records
 from finepdfs.domain.dedup import (
     DuplicateDecision,
-    PublishedDocumentView,
+    decide_duplicates,
     exact_duplicate_keepers,
-    plan_deduplication,
 )
 from finepdfs.domain.document import Document, ExtractedDocument, content_digest
+from finepdfs.domain.publishing import PageRecord
 from finepdfs.infrastructure.cocoindex.runtime import Runtime, runtime_from_environment
 from finepdfs.infrastructure.compute.providers import leased_environment
 from finepdfs.infrastructure.corpus.index import CorpusDocument
@@ -32,6 +34,11 @@ from finepdfs.infrastructure.corpus.manifest import pdf_path
 from finepdfs.infrastructure.publishing.disk import DUPLICATES_REPORT, KEPT_REPORT, PublishedCorpus
 
 logger = logging.getLogger(__name__)
+
+# What the summary says about a configured engine whose identity probe cannot answer. A fixed word, not
+# the probe's error: a declared summary must not carry an executable path or a temp directory, and two
+# runs that both could not reach the engine must declare the same bytes (ADR-0005).
+UNAVAILABLE_ENGINE_IDENTITY = "unavailable"
 
 _app_runtime: Runtime | None = None
 
@@ -87,6 +94,9 @@ async def extract_with_engine(digest: str, engine_name: str, engine_identity: st
     if content_digest(content) != digest:
         raise ValueError(f"{path} does not hold the bytes its digest names")
     document = Document(name=str(path), content=content)
+    # This body runs only on a memo miss, so this is one actual Extraction and never a memo hit. It
+    # is counted after the digest check because a file that no longer matches never reaches an engine.
+    runtime.metrics.count_extraction(digest, engine_name, engine_identity)
     return runtime.extraction.extract_with(document, engine_name)
 
 
@@ -122,8 +132,18 @@ async def read_document(request: ReadingRequest) -> DocumentReading:
             raise ValueError(f"{document.path} does not hold the bytes its digest names")
         plan = runtime.extraction.route(content)
         engine = runtime.engines[plan.engine_name]
+        # Route the keeper and remember the memo key this run is about to ask for. The routing
+        # decision is outside the memoised body, so a threshold change can move a document between
+        # text layer and OCR and the key moves with it (ADR-0005).
+        runtime.metrics.route(needs_ocr=plan.decision.needs_ocr)
+        runtime.metrics.request_extraction(document.digest, plan.engine_name, str(engine.identity))
+        # The mount path is part of CocoIndex's memo scope, not just the arguments below: naming the
+        # component by URL would put a survivor promoted to keeper under a path that never ran, so the
+        # corpus would pay for the same bytes twice. The digest is the identity ADR-0005 keys
+        # Extraction on, so it names the component too. A database written before this path existed
+        # misses once and re-reads each document before memoising it again.
         extracted = await coco.use_mount(
-            coco.component_subpath("extract", document.key),
+            coco.component_subpath("extract", document.digest),
             extract_with_engine,
             document.digest,
             plan.engine_name,
@@ -146,24 +166,39 @@ async def publish_corpus(readings: tuple[DocumentReading, ...], similar_at: floa
     published = runtime.published()
 
     curated: dict[str, tuple[CorpusDocument, CurationOutcome]] = {}
+    outcomes: dict[str, CurationOutcome] = {}
     for item in readings:
         if item.extracted is None or item.exact_duplicate_of:
             continue
         url = item.document.url
-        curated[url] = (item.document, runtime.curation.curate(_extraction(item), url, item.document.digest))
+        outcome = runtime.curation.curate(_extraction(item), url, item.document.digest)
+        curated[url] = (item.document, outcome)
+        outcomes[url] = outcome
+    # A reading that failed is a disposition like any other, so the duplicate decision can say what an
+    # exact duplicate of it inherits without reading it again.
+    for item in readings:
+        if item.extracted is None and not item.exact_duplicate_of:
+            url = item.document.url
+            outcomes[url] = CurationOutcome(status="failed", url=url, reason=item.failure)
 
-    plan = plan_deduplication(
-        [
-            PublishedDocumentView(url=document.url, digest=document.digest, text=outcome.markdown)
-            for document, outcome in curated.values()
-            if outcome.published
-        ],
+    # One owner for both kinds of duplicate (domain/dedup.decide_duplicates), so the dry run and these
+    # declarations cannot disagree. An exact duplicate may only name a keeper that is actually
+    # published: the digest keeper can itself be a near-duplicate loser, dropped by policy, or failed.
+    decision = decide_duplicates(
+        {item.document.url: item.document.digest for item in readings},
+        outcomes,
         similarity_threshold=similar_at,
     )
-    near_duplicate = {decision.url: decision for decision in plan.duplicates if decision.kind == "near"}
+    plan = decision.plan
+    duplicates = decision.duplicates_by_url()
+    inherited = {
+        url: (fate.kind, fate.keeper, fate.reason) for url, fate in decision.inherited_by_url().items()
+    }
 
     for item in readings:
-        _declare(published, item, curated, near_duplicate)
+        _declare(
+            published, item, curated, duplicates, inherited, runtime.metrics, runtime.search_enabled
+        )
 
     localfs.declare_file(
         published.dedup_report_path(KEPT_REPORT), published.kept_payload(plan), create_parent_dirs=True
@@ -173,6 +208,36 @@ async def publish_corpus(readings: tuple[DocumentReading, ...], similar_at: floa
         published.duplicates_payload(plan),
         create_parent_dirs=True,
     )
+    # The summary is target state too, so the flow stays the only writer and a rerun refreshes it in
+    # place. It carries no timing: elapsed time is an observation the command wrapper around the run
+    # records in `out/last-run.json` (interfaces/run_log.py), never a declared field.
+    manifest = runtime.corpus().manifest()
+    summary = runtime.metrics.summary(
+        crawl_id=manifest.crawl_id,
+        domain=manifest.domain,
+        crawl_records=len(readings),
+        documents=len({item.document.digest for item in readings}),
+        engine_name=runtime.policy.engine_name,
+        engine_identity=_summary_engine_identity(runtime),
+    )
+    localfs.declare_file(published.summary_path(), published.summary_payload(summary), create_parent_dirs=True)
+
+
+def _summary_engine_identity(runtime: Runtime) -> str:
+    """The configured engine's identity, or a deterministic ``unavailable`` when it cannot name itself.
+
+    This probe runs after every Document has been read, outside the per-document error handler in
+    ``read_document``. A configured engine that is not installed, or whose version probe fails, is an
+    unavailable OCR engine -- not a corpus-wide failure: its Documents are already exclusions, one per
+    Document, and the native Documents that were read must still publish. The summary therefore says
+    ``unavailable`` instead of raising, and says the same word on every run, with no host path.
+    """
+    engine = runtime.engines[runtime.policy.engine_name]
+    try:
+        return str(engine.identity)
+    except Exception as error:  # the engine is unavailable; the run is not
+        logger.warning("engine %s cannot name its identity: %s", runtime.policy.engine_name, error)
+        return UNAVAILABLE_ENGINE_IDENTITY
 
 
 def _extraction(item: DocumentReading) -> ExtractionResult:
@@ -184,48 +249,105 @@ def _declare(
     published: PublishedCorpus,
     item: DocumentReading,
     curated: dict[str, tuple[CorpusDocument, CurationOutcome]],
-    near_duplicate: dict[str, DuplicateDecision],
+    duplicates: dict[str, DuplicateDecision],
+    inherited: dict[str, tuple[str, str, str]],
+    metrics: RunMetrics,
+    export_chunks: bool,
 ) -> None:
     """Declare one document's outputs: its text and record, or the reason it is not published."""
     document = item.document
-    if item.exact_duplicate_of:
+    decision = duplicates.get(document.url)
+    if decision is not None and decision.kind == "exact":
         _declare_exclusion(
-            published, document, f"identical bytes to {item.exact_duplicate_of}", "exact-duplicate"
+            published, metrics, document, f"identical bytes to {decision.duplicate_of}", "exact-duplicate"
+        )
+        return
+    if decision is not None and decision.kind == "near":
+        # Reachable before the Extraction check on purpose: an exact duplicate whose digest keeper is a
+        # near-duplicate loser follows that keeper's near decision without ever being read.
+        reason = f"near-duplicate of {decision.duplicate_of} (similarity {decision.similarity:.3f})"
+        _declare_exclusion(published, metrics, document, reason, "near-duplicate")
+        return
+    fate = inherited.get(document.url)
+    if fate is not None:
+        kind, keeper, keeper_reason = fate
+        _declare_exclusion(
+            published,
+            metrics,
+            document,
+            f"identical bytes to {keeper}, which was {kind}: {keeper_reason}",
+            kind,
         )
         return
     if item.extracted is None:
-        _declare_exclusion(published, document, item.failure, "failed")
+        _declare_exclusion(published, metrics, document, item.failure, "failed")
         return
 
     outcome = curated[document.url][1]
     if not outcome.published or outcome.record is None:
-        _declare_exclusion(published, document, outcome.reason, outcome.status)
-        return
-
-    decision = near_duplicate.get(document.url)
-    if decision is not None:
-        reason = f"near-duplicate of {decision.duplicate_of} (similarity {decision.similarity:.3f})"
-        _declare_exclusion(published, document, reason, "near-duplicate")
+        _declare_exclusion(published, metrics, document, outcome.reason, outcome.status)
         return
 
     localfs.declare_file(published.doc_path(document.key), outcome.markdown, create_parent_dirs=True)
     localfs.declare_file(
         published.record_path(document.key), published.record_payload(outcome.record), create_parent_dirs=True
     )
+    # Only a published Document declares page and chunk records, so an exclusion, a duplicate or a
+    # Crawl Record that left the manifest stops declaring them and the target state retracts the old
+    # files. The chunks are derived from the accepted pages that were just declared, so a replacement
+    # with fewer pages retracts the chunks of the pages that no longer exist.
+    pages = _page_records(document, outcome)
+    localfs.declare_file(
+        published.pages_path(document.key),
+        published.pages_payload(pages),
+        create_parent_dirs=True,
+    )
+    if export_chunks:
+        # Chunks exist to feed search. A run that did not enable search declares none, so the local
+        # index cannot be rebuilt against evidence this run never meant to offer.
+        localfs.declare_file(
+            published.chunks_path(document.key),
+            published.chunks_payload(chunk_page_records(pages, language=outcome.record.language)),
+            create_parent_dirs=True,
+        )
+    metrics.count_published(len(outcome.pages))
 
 
-def _declare_exclusion(published: PublishedCorpus, document: CorpusDocument, reason: str, kind: str) -> None:
+def _page_records(document: CorpusDocument, outcome: CurationOutcome) -> tuple[PageRecord, ...]:
+    """The accepted Page Texts, under the source identity their declared file is named after."""
+    assert outcome.record is not None
+    return tuple(
+        PageRecord(
+            doc_id=document.key,
+            source_url=document.url,
+            digest=document.digest,
+            page_number=page.number,
+            text=page.text,
+            engine=outcome.record.engine,
+        )
+        for page in outcome.pages
+    )
+
+
+def _declare_exclusion(
+    published: PublishedCorpus, metrics: RunMetrics, document: CorpusDocument, reason: str, kind: str
+) -> None:
     localfs.declare_file(
         published.exclusion_path(document.key),
         published.exclusion_payload(document.url, reason, kind),
         create_parent_dirs=True,
     )
+    metrics.count_exclusion(kind)
 
 
 @coco.fn
 async def app_main() -> None:
     """Read every document concurrently, then decide the corpus in one pass."""
     runtime = active_runtime()
+    # A runtime outlives one update: the demo keeps a warm database and `configure_runtime` holds the
+    # runtime between commands. Each update is a run of its own, so its counters start from zero
+    # instead of reporting the previous run's calls and doubling its publications and exclusions.
+    runtime.metrics.reset()
     documents = runtime.corpus().documents()
     keepers = exact_duplicate_keepers({document.url: document.digest for document in documents})
     requests = tuple(ReadingRequest(document=document, keeper=keepers[document.url]) for document in documents)

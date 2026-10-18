@@ -10,10 +10,13 @@ re-runs; name a different engine and exactly the documents that engine is for ar
 ## Quick start
 
 ~~~~bash
-python -m venv .venv && .venv/bin/pip install -e ".[dev]"
+python -m venv .venv && .venv/bin/pip install -e ".[dev]"   # pinned: cocoindex==1.0.25, pymupdf==1.28.2
 
 # 1. real PDFs from the newest full Common Crawl, straight from the index into corpus/
 .venv/bin/finepdfs fetch-corpus --domain noaa.gov --limit 12
+
+# or restore the pinned 18-Document demo corpus instead of discovering a new one
+.venv/bin/finepdfs restore-corpus --manifest src/finepdfs/data/pdf-demo-corpus-manifest.json --corpus corpus/pdf-demo
 
 # 2. see what would happen, without writing anything
 .venv/bin/finepdfs dry-run
@@ -30,6 +33,58 @@ The CocoIndex CLI works too, because the pipeline *is* a CocoIndex app:
 .venv/bin/cocoindex update main.py -L        # live: watch the corpus directory
 ~~~~
 
+## The demo, rehearsed
+
+[`docs/demo/`](docs/demo/) pins a real 19-record / 18-Document Corpus and records the rehearsal,
+including measured timings, OCR page evidence and the limitations that remain. The demo command keeps
+its corpus, output and warm CocoIndex database in one isolated root (`FINEPDFS_DEMO_ROOT`, else
+`.demo/` in the current directory, gitignored) that a run never wipes; only `reset` deletes it. The
+pinned manifest ships inside the package (`src/finepdfs/data/`), so `finepdfs-demo restore` works from
+a wheel install, not only from this checkout.
+
+~~~~bash
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo restore
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --search --engine docling --engine-command docling
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --search --engine docling --engine-command docling
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --search --engine docling --engine-command docling --min-characters 5000
+~~~~
+
+`--search` is what asks the flow to declare `out/chunks/`; without it a run is pure curation and
+declares no chunk export (any stale one is retracted). The second run reuses all 18 Extractions and the
+third changes only the publish decision. Read
+[`docs/demo/pdf-demo-runbook.md`](docs/demo/pdf-demo-runbook.md) for the counters, the summary schema,
+the real Docling page evidence and the honest failures, and
+[`docs/demo/pdf-demo-corpus.md`](docs/demo/pdf-demo-corpus.md) for the pin.
+
+## Browser explorer (P1, read-only)
+
+After a run has declared its outputs, a small local explorer shows the status table, filters it by
+URL/text, language/script, routing and exclusion kind, and opens a document's accepted pages beside a
+link to the locally retained PDF at the original page. It is the P1 demo extension, not part of the
+P0 ingestion gate.
+
+~~~~bash
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli explore --out out --corpus corpus --port 8765
+# then open http://127.0.0.1:8765/
+~~~~
+
+The installed console script has the same command: `.venv/bin/finepdfs explore --out out --corpus corpus`.
+`--out` can be omitted when `FINEPDFS_OUT` names the directory: `explore` and `ask` resolve it, and the
+index beside it, exactly as `run`, `search` and `index-search` do. It binds `127.0.0.1` by default;
+`--host` changes that only when you mean it.
+
+The explorer is a **view over completed declared outputs**: `out/run-summary.json`, `out/records/`,
+`out/pages/`, `out/excluded/` and the corpus manifest that maps a digest to `pdfs/<digest>.pdf`. It
+never writes, never curates, and never makes a second Deduplication or Publish Policy decision. Every
+counter it displays is the measured summary the flow declared. Elapsed time is *not* in that declared
+file: it is observed beside the outputs in `out/last-run.json`, written by the command that ran the
+pipeline, labelled observed and never declared target state. The browser shows "not recorded" when that
+file is absent, and polls the observation's `finished_at` to reload after a completed update; there is no
+streaming or partial state. Only the configured output and corpus roots
+are reachable, and document keys and PDF digests are validated before any file is opened, so a URL
+cannot name an arbitrary path. The default page is static HTML/CSS/JS served by Python's standard
+library; no extra dependency is needed.
+
 ## What one document goes through
 
 1. **Fetch** -- the Common Crawl index API gives a WARC file, a byte offset and a length; one HTTP
@@ -42,7 +97,8 @@ The CocoIndex CLI works too, because the pipeline *is* a CocoIndex app:
    table headers, hyphenated line breaks.
 5. **Language** -- per-page language, then a document language; pages that disagree are dropped.
 6. **Judge** -- minimum pages, minimum characters, allowed languages (ADR-0004).
-7. **Publish** -- Markdown plus a JSON record; anything dropped or failed becomes a JSON exclusion.
+7. **Publish** -- Markdown, a JSON record and a JSONL export of the same accepted pages; anything
+   dropped or failed becomes a JSON exclusion.
 8. **Decide** -- the second pass sees every cleaned text at once, so it can settle both kinds of
    duplicate in one place: identical bytes from the manifest digests, near-duplicates from text
    fingerprints. What it drops becomes an exclusion; what it keeps is declared (ADR-0006).
@@ -73,7 +129,7 @@ Seams you can replace without touching the pipeline:
 | Engine | How it is reached | Notes |
 |---|---|---|
 | `pymupdf` | in process | free, instant, only reads text the PDF already has (AGPL-3.0, so check your use) |
-| `docling` | `--engine-command docling` | local CLI, MIT; document-level Markdown, page markers honoured when written |
+| `docling` | `--engine-command docling` | local CLI, MIT; page-aware DoclingDocument JSON keeps the original 1-based pages |
 | `paddleocr-vl` | `--base-url http://host:8000/v1 --model PaddleOCR-VL-1.6`, or `--engine-command paddleocr` | Apache-2.0; one rendered page per request, prompt `OCR:` |
 | `mineru` | `--base-url http://host:8000` (multipart `/file_parse`) or `--engine-command mineru` | MinerU2.5-Pro weights are Apache-2.0; the package carries its own licence |
 
@@ -86,6 +142,43 @@ vllm serve PaddlePaddle/PaddleOCR-VL-1.6 --trust-remote-code
 vllm serve opendatalab/MinerU2.5-Pro-2605-1.2B --logits-processors mineru_vl_utils:MinerULogitsProcessor
 .venv/bin/finepdfs run --engine mineru --base-url http://127.0.0.1:8000
 ~~~~
+
+### Installing Docling (CPU)
+
+Docling is an **optional** extra, never a base dependency: the base install stays model-free and the
+default test suite needs no weights. The extra is pinned to the version the demo was rehearsed with,
+and no torch pin is listed there because Docling brings its own. The observed working environment --
+docling 2.140.0, torch 2.10.0+cpu, easyocr 1.7.2 -- is recorded in
+[`docs/demo/requirements-demo.txt`](docs/demo/requirements-demo.txt), because those exact versions are
+what produced the page text, chunk ids and citations the runbook shows. The base install is pinned
+exactly too (`cocoindex==1.0.25`, `pymupdf==1.28.2`): an unpinned floor can change both:
+
+~~~~bash
+.venv/bin/pip install -e ".[docling]"        # docling==2.140.0
+.venv/bin/pip install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/pip install -r docs/demo/requirements-demo.txt   # the same three pins, recorded
+docling --version                            # check what you actually got
+~~~~
+
+### Docling page mapping
+
+Docling's command-line Markdown export carries no page boundaries, so the adapter asks for
+`--to json` and reads each item's 1-based `prov[].page_no` from the body tree. Check the installed
+tool and the shape it writes with:
+
+~~~~bash
+docling --version
+docling convert --to json --image-export-mode placeholder --output /tmp/docling-out <scan>.pdf
+python -m json.tool /tmp/docling-out/*.json | grep -m3 '"page_no"'
+~~~~
+
+A recorded run on 2026-10-18 with Docling 2.140.0, EasyOCR 1.7.2 and CPU torch 2.10.0 produced Page
+Texts numbered 1 and 2 from a genuine two-page image-only `CC-MAIN-2026-39` scan; printed headers
+were readable, handwritten fields mostly were not. With `--ocr-engine tesseract` (Tesseract 5.3.4)
+the same one-page scan was OCRed upside down because Docling's unconditional OSD reported 180 degrees
+at low confidence, so that path is not evidence of usable text on handwritten scans. Offline tests
+use a trimmed recording of the JSON shape: they prove page mapping and failure handling, not OCR
+quality.
 
 ## Language identification
 
@@ -161,7 +254,7 @@ nothing was published, so an operator or a CI can tell "engine is down" from "no
 | Variable | Default | Meaning |
 |---|---|---|
 | `FINEPDFS_CORPUS` | `corpus` | corpus directory (manifest plus PDFs) |
-| `FINEPDFS_OUT` | `out` | output directory |
+| `FINEPDFS_OUT` | `out` | output directory; `run`, `explore`, `ask`, `index-search` and `search` resolve it as `--out`, then this variable, then `out/` |
 | `FINEPDFS_DB` | `cocoindex.db` | CocoIndex state (an LMDB directory) |
 | `FINEPDFS_ENGINE` | `pymupdf` | engine for documents whose text layer is unusable |
 | `FINEPDFS_ENGINE_BASE_URL` | -- | OpenAI-compatible `/v1` server, or MinerU's base URL |
@@ -181,29 +274,80 @@ nothing was published, so an operator or a CI can tell "engine is down" from "no
 | `FINEPDFS_MIN_CHARACTERS` | `200` | publish minimum |
 | `FINEPDFS_LANGUAGES` | all | comma-separated allow-list in the codes the chosen adapter emits: `eng,spa` under `fasttext`, `Latn,Grek` under `script` |
 | `FINEPDFS_SIMILARITY_THRESHOLD` | `0.8` | fingerprint similarity above which one document is a near-duplicate of another |
+| `FINEPDFS_SEARCH` | unset (off) | `1`/`true` also declares `out/chunks/`; a run without it declares no chunk export and retracts a stale one, and `run --search` sets it |
 | `FINEPDFS_GPU_PROVIDER` | `none` | where a GPU engine runs: `none`, `static`, or `command` that rents one |
 | `FINEPDFS_GPU_BASE_URL` / `_MODEL` / `_API_KEY` | `FINEPDFS_ENGINE_*` | with `static`: where the GPU server is; each falls back to its `FINEPDFS_ENGINE_*` namesake |
 | `FINEPDFS_GPU_DETAIL` | `static:<model>`, or `static` without a model | with `static`: the memo name when `FINEPDFS_ENGINE_DETAIL` is not set; the model names the deployment, never the address (ADR-0007) |
 | `FINEPDFS_GPU_START_COMMAND` | -- | with `command`: starts a worker and prints its endpoint on stdout |
 | `FINEPDFS_GPU_STOP_COMMAND` | -- | with `command`: gives the worker back when the run ends |
 | `FINEPDFS_GPU_TIMEOUT` | `1800` | seconds allowed to start or stop a worker |
+| `FINEPDFS_SEARCH_INDEX` | `out/search.db` | the local full-text index `finepdfs search`, `index-search`, `explore` and `ask` read; one resolver (`interfaces/search_paths.py`) applies the same precedence everywhere: `--index`, then this variable, then `<out>/search.db` |
 
 ## Output layout
 
 ~~~~
 out/
+  run-summary.json       this run's counters, declared by the flow: reproducible bytes, no timing
+  last-run.json          observed wall-clock timing, written by the command, never declared
   docs/<key>.md          cleaned text of one published document
   records/<key>.json     url, digest, engine, routing decision, language, counts
+  pages/<key>.jsonl      one accepted page per line: doc_id, source_url, digest, page_number, text, engine
+  chunks/<key>.jsonl     deterministic chunks of those pages, only when search is enabled
   excluded/<key>.json    kind (exact-duplicate | near-duplicate | dropped | failed) and the reason
   dedupe/kept.jsonl      the URLs this run decided to publish
   dedupe/duplicates.jsonl  every duplicate, what it duplicates and how alike they are
 ~~~~
 
+`run-summary.json` is deterministic for the same corpus, policy and state: an unchanged rerun rewrites
+the same bytes, which is what ADR-0006's "run again: no changes" means. Timing, host paths and lease data
+never enter it; `last-run.json` holds the observation the command made, is not declared target state,
+and is absent when a run was not wrapped by the CLI or the demo.
+
 `<key>` is the first 16 hex digits of the SHA-256 of the document URL, so a document never collides with
-another and two runs write the same names.
+another and two runs write the same names. The same key is the `doc_id` of that document's page records:
+it names the source, not the bytes, so replacing a Document's content rewrites `pages/<key>.jsonl` in
+place and a Document that stops being published loses it. Only published Documents export pages and
+chunks, and Markdown remains a projection of the same accepted pages -- a page record's number is the
+accepted page's original 1-based number in the PDF.
 
 The corpus directory holds `manifest.json` (URL, digest, WARC location) and `pdfs/<sha256>.pdf` -- bytes
 named by their own digest, which is also what makes exact duplicates free to spot.
+
+## Search over accepted evidence
+
+The search backend is deliberately one: a local SQLite FTS5 index, behind a record contract that
+carries no backend name. The spec's Elasticsearch deployment was cut for budget -- no single-node
+deployment could be made stable in time, and the source spec allows exactly this fallback -- and
+shipping both backends is not an option (ADR-0008). There are no embeddings.
+
+~~~~bash
+# a run that also declares chunks: chunks exist only when search is enabled
+.venv/bin/finepdfs run --corpus corpus --out out --search
+
+# rebuild the index from the currently declared chunk files (idempotent)
+.venv/bin/finepdfs index-search --out out --index out/search.db
+
+# read the same contract the browser and the agent consume
+.venv/bin/finepdfs search --out out "dropwindsonde"
+.venv/bin/finepdfs search --out out --language Latn --top-k 5 --json "storm"
+~~~~
+
+A hit carries `doc_id`, `chunk_id`, source URL, PDF digest, the original 1-based page number, chunk
+offsets/ordinal, Engine Identity, language, `text`, a highlighted `snippet` and a BM25 `score`. The
+application seam is `SearchAcceptedEvidence.search(...)` (browser) and
+`search_pdfs(index, declared, query, filters, top_k)` (agent), where `declared` reads the current
+declared chunk set so neither caller can answer from a stale index; the adapter is
+`infrastructure/search/sqlite_fts.py`. Chunks are page-local, versioned (`CHUNKING_VERSION`) and
+declared as target state only when a run enabled search, so a replacement, fewer pages, an exclusion
+or a removed Crawl Record retracts the obsolete chunks; re-running `index-search` retracts their rows.
+
+The index records a fingerprint of the declared chunk set it was built from, and every read compares
+that with the current set. A stale index, an empty index, a 0-byte index and a missing one are all
+reported as `available: false` with the reason and "run `index-search`" -- never as a shorter hit list,
+and never as stale text. Reading opens SQLite with `mode=ro` and creates nothing, so serving the
+explorer cannot rebuild a database or become a second writer; only `index-search` writes. See
+[ADR-0008](docs/adr/0008-one-local-search-backend.md) and the
+[demo runbook](docs/demo/pdf-demo-runbook.md#search-accepted-evidence-the-local-fallback).
 
 ## Two things worth knowing before you run it
 
@@ -239,11 +383,13 @@ the whole crawl.
   and a disk that fills up leave the corpus resumable rather than silently different.
 * **Model servers**: the PaddleOCR-VL and MinerU HTTP adapters are exercised against a real stub HTTP
   server on localhost, which proves the wire format, the multipart body and the response parsing.
-* **Command-line engines**: Docling, MinerU and PaddleOCR-VL CLI adapters are exercised with a recording
-  runner that writes the files those tools write, which proves the command and the parsing around it.
-* **Not executed here**: real Docling, PaddleOCR-VL and MinerU weights. This machine has no GPU and none
-  of those tools installed, so their adapters are written to the tools' documented interfaces and tested
-  against recorded shapes rather than live runs.
+* **Command-line engines**: Docling's adapter asks for page-aware DoclingDocument JSON and is
+  exercised with a recording runner writing a trimmed real recording, which proves the command, the
+  original-page mapping and the failure handling. MinerU and PaddleOCR-VL CLI adapters are exercised
+  the same way with a recording runner that writes the files those tools write.
+* **Not executed here**: real PaddleOCR-VL and MinerU weights. Those adapters are written to the
+  tools' documented interfaces and tested against recorded shapes rather than live runs. Docling was
+  run live on a CPU-only isolated install; see [Docling page mapping](#docling-page-mapping).
 * **Language**: `ScriptLanguageIdentifier` names the script with no dependency at all, and reports
   `Latn` for English and German alike. `FINEPDFS_LANGUAGE=fasttext` against a downloaded `lid.176.ftz`
   tagged the 12 real NOAA PDFs here as 11 `eng` and one `spa` -- the Spanish edition of the Caribbean
@@ -255,7 +401,9 @@ the whole crawl.
 
 * `docs/spec/finepdfs-integration.md` -- the specification this was built from
 * [PDF workflow demo plan](docs/spec/pdf-workflow-demo.md) -- two-day priorities, acceptance criteria and optional search
+* [`docs/demo/pdf-demo-corpus.md`](docs/demo/pdf-demo-corpus.md) -- the pinned 19-record / 18-Document Corpus and what it does not demonstrate
+* [`docs/demo/pdf-demo-runbook.md`](docs/demo/pdf-demo-runbook.md) -- the rehearsal: commands, versions, measured runs, OCR page evidence, mutations and limitations
 * `docs/GLOSSARY.md` -- the vocabulary, kept deliberately small
-* `docs/adr/0001..0006` -- the decisions, with the alternatives that lost
+* `docs/adr/0001..0008` -- the decisions, with the alternatives that lost
 * `research/` -- the research behind the design, including `paddleocr-vl-mineru-adapters.md`
 * `research/diagrams/` -- validated architecture diagrams of the FinePDFs pipeline

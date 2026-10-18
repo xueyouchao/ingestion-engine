@@ -1,0 +1,4 @@
+%PDF-1.7
+Controlled invalid fixture: this header is followed by prose, not a PDF body or xref table.
+It exists so the pipeline's failed-Document path can be exercised offline. It is not a crawled
+record and is never presented as extraction-quality evidence.

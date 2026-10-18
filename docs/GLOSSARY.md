@@ -16,8 +16,36 @@ parsed, payload verified. Fetching is separate from processing.
 Crawl Record: the same Document can be reachable from several Crawl Records, which is exactly what
 deduplication is about.
 
+**Source Identity** — where a Document came from, named by its source URL and never by its bytes: the
+first 16 hex digits of the SHA-256 of the URL, the `doc_id` of its page records and the key its declared
+outputs are named after. Replacing the bytes changes the Document and its digest but not its Source
+Identity, so the same exports are rewritten in place; removing the Crawl Record retracts them. A
+Document is identified by its digest, a Source Identity by its origin.
+
 **Page Text** — the text of a single page, with its 1-based page number, as produced by a text layer or
 an engine.
+
+**Page Record** — one accepted Page Text as a reader cites it: Source Identity, source URL, PDF digest,
+original 1-based page number, text and Engine Identity. A Published Document exports its accepted pages
+as page records; its Markdown is a projection of the same pages and is not the source of a citation.
+
+**Chunk** — a citable slice of one accepted Page Text, exported by a Published Document as declared
+target state (`out/chunks/<key>.jsonl`). A Chunk carries the Source Identity, source URL, PDF digest,
+original 1-based page number, Engine Identity and language of the page it came from, plus its own
+deterministic Chunk Identity, ordinal, character offsets and chunking version. A Chunk never spans
+pages, so its page number is exact.
+
+**Chunk Identity** — the stable `chunk_id` of a Chunk: a hash of the Source Identity, PDF digest,
+original page number, ordinal, offsets and chunking version. A replacement, a version bump or a changed
+slice moves it, so stale evidence can be retracted instead of duplicated.
+
+**Search Index** — the derived lexical index over currently declared Chunks: SQLite FTS5, the one
+shipped backend (ADR-0008). It stores, ranks and cites only what the flow declared; it is not a writer
+of accepted evidence and re-decides neither Deduplication nor Publish Policy.
+
+**Search Hit** — one Chunk returned for a query: the Chunk's citation fields, its text, a highlighted
+snippet and the BM25 score. The browser and the agent read this same shape, so a backend change cannot
+change what a citation means.
 
 **Extraction** — turning Document bytes into an Extracted Document (Page Texts plus Engine Identity).
 Extraction is the expensive step and is memoized.

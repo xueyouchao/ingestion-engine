@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import pathlib
 
+from finepdfs.domain.source_identity import source_identity
 from finepdfs.infrastructure.corpus.index import CorpusIndex, document_key
 from finepdfs.infrastructure.corpus.manifest import CorpusEntry, CorpusManifest, relative_pdf_path
 
@@ -13,11 +14,9 @@ TWO = "https://b.example/two.pdf"
 
 
 def test_a_key_is_the_first_16_hex_digits_of_the_url_sha256() -> None:
-    key = document_key(ONE)
-
-    assert key == hashlib.sha256(ONE.encode("utf-8")).hexdigest()[:16]
-    assert len(key) == 16
-    assert all(character in "0123456789abcdef" for character in key)
+    """A known-good literal: `sha256sum` of the URL, cut to its first 16 digits, not recomputed here."""
+    assert document_key(ONE) == "925214985eaf79ec"
+    assert document_key(ONE) == source_identity(ONE), "the output key and a citation's doc_id are one value"
 
 
 def test_two_urls_get_two_keys() -> None:

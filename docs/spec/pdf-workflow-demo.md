@@ -100,8 +100,10 @@ never two.
   chunking-version field. Preserve the document identity across content replacements and make
   stale page/chunk removal explicit.
 - [ ] Produce a compact per-run summary: source Documents, native/OCR routing totals, actual
-  extraction calls, reused extractions, published Documents, exclusions by kind, and elapsed time.
-  Distinguish observed extraction reuse from other CocoIndex component statistics.
+  extraction calls, reused extractions, published Documents and exclusions by kind. Distinguish
+  observed extraction reuse from other CocoIndex component statistics. The declared summary is
+  reproducible -- no timestamp, duration, host path or lease data -- and elapsed time is recorded
+  beside it as an observation (a non-declared run log or a labelled terminal line).
 - [ ] Add a repeatable demo command or script with isolated demo state/output directories.
   Unchanged and policy-change reruns must reuse the baseline's CocoIndex state/cache. Preserve the
   pinned corpus and the working warm cache for rehearsal.

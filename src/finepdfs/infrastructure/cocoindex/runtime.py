@@ -9,9 +9,10 @@ from __future__ import annotations
 import os
 import pathlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from finepdfs.application.curate import CurateDocument, CurationPolicy, CurationStep, ExtractionStep
+from finepdfs.application.metrics import RunMetrics
 from finepdfs.domain.language import LanguagePolicy
 from finepdfs.domain.ports import OcrEngine
 from finepdfs.domain.publishing import PublishPolicy
@@ -46,6 +47,14 @@ class Runtime:
     extraction: ExtractionStep
     curation: CurationStep
     similarity_threshold: float = 0.8
+    # Chunks are a search input, not an ingestion product: the flow declares them only when a run
+    # enabled search (FINEPDFS_SEARCH, or the CLI's --search), so a plain curation run declares none
+    # and any stale chunk export is retracted.
+    search_enabled: bool = False
+    # What this run actually did. The flow counts into it at the real seams (routing, the memoised
+    # extract body, each declaration) and writes out/run-summary.json from it. Observation, not
+    # wiring: it is excluded from equality so two identically wired runtimes still compare equal.
+    metrics: RunMetrics = field(default_factory=RunMetrics, compare=False, repr=False)
 
     @property
     def engines(self) -> Mapping[str, OcrEngine]:
@@ -107,7 +116,13 @@ def runtime_from_environment(environ: Mapping[str, str] | None = None) -> Runtim
         extraction=ExtractionStep(probe, engines, policy),
         curation=CurationStep(build_language_identifier(language_config), policy),
         similarity_threshold=float(values.get("FINEPDFS_SIMILARITY_THRESHOLD", "0.8")),
+        search_enabled=_enabled(values.get("FINEPDFS_SEARCH", "")),
     )
+
+
+def _enabled(value: str) -> bool:
+    """FINEPDFS_SEARCH is a switch: an unset, empty or explicitly false value means search is off."""
+    return value.strip().lower() not in ("", "0", "false", "no", "off")
 
 
 def _languages(values: Mapping[str, str]) -> tuple[str, ...]:

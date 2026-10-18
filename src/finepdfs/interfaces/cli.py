@@ -1,16 +1,25 @@
-"""The command line: fetch a real Common Crawl corpus, inspect it, and curate it."""
+"""The command line: fetch a real Common Crawl corpus, inspect it, curate and search it."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
 from pathlib import Path
 
+from finepdfs.application.agent import (
+    DEFAULT_AGENT_TOP_K,
+    MAX_TOOL_CALLS,
+    AcceptedEvidenceTools,
+    run_agent,
+)
+from finepdfs.application.search import reindex_search, search_pdfs
 from finepdfs.domain.crawl import CrawlQuery
-from finepdfs.domain.dedup import PublishedDocumentView, exact_duplicate_keepers, plan_deduplication
+from finepdfs.domain.dedup import decide_duplicates, exact_duplicate_keepers
 from finepdfs.domain.document import Document
+from finepdfs.domain.search import DEFAULT_TOP_K, SearchFilters
 from finepdfs.infrastructure.cocoindex.runtime import Runtime, runtime_from_environment
 from finepdfs.infrastructure.commoncrawl.source import CommonCrawlSource
 from finepdfs.infrastructure.compute.endpoint import (
@@ -34,10 +43,21 @@ from finepdfs.infrastructure.corpus.fetch import fetch_corpus
 from finepdfs.infrastructure.corpus.index import CorpusIndex
 from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifest
 from finepdfs.infrastructure.engines.registry import KNOWN_ENGINES
-from finepdfs.infrastructure.publishing.disk import PublishedCorpus
+from finepdfs.infrastructure.llm.chat_completions import ChatCompletionsClient, ChatCompletionsError
+from finepdfs.infrastructure.publishing.disk import DiskPageReader, PublishedCorpus
+from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
+from finepdfs.interfaces import explorer as explorer_module
+from finepdfs.interfaces import search_paths
+from finepdfs.interfaces.restore import restore_pinned_corpus
+from finepdfs.interfaces.run_log import RunClock
+from finepdfs.interfaces.summary import conclude_run
 
 DEFAULT_CORPUS = Path("corpus")
-DEFAULT_OUT = Path("out")
+# The output directory and the index path have one resolver (interfaces/search_paths.py) shared by
+# index-search, search, explore and ask, so FINEPDFS_OUT and FINEPDFS_SEARCH_INDEX mean the same thing
+# to all four. No command carries a default of its own: a non-None default is what silently overrode
+# the environment before.
+ASK_API_KEY = "FINEPDFS_ASK_API_KEY"
 
 # Flag name to environment variable. "engine_command" is deliberately not called "command": a
 # subparser argument with that name would overwrite the name of the chosen subcommand. The names the GPU
@@ -55,6 +75,7 @@ ENVIRONMENT_FOR_ENGINE = {
     "engine_detail": ENGINE_DETAIL,
     "dpi": "FINEPDFS_ENGINE_DPI",
     "similarity_threshold": "FINEPDFS_SIMILARITY_THRESHOLD",
+    "search": "FINEPDFS_SEARCH",
     "gpu_provider": GPU_PROVIDER,
     "gpu_start_command": GPU_START_COMMAND,
     "gpu_stop_command": GPU_STOP_COMMAND,
@@ -72,6 +93,10 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--limit", type=int, default=25, help="how many index records to ask for")
     fetch.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
 
+    restore = commands.add_parser("restore-corpus", help="restore the exact PDFs a pinned manifest names")
+    restore.add_argument("--manifest", type=Path, required=True, help="pinned manifest to replay")
+    restore.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
+
     inspect = commands.add_parser("inspect", help="summarise a corpus directory")
     inspect.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
 
@@ -80,6 +105,109 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = commands.add_parser("run", help="run the incremental CocoIndex pipeline")
     _add_engine_arguments(run, out=True)
+    run.add_argument(
+        "--search",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="also declare searchable chunks (out/chunks); a run without it declares none",
+    )
+
+    explore = commands.add_parser(
+        "explore", help="serve a read-only local browser over completed declared outputs"
+    )
+    explore.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="the published output directory to serve; default is $FINEPDFS_OUT or out/",
+    )
+    explore.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
+    explore.add_argument(
+        "--index",
+        type=Path,
+        default=None,
+        help=f"the search index to read; default is $FINEPDFS_SEARCH_INDEX or <out>/{search_paths.SEARCH_INDEX_NAME}",
+    )
+    explore.add_argument("--host", default=explorer_module.DEFAULT_HOST)
+    explore.add_argument("--port", type=int, default=explorer_module.DEFAULT_PORT)
+
+    # The local full-text fallback (ADR-0008): rebuild the index from the declared chunk files, then
+    # read the same contract the browser and the agent use. Two commands, one backend.
+    index_search = commands.add_parser(
+        "index-search", help="rebuild the local lexical index from the declared chunk files"
+    )
+    index_search.add_argument(
+        "--out", type=Path, default=None, help="the published output directory the flow declared"
+    )
+    index_search.add_argument(
+        "--index", type=Path, default=None,
+        help=f"the index to write; default is $FINEPDFS_SEARCH_INDEX or <out>/{search_paths.SEARCH_INDEX_NAME}",
+    )
+
+    search = commands.add_parser("search", help="search accepted evidence in the local lexical index")
+    search.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="the published output directory holding the declared chunks the index must match",
+    )
+    search.add_argument(
+        "--index",
+        type=Path,
+        default=None,
+        help=f"the index to read; default is $FINEPDFS_SEARCH_INDEX or <out>/{search_paths.SEARCH_INDEX_NAME}",
+    )
+    search.add_argument("--top-k", dest="top_k", type=int, default=DEFAULT_TOP_K, help="maximum hits to return")
+    search.add_argument("--language", default=None, help="only chunks whose language tag is this")
+    search.add_argument("--engine", default=None, help="only chunks produced by this Engine Identity")
+    search.add_argument("--doc-id", dest="doc_id", default=None, help="only chunks of this source identity")
+    search.add_argument("--json", action="store_true", help="print the shared search contract as JSON")
+    search.add_argument("query", nargs="+", help="words to look for")
+
+    # The agent stage reads the same accepted evidence through two tools and an OpenAI-compatible
+    # chat endpoint; the key comes from the environment by default so it does not land in shell history.
+    ask = commands.add_parser(
+        "ask", help="ask accepted evidence with a bounded, visible tool-calling model"
+    )
+    ask.add_argument("--question", required=True, help="the question to answer from accepted pages")
+    ask.add_argument(
+        "--base-url",
+        required=True,
+        help="OpenAI-compatible base URL, for example http://[::1]:11434/v1 or https://api.example/v1",
+    )
+    ask.add_argument("--model", required=True, help="the chat model name the endpoint serves")
+    ask.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="the published output directory; default is $FINEPDFS_OUT or out/",
+    )
+    ask.add_argument(
+        "--index",
+        type=Path,
+        default=None,
+        help=f"the index to read; default is $FINEPDFS_SEARCH_INDEX or <out>/{search_paths.SEARCH_INDEX_NAME}",
+    )
+    ask.add_argument(
+        "--top-k",
+        dest="top_k",
+        type=int,
+        default=DEFAULT_AGENT_TOP_K,
+        help="hits each search_pdfs call returns when the model does not ask for a count",
+    )
+    ask.add_argument(
+        "--max-tool-calls",
+        dest="max_tool_calls",
+        type=int,
+        default=MAX_TOOL_CALLS,
+        help=f"hard cap on tool executions per question (default: {MAX_TOOL_CALLS})",
+    )
+    ask.add_argument(
+        "--api-key",
+        default=None,
+        help=f"bearer token; prefer {ASK_API_KEY} in the environment so it is not printed or stored",
+    )
+    ask.add_argument("--json", action="store_true", help="print the answer, citations and tool trace as JSON")
 
     return parser
 
@@ -166,13 +294,160 @@ def main(argv: list[str] | None = None) -> int:
 def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "fetch-corpus":
         return _fetch_corpus(args)
+    if args.command == "restore-corpus":
+        return _restore_corpus(args)
     if args.command == "inspect":
         return _inspect(args)
     if args.command == "dry-run":
         return _dry_run(args)
     if args.command == "run":
         return _run(args)
+    if args.command == "explore":
+        return _explore(args)
+    if args.command == "index-search":
+        return _index_search(args)
+    if args.command == "search":
+        return _search(args)
+    if args.command == "ask":
+        return _ask(args)
     raise AssertionError(f"unhandled command {args.command}")
+
+
+def _search_index_path(args: argparse.Namespace) -> Path:
+    """The index path all four search commands share; see interfaces/search_paths.py."""
+    return search_paths.resolve_search_index(
+        out=getattr(args, "out", None), index=getattr(args, "index", None)
+    )
+
+
+def _index_search(args: argparse.Namespace) -> int:
+    """Rebuild the local index from the declared chunk files: store the current set, delete the rest."""
+    out_dir = search_paths.resolve_out_dir(args.out)
+    if not out_dir.is_dir():
+        print(f"no published output at {out_dir}; run the pipeline first", file=sys.stderr)
+        return 2
+    index_path = _search_index_path(args)
+    declared = PublishedCorpus(out_dir).read_declared_chunks()
+    report = reindex_search(SqliteFtsSearchIndex(index_path), declared)
+    print(f"indexed {report.upserted} of {report.chunks} chunks from {report.documents} documents into {index_path}")
+    if report.removed:
+        print(f"  retracted {report.removed} chunks that are no longer declared")
+    for failure in report.failures:
+        print(f"  failed: {failure.chunk_id} ({failure.reason})", file=sys.stderr)
+    return 0 if report.ok else 1
+
+
+def _search(args: argparse.Namespace) -> int:
+    """Read the shared contract from the terminal; the browser and the agent call the same reader."""
+    index_path = _search_index_path(args)
+    out_dir = search_paths.resolve_out_dir(args.out)
+    query = " ".join(args.query)
+    filters = SearchFilters(language=args.language, engine=args.engine, doc_id=args.doc_id)
+    declared = PublishedCorpus(out_dir).read_declared_chunks
+    results = search_pdfs(SqliteFtsSearchIndex(index_path), declared, query, filters, args.top_k)
+
+    if not results.available:
+        # A missing, empty or stale index is an operator state, not a hit list: no stale text is printed.
+        print(f"{results.reason} (index: {index_path})", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(results.as_json(), indent=2))
+        return 0
+    if not results.hits:
+        print(f"no matches for {query!r} in {index_path}")
+        return 0
+    for rank, hit in enumerate(results.hits, start=1):
+        # A hit is citable on one line: rank, score, source identity, original page and chunk.
+        chunk = hit.chunk
+        print(f"{rank:>2}. {hit.score:>8.3f}  {chunk.doc_id}  p.{chunk.page_number}  {chunk.chunk_id}")
+        print(f"    {chunk.source_url}")
+        print(f"    {' '.join(hit.snippet.split())}")
+    return 0
+
+
+def _ask(args: argparse.Namespace) -> int:
+    """Ask the accepted evidence through two bounded tools and an OpenAI-compatible chat endpoint."""
+    out_dir = search_paths.resolve_out_dir(args.out)
+    index_path = _search_index_path(args)
+    if not index_path.is_file():
+        print(f"no search index at {index_path}; run finepdfs index-search first", file=sys.stderr)
+        return 2
+    if args.max_tool_calls < 1:
+        print(f"--max-tool-calls must be at least 1, not {args.max_tool_calls}", file=sys.stderr)
+        return 2
+    if args.top_k < 1:
+        print(f"--top-k must be at least 1, not {args.top_k}", file=sys.stderr)
+        return 2
+
+    api_key = args.api_key if args.api_key is not None else os.environ.get(ASK_API_KEY, "")
+    try:
+        tools = AcceptedEvidenceTools(
+            SqliteFtsSearchIndex(index_path),
+            DiskPageReader(out_dir),
+            PublishedCorpus(out_dir).read_declared_chunks,
+            default_top_k=args.top_k,
+        )
+        client = ChatCompletionsClient(args.base_url, args.model, api_key=api_key)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 2
+
+    def show(event: dict) -> None:
+        print(f"[tool {event['index']}] {event['tool']} {json.dumps(event['arguments'], ensure_ascii=False)}")
+        print(f"  -> {_describe_tool_result(event['tool'], event['result'])}")
+
+    try:
+        answer = run_agent(
+            args.question,
+            client,
+            tools,
+            max_tool_calls=args.max_tool_calls,
+            on_event=None if args.json else show,
+        )
+    except ChatCompletionsError as error:
+        print(error, file=sys.stderr)
+        return 3
+
+    if args.json:
+        print(json.dumps(answer.as_json(), indent=2, ensure_ascii=False))
+        return 0
+
+    print()
+    print(answer.answer)
+    if answer.citations:
+        print("\nCitations:")
+        for citation in answer.citations:
+            # Only a page read_pdf_page returned can reach this list, so every citation is verified.
+            print(f"- {citation.citation}  {citation.source_url}  (page read)")
+    else:
+        print("\nCitations: none (no evidence page was cited)")
+    budget = " (tool budget exhausted)" if answer.budget_exhausted else ""
+    print(f"\nTool calls: {len(answer.tool_calls)} of {args.max_tool_calls}{budget}")
+    if answer.insufficient_evidence:
+        print("The agent reported insufficient evidence.")
+    return 0
+
+
+def _describe_tool_result(tool: str, result: dict) -> str:
+    """A visible one-line result: what the call returned, not a paraphrase of the evidence."""
+    if "error" in result:
+        return f"error: {result['error']}"
+    if tool == "search_pdfs":
+        hits = result.get("hits") or []
+        if not hits:
+            return f"0 of {result.get('total', 0)} hits"
+        listed = ", ".join(f"{hit.get('doc_id')} p.{hit.get('page_number')}" for hit in hits[:3])
+        more = "" if len(hits) <= 3 else f", +{len(hits) - 3} more"
+        return f"{len(hits)} hits: {listed}{more}"
+    if tool == "read_pdf_page":
+        if result.get("status") == "accepted":
+            characters = len(result.get("text", ""))
+            return (
+                f"accepted page {result.get('page_number')} of {result.get('doc_id')} "
+                f"({characters} chars)"
+            )
+        return f"{result.get('status')}: {result.get('reason')}"
+    return json.dumps(result, ensure_ascii=False)[:200]
 
 
 def _fetch_corpus(args: argparse.Namespace) -> int:
@@ -188,6 +463,12 @@ def _fetch_corpus(args: argparse.Namespace) -> int:
     for failure in report.failures[:5]:
         print(f"  failed: {failure.url} ({failure.reason})")
     return 1 if report.fetched == 0 and report.failed else 0
+
+
+def _restore_corpus(args: argparse.Namespace) -> int:
+    """Replay a committed manifest; a pinned record that cannot be restored is a visible failure."""
+    corpus_dir = _runtime_from_args(args).corpus_dir
+    return restore_pinned_corpus(args.manifest, corpus_dir)
 
 
 def _inspect(args: argparse.Namespace) -> int:
@@ -251,21 +532,54 @@ def _dry_run_in_process(runtime: Runtime) -> int:
         outcome = use_case.run(Document(name=document.url, content=document.path.read_bytes()))
         curated[document.url] = (document, outcome)
 
-    plan = plan_deduplication(
-        [
-            PublishedDocumentView(url=document.url, digest=document.digest, text=outcome.markdown)
-            for document, outcome in curated.values()
-            if outcome.published
-        ],
-        similarity_threshold=runtime.similarity_threshold,
+    # The same decision the flow declares (domain/dedup.decide_duplicates): a dry run is a view of what
+    # a run would decide, so it must not decide exact duplicates its own way.
+    decision = decide_duplicates(
+        {document.url: document.digest for document in documents},
+        {url: outcome for url, (_, outcome) in curated.items()},
+        runtime.similarity_threshold,
     )
-    near_duplicate = {decision.url: decision for decision in plan.duplicates if decision.kind == "near"}
+    duplicates = decision.duplicates_by_url()
+    inherited = decision.inherited_by_url()
 
     print(f"{'status':<14} {'engine':<22} {'language':<9} {'pages':>5} {'chars':>7}  {'url':<45}  reason")
     for document in documents:
-        keeper = keepers[document.url]
-        if keeper != document.url:
-            _print_row("exact-duplicate", "-", "-", 0, 0, document.url, f"identical bytes to {keeper}")
+        fate = inherited.get(document.url)
+        if fate is not None:
+            _print_row(
+                fate.kind,
+                "-",
+                "-",
+                0,
+                0,
+                document.url,
+                f"identical bytes to {fate.keeper}, which was {fate.kind}: {fate.reason}",
+            )
+            continue
+        duplicate = duplicates.get(document.url)
+        if duplicate is not None and duplicate.kind == "exact":
+            _print_row(
+                "exact-duplicate",
+                "-",
+                "-",
+                0,
+                0,
+                document.url,
+                f"identical bytes to {duplicate.duplicate_of}",
+            )
+            continue
+        if duplicate is not None:
+            outcome = curated.get(document.url, (None, None))[1]
+            record = outcome.record if outcome is not None else None
+            _print_row(
+                "near-duplicate",
+                record.engine if record else "-",
+                record.language if record else "-",
+                record.page_count if record else 0,
+                record.character_count if record else 0,
+                document.url,
+                f"near-duplicate of {duplicate.duplicate_of}",
+            )
             continue
         outcome = curated[document.url][1]
         record = outcome.record
@@ -273,25 +587,19 @@ def _dry_run_in_process(runtime: Runtime) -> int:
         language = record.language if record else "-"
         pages = record.page_count if record else 0
         characters = record.character_count if record else 0
-        decision = near_duplicate.get(document.url)
-        if decision is not None:
-            _print_row(
-                "near-duplicate",
-                engine,
-                language,
-                pages,
-                characters,
-                document.url,
-                f"near-duplicate of {decision.duplicate_of}",
-            )
-            continue
         _print_row(outcome.status, engine, language, pages, characters, document.url, outcome.reason)
 
-    byte_identical = len(documents) - len(curated)
-    print(
-        f"{len(plan.keepers)} of {len(documents)} documents would be published "
-        f"({len(near_duplicate)} near-duplicates of another, {byte_identical} byte-identical)"
+    # Counted from the decision, not from "documents minus read ones": an exact duplicate whose digest
+    # keeper is unpublished is honestly a near or inherited row and must not be counted as exact.
+    exact = sum(1 for duplicate in decision.plan.duplicates if duplicate.kind == "exact")
+    near = sum(1 for duplicate in decision.plan.duplicates if duplicate.kind == "near")
+    line = (
+        f"{len(decision.plan.keepers)} of {len(documents)} documents would be published "
+        f"({near} near-duplicates of another, {exact} byte-identical)"
     )
+    if inherited:
+        line += f", {len(inherited)} sharing bytes with an unpublished keeper"
+    print(line)
     return 0
 
 
@@ -314,18 +622,48 @@ def _run(args: argparse.Namespace) -> int:
         print("  fetch one with finepdfs fetch-corpus, or pass --allow-empty to mean it", file=sys.stderr)
         return 2
 
+    # The clock belongs to the command, not the flow: what it measures is an observation beside the
+    # declared outputs, so an unchanged rerun still rewrites `run-summary.json` byte for byte.
+    clock = RunClock()
     with coco.runtime():
         build_app().update_blocking(report_to_stdout=True)
+    summary_line, observed = conclude_run(runtime.out_dir, clock)
 
     published = PublishedCorpus(runtime.out_dir)
     records = published.read_records()
     exclusions = published.read_exclusions()
-    failed = sum(1 for exclusion in exclusions if exclusion.get("kind") == "failed")
-    print(
-        f"recorded {len(records)} published documents, {failed} failed documents and "
-        f"{len(exclusions) - failed} other exclusions under {runtime.out_dir}"
-    )
+    if summary_line is not None:
+        print(summary_line)
+        print(f"observed timing: {observed} (not declared target state)")
+    else:
+        failed = sum(1 for exclusion in exclusions if exclusion.get("kind") == "failed")
+        print(
+            f"recorded {len(records)} published documents, {failed} failed documents and "
+            f"{len(exclusions) - failed} other exclusions under {runtime.out_dir}"
+        )
     return 1 if exclusions and not records else 0
+
+
+def _explore(args: argparse.Namespace) -> int:
+    """Serve the completed outputs read-only; an absent run summary is a clean refusal."""
+    out_dir = search_paths.resolve_out_dir(args.out)
+    index_path = _search_index_path(args)
+    try:
+        explorer = explorer_module.explorer_for(out_dir, args.corpus, index_path=index_path)
+    except explorer_module.ExplorerError as error:
+        print(error, file=sys.stderr)
+        return 2
+
+    search_state = "" if index_path.is_file() else f" (no search index at {index_path}; run index-search)"
+    print(f"exploring {out_dir} read-only at http://{args.host}:{args.port}/{search_state}")
+    try:
+        explorer_module.serve_explorer(explorer, host=args.host, port=args.port)
+    except KeyboardInterrupt:
+        return 0
+    except OSError as error:
+        print(f"cannot serve the explorer at {args.host}:{args.port}: {error}", file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":

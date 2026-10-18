@@ -6,12 +6,16 @@ the same interface, which is why the pipeline can be exercised with no network, 
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
+from pathlib import Path
 from typing import Protocol
 
+from finepdfs.domain.chunks import Chunk
 from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, TextLayerQuality
 from finepdfs.domain.language import PageLanguage
+from finepdfs.domain.publishing import PageRecord
+from finepdfs.domain.search import IndexFailure, IndexState, SearchHit, SearchQuery
 
 
 class CrawlSource(Protocol):
@@ -48,3 +52,66 @@ class LanguageIdentifier(Protocol):
     """
 
     def identify(self, text: str, page_number: int) -> PageLanguage: ...
+
+
+class SearchIndex(Protocol):
+    """A lexical index over declared chunks. It never decides what is published or accepted.
+
+    ``upsert`` is an idempotent write of the chunks it is given and reports every chunk it could not
+    store; ``retain`` deletes every stored chunk whose id is not in the current declared set, which is
+    how replacements, fewer pages, exclusions and removed sources stop being searchable. ``search``
+    answers the shared contract, and raises ``SearchUnavailable`` when the index cannot be read at all
+    -- an absent, empty or corrupted index is an answer, never a shorter hit list.
+
+    ``record_freshness`` and ``state`` are how the index remembers which declared evidence it mirrors:
+    a reader compares that fingerprint with the current declared chunk set before trusting a hit.
+    ``state`` raises ``SearchUnavailable`` for the same reason ``search`` does.
+    """
+
+    def upsert(self, chunks: Sequence[Chunk]) -> Sequence[IndexFailure]: ...
+
+    def retain(self, chunk_ids: Collection[str]) -> int:
+        """Delete the chunks that are no longer declared; return how many were removed."""
+        ...
+
+    def search(self, query: SearchQuery) -> Sequence[SearchHit]: ...
+
+    def record_freshness(self, fingerprint: str) -> None:
+        """Remember the fingerprint of the declared evidence this index now mirrors."""
+        ...
+
+    def state(self) -> IndexState:
+        """The fingerprint this index was built from and how many chunks it holds."""
+        ...
+
+
+class DeclaredPageReader(Protocol):
+    """Where one Document's declared record, exclusion and accepted pages are read from.
+
+    Every answer is declared state written by the flow, addressed by the Document's Source Identity: an
+    absent file is ``None``, never a guess, and nothing is reconstructed from a projection.
+    """
+
+    @property
+    def root(self) -> Path: ...
+
+    def has_output(self) -> bool:
+        """Whether there is an output directory to read at all.
+
+        This is the adapter's own definition -- ``DiskPageReader`` answers with the directory's
+        existence -- and it is deliberately not "a completed run declared something": a Document absent
+        from an existing directory is the methods' ``None`` answer, not "no output".
+        """
+        ...
+
+    def published_digest(self, doc_id: str) -> str | None:
+        """The digest of the Document's current published record, or None when it has none."""
+        ...
+
+    def exclusion(self, doc_id: str) -> tuple[str, str] | None:
+        """The exclusion kind and reason for a Document that was dropped, failed or duplicated."""
+        ...
+
+    def accepted_pages(self, doc_id: str) -> Sequence[PageRecord] | None:
+        """The accepted Page Texts in original page order, or None when no export is declared."""
+        ...
