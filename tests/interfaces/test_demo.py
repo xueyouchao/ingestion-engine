@@ -9,7 +9,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import zipfile
 from pathlib import Path
+
+import pytest
 
 from finepdfs.application.curate import CurationPolicy, CurationStep, ExtractionStep
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText, TextLayerQuality
@@ -225,3 +228,65 @@ def test_the_demo_restore_reuses_the_restore_corpus_implementation(tmp_path, mon
     assert calls[1][0] == pinned
     assert calls[1][1] == other_corpus
     assert restore.restore_pinned_corpus.__module__ == "finepdfs.interfaces.restore"
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_restore_defaults_to_the_manifest_that_ships_with_the_package(
+    tmp_path, monkeypatch
+) -> None:
+    """A wheel install has no `docs/demo/`, so the pinned manifest must arrive as package data."""
+    captured = []
+
+    def shared(manifest_path, corpus_dir, *, source=None):
+        captured.append(Path(manifest_path))
+        return 0
+
+    monkeypatch.setattr(demo, "restore_pinned_corpus", shared)
+    paths = demo.demo_paths(tmp_path / "demo")
+
+    assert demo.restore_demo_corpus(paths) == 0
+
+    (manifest_path,) = captured
+    assert manifest_path.is_file(), "the default manifest must be readable where the package is installed"
+    assert manifest_path.name == demo.MANIFEST_RESOURCE
+    assert CorpusManifest.load(manifest_path).entries, "the packaged manifest lists the pinned corpus"
+    package_root = Path(demo.__file__).resolve().parent.parent
+    assert package_root in manifest_path.parents, (
+        "the default manifest resolves inside the installed package, not above it in a checkout"
+    )
+
+
+def test_the_default_state_root_is_writable_state_not_a_position_in_the_module_path(
+    tmp_path, monkeypatch
+) -> None:
+    """`--root` exists for exactly this: the default must be writable wherever finepdfs is installed."""
+    working_directory = tmp_path / "work"
+    working_directory.mkdir()
+    monkeypatch.chdir(working_directory)
+    monkeypatch.delenv(demo.DEMO_ROOT_ENV, raising=False)
+
+    paths = demo.demo_paths()
+
+    assert paths.root == working_directory / ".demo", "the default lives beside the caller, not site-packages"
+    assert PROJECT_ROOT not in paths.root.parents
+    assert paths.corpus == paths.root / "corpus"
+
+    configured = tmp_path / "state"
+    monkeypatch.setenv(demo.DEMO_ROOT_ENV, str(configured))
+    assert demo.demo_paths().root == configured, "an explicit root wins over the current directory"
+
+
+def test_the_built_wheel_carries_the_pinned_manifest_as_package_data(tmp_path) -> None:
+    """The packaging test for finding 3: the wheel, not the checkout, is what `pip install` gets."""
+    hatchling = pytest.importorskip("hatchling.build")
+
+    wheel = hatchling.build_wheel(str(tmp_path), str(PROJECT_ROOT))
+
+    with zipfile.ZipFile(tmp_path / wheel) as archive:
+        names = set(archive.namelist())
+    assert f"finepdfs/data/{demo.MANIFEST_RESOURCE}" in names, (
+        "the pinned manifest is package data, so an installed demo can restore it"
+    )
+    assert "finepdfs/interfaces/demo.py" in names

@@ -1,9 +1,14 @@
 """A repeatable demo run with its own corpus, output and warm CocoIndex database.
 
-The demo's state lives under one root (`.demo/` in the repository by default, and ignored by git).
-Nothing here wipes it: `restore` fetches the pinned Corpus once, `run` reuses the same database, and
-only the explicit `reset` subcommand deletes the state. That is what makes an unchanged rerun free and
-a policy-change rerun cheap -- the CocoIndex memo survives between commands.
+The demo's state lives under one root (`FINEPDFS_DEMO_ROOT`, else `.demo/` in the current working
+directory, and ignored by git). Nothing here wipes it: `restore` fetches the pinned Corpus once, `run`
+reuses the same database, and only the explicit `reset` subcommand deletes the state. That is what
+makes an unchanged rerun free and a policy-change rerun cheap -- the CocoIndex memo survives between
+commands.
+
+The pinned manifest is package data, loaded through `importlib.resources`; neither it nor the default
+state root is derived from where this module is installed, because in a wheel install that is
+site-packages, where `docs/demo/` does not exist and nothing is writable.
 
     PYTHONPATH=src python -m finepdfs.interfaces.demo restore
     PYTHONPATH=src python -m finepdfs.interfaces.demo run --engine docling --engine-command docling
@@ -21,6 +26,8 @@ import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from importlib import resources
+from importlib.resources.abc import Traversable
 from pathlib import Path
 
 from finepdfs.infrastructure.corpus.manifest import CorpusManifest
@@ -30,9 +37,13 @@ from finepdfs.interfaces.restore import restore_pinned_corpus
 from finepdfs.interfaces.run_log import RunClock, read_observed_run
 from finepdfs.interfaces.summary import conclude_run, format_run_summary
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_ROOT = PROJECT_ROOT / ".demo"
-DEFAULT_MANIFEST = PROJECT_ROOT / "docs" / "demo" / "pdf-demo-corpus-manifest.json"
+# The demo's own knob: an explicit state root, so the default never has to be a writable position in
+# the installed module's path.
+DEMO_ROOT_ENV = "FINEPDFS_DEMO_ROOT"
+# The pinned Corpus manifest ships inside the package. One canonical location: the source checkout and a
+# wheel install read the same file, and no `docs/demo/` copy exists to drift from it.
+MANIFEST_PACKAGE = "finepdfs.data"
+MANIFEST_RESOURCE = "pdf-demo-corpus-manifest.json"
 
 # The environment the flow reads. Kept in one place so `demo_environment` and the runbook cannot
 # disagree about which variable carries which directory.
@@ -55,10 +66,35 @@ class DemoPaths:
         return PublishedCorpus(self.out).summary_path()
 
 
+def default_root() -> Path:
+    """The demo's default state root: `FINEPDFS_DEMO_ROOT`, else `.demo/` under the current directory.
+
+    Deliberately not derived from this module's path. In a wheel install that path is inside
+    site-packages, which need not be writable, and the source checkout's `.demo/` does not exist there.
+    """
+    configured = os.environ.get(DEMO_ROOT_ENV, "").strip()
+    return Path(configured) if configured else Path.cwd() / ".demo"
+
+
 def demo_paths(root: Path | str | None = None) -> DemoPaths:
     """The demo's state layout. The default is `.demo/`, which is gitignored and persistent."""
-    root = Path(root) if root is not None else DEFAULT_ROOT
+    root = Path(root) if root is not None else default_root()
     return DemoPaths(root=root, corpus=root / "corpus", out=root / "out", database=root / "state.db")
+
+
+def packaged_manifest() -> Traversable:
+    """The pinned manifest that ships with the package, wherever the package is installed."""
+    return resources.files(MANIFEST_PACKAGE).joinpath(MANIFEST_RESOURCE)
+
+
+@contextmanager
+def _manifest(configured: Path | str | None) -> Iterator[Path]:
+    """One real path to the pinned manifest, whether the caller named it or it ships with the package."""
+    if configured is not None:
+        yield Path(configured)
+        return
+    with resources.as_file(packaged_manifest()) as path:
+        yield path
 
 
 def demo_environment(
@@ -109,12 +145,17 @@ def reset_demo(paths: DemoPaths) -> list[Path]:
 
 def restore_demo_corpus(
     paths: DemoPaths,
-    manifest_path: Path = DEFAULT_MANIFEST,
+    manifest_path: Path | str | None = None,
     *,
     source=None,
 ) -> int:
-    """Replay the pinned manifest into the demo corpus through the same function restore-corpus uses."""
-    return restore_pinned_corpus(manifest_path, paths.corpus, source=source)
+    """Replay the pinned manifest into the demo corpus through the same function restore-corpus uses.
+
+    ``--manifest`` names a different pin; the default is the one packaged with finepdfs, opened through
+    `importlib.resources` so an installed demo restores the same Corpus a source checkout does.
+    """
+    with _manifest(manifest_path) as manifest:
+        return restore_pinned_corpus(manifest, paths.corpus, source=source)
 
 
 @contextmanager
@@ -198,9 +239,17 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     restore = commands.add_parser("restore", help="restore the pinned Corpus into the demo root")
-    restore.add_argument("--root", type=Path, default=None, help=f"demo state root (default: {DEFAULT_ROOT})")
     restore.add_argument(
-        "--manifest", type=Path, default=DEFAULT_MANIFEST, help="pinned manifest to replay"
+        "--root",
+        type=Path,
+        default=None,
+        help=f"demo state root (default: ${DEMO_ROOT_ENV} or .demo/ in the current directory)",
+    )
+    restore.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="pinned manifest to replay (default: the one packaged with finepdfs)",
     )
 
     run = commands.add_parser("run", help="run the pipeline against the demo root and print its summary")

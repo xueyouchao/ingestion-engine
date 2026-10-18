@@ -5,7 +5,7 @@ Records, restorable byte-for-byte from pinned crawl ranges. It is **not** corpus
 evidence; it is a small, deterministic set on which routing, real OCR, cleaning, exclusions,
 duplicate decisions and incrementality can be demonstrated and inspected.
 
-- **Manifest:** [`pdf-demo-corpus-manifest.json`](pdf-demo-corpus-manifest.json)
+- **Manifest:** [`src/finepdfs/data/pdf-demo-corpus-manifest.json`](../../src/finepdfs/data/pdf-demo-corpus-manifest.json) (package data, replayed by `finepdfs-demo restore`)
 - **Rehearsal:** [`pdf-demo-runbook.md`](pdf-demo-runbook.md) -- the commands, measured runs, OCR page evidence and limitations
 - **Crawl:** `CC-MAIN-2026-39`
 - **Records / Documents:** 19 Crawl Records, 18 distinct content digests
@@ -178,7 +178,7 @@ From the repository root, with the project's virtual environment installed:
 
 ```bash
 .venv/bin/finepdfs restore-corpus \
-  --manifest docs/demo/pdf-demo-corpus-manifest.json \
+  --manifest src/finepdfs/data/pdf-demo-corpus-manifest.json \
   --corpus corpus/pdf-demo
 ```
 
@@ -187,7 +187,7 @@ entry point instead:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli restore-corpus \
-  --manifest docs/demo/pdf-demo-corpus-manifest.json \
+  --manifest src/finepdfs/data/pdf-demo-corpus-manifest.json \
   --corpus corpus/pdf-demo
 ```
 
@@ -222,7 +222,7 @@ PYTHONPATH=src .venv/bin/python - <<'PY'
 import hashlib, json
 from pathlib import Path
 
-manifest = json.loads(Path("docs/demo/pdf-demo-corpus-manifest.json").read_text())
+manifest = json.loads(Path("src/finepdfs/data/pdf-demo-corpus-manifest.json").read_text())
 for entry in manifest["entries"]:
     path = Path("corpus/pdf-demo") / entry["file"]
     assert path.stat().st_size == entry["bytes"], entry["url"]

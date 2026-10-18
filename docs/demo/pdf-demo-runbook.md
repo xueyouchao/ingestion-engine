@@ -10,8 +10,10 @@ or CPU is installed on your machine: the version commands in [Environment](#envi
 check, and the answers change without this file.
 
 The Corpus itself is described in [`pdf-demo-corpus.md`](pdf-demo-corpus.md); the manifest is
-[`pdf-demo-corpus-manifest.json`](pdf-demo-corpus-manifest.json). No PDF bytes, extracted text, model
-weights or secrets are committed, and no host path is part of any command here.
+[`src/finepdfs/data/pdf-demo-corpus-manifest.json`](../../src/finepdfs/data/pdf-demo-corpus-manifest.json),
+package data inside `finepdfs` so an installed `finepdfs-demo restore` replays it without a checkout.
+No PDF bytes, extracted text, model weights or secrets are committed, and no host path is part of any
+command here.
 
 ## Isolated, persistent demo state
 
@@ -24,9 +26,11 @@ so it can run beside a working checkout without sharing `corpus/`, `out/` or `co
 <root>/state.db/     CocoIndex database (memo table + target state)
 ```
 
-`<root>` defaults to `.demo/` in the repository root and is gitignored. A run never deletes it; only
-the explicit `reset` subcommand removes those three paths (and nothing else under the root). That is
-what lets a second run reuse the first run's memo instead of paying for OCR again.
+`<root>` defaults to `$FINEPDFS_DEMO_ROOT` and otherwise to `.demo/` in the current working
+directory, and is gitignored. It is never derived from where `finepdfs` is installed: a wheel install
+lives in site-packages, which need not be writable. A run never deletes the root; only the explicit
+`reset` subcommand removes those three paths (and nothing else under the root). That is what lets a
+second run reuse the first run's memo instead of paying for OCR again.
 
 ## Commands
 

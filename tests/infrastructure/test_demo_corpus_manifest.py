@@ -5,8 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from finepdfs.infrastructure.corpus.manifest import CorpusManifest, relative_pdf_path
+from finepdfs.interfaces import demo
 
-MANIFEST = Path(__file__).resolve().parents[2] / "docs" / "demo" / "pdf-demo-corpus-manifest.json"
+# One canonical location: the manifest is package data, not a copy under docs/.
+MANIFEST = Path(__file__).resolve().parents[2] / "src" / "finepdfs" / "data" / demo.MANIFEST_RESOURCE
 
 # Two real Crawl Records whose WARC payloads are byte-identical: one content digest, two URLs.
 EXACT_DUPLICATE_URLS = {
