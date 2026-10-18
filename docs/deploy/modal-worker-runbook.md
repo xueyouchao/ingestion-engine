@@ -253,6 +253,23 @@ If a worker remains because stop could not run, the last resort is the operator 
 container id; the lifetime cap is the automatic backstop. Do not delete a lease file by hand while a
 worker may exist: it is the only recorded handle on it.
 
+### `EngineDeadError` in the log at shutdown is expected
+
+`modal app logs finepdfs-gpu-worker` can show, in the same second `stop` sends `SIGINT`, a red
+`vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue`. Expect it: vLLM's
+`APIServer` abort-shuts the engine and then force-kills the `EngineCore` process it just stopped awaiting,
+so the error is the teardown, not a failed OCR call -- it is intermittent, and some stops log it and some
+do not, so its presence alone proves nothing either way. Verify the two things that do:
+
+* the request had completed -- the run exited 0 and its `out/run-summary.json` line is recorded, or,
+  reading the log, there is no `/v1/chat/completions` open in that second;
+* `modal container list` (above) shows no `finepdfs` worker.
+
+Treat the same error as a real engine failure when it appears **during** a run, with no `stop` and no
+`trigger received signal=SIGINT` beside it: that is the engine dying on its own. Record the run as failed
+and read its summary before investigating. Measured and correlated in
+[the evidence record](modal-worker-evidence.md#vllm-logs-an-enginedeaderror-on-sigint-during-shutdown).
+
 ## Assumptions, and what the first paid runs did and did not settle
 
 The runs of 2026-10-18 settled some of these and left others exactly where they were. Each bullet says

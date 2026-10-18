@@ -21,9 +21,10 @@ digest instead of it. Source URLs of the corpus are fine to name and are in
 [`docs/demo/pdf-demo-corpus.md`](../demo/pdf-demo-corpus.md).
 
 The artifacts are ephemeral scratch directories under `/tmp` (`finepdfs-gpu-smoke`,
-`finepdfs-pipeline-smoke`, `finepdfs-full-gpu`). They are not committed: no PDF bytes, no extracted text,
-no weights and no secrets live in this repository. A quote here is all that survives of them, which is
-why the quotes are exact.
+`finepdfs-pipeline-smoke`, `finepdfs-full-gpu`) plus the app log fetched out of Modal to
+`/tmp/finepdfs-modal-app.log`. They are not committed: no PDF bytes, no extracted text, no weights and no
+secrets live in this repository. A quote here is all that survives of them, which is why the quotes are
+exact.
 
 ## Environment
 
@@ -235,6 +236,56 @@ Bounded but not billed: no exact bill was recorded, and the workspace's current 
 beside these runs. What is bounded is time: the four windows above sum to about 896 s of Worker life and
 no single Worker could exceed 900 s, so the four Leases could not have billed for more than 3,600 s of L4
 time -- four times the cap -- plus the HF cache Volume's storage. The real figure is lower and unknown.
+
+### vLLM logs an EngineDeadError on SIGINT during shutdown
+
+Reading back the app log, the operator met a red line that reads like a failed OCR call. Both occurrences
+in the whole log are quoted verbatim below, timestamps and all:
+
+```text
+2026-10-18 18:23:30+00:00 (APIServer pid=2) ERROR 10-18 18:23:30 [async_llm.py:906] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
+2026-10-18 18:26:04+00:00 (APIServer pid=2) ERROR 10-18 18:26:04 [async_llm.py:906] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
+```
+
+Observed, correlating those two timestamps against the same log and the run artifacts:
+
+* both timestamps are the second in which that Worker's teardown began, not a second in which it did
+  work: `(EngineCore pid=47) INFO ... [shutdown] EngineCore: trigger received signal=SIGINT` and
+  `(APIServer pid=2) INFO ... [shutdown] API server: shutdown triggered` carry the same `18:23:30` and
+  `18:26:04` as the errors above, in both cases;
+* `18:26:04Z` is the warm run's stop -- `out/last-run.json` for it reads `18:23:31Z` to `18:26:04Z`,
+  **153.029 s** -- and the log's own last line is that second's `INFO: Application shutdown complete.`;
+* no OCR request was in flight at either timestamp. The warm run declared `extraction.calls` 0 and
+  `extraction.reused` 18 (section 4), and the log agrees independently: across its whole window the
+  Worker served exactly one request, `GET /v1/models` at `18:26:01Z`, and **zero**
+  `/v1/chat/completions`. In the cold run the last `/v1/chat/completions` answered `200 OK` at
+  `18:23:28Z`, two seconds before the error, and at `18:23:30Z` the engine logged
+  `Running: 0 reqs, Waiting: 0 reqs`;
+* the sequence both times is the shutdown the stop asked for: abort-mode `timeout=0s`, then
+  `EngineCore: request processing complete; starting resource teardown` and `exiting busy loop`, then
+  `Process manager: send sigterm to process EngineCore` and `force killing remaining process EngineCore
+  pid 47`, and only then the error. Its traceback is the pending
+  `await engine_core.get_output_async()` in vLLM's `AsyncLLM.output_handler` (`async_llm.py`,
+  `core_client.py`): the await on an engine process that was force-killed the line before, not an OCR
+  answer that failed. Shutdown then completes normally (`API server: engine client stopped`,
+  `Application shutdown complete.`).
+
+So this is expected vendor shutdown noise, and **not** evidence of an OCR failure. The evidence that the
+runs themselves were sound is elsewhere and does not depend on this line: the completed
+`run-summary.json` counters of section 4, the empty Lease directories, and the teardown check of 2026-10-18
+above finding no active Worker (restated, not re-run -- see section 6's opening bullets). The error is
+also intermittent rather than a property of every stop: the direct run (`18:17:19Z`) and the one-page
+pipeline (`18:20:09Z`) went through the same SIGINT and the same `force killing` of `EngineCore` and
+never logged it.
+
+It is **not** claimed to be harmless in every possible future case. Two shapes would not be this, and
+both need investigation rather than a shrug:
+
+* the error appearing **while a request is in flight** -- a `/v1/chat/completions` open in that second,
+  or a run that fails instead of stopping;
+* the error appearing with **no corresponding `trigger received signal=SIGINT`** in that second. Taken
+  literally that is the engine dying on its own, which is what the message always says; the reason it can
+  be dismissed here is exactly the SIGINT beside it, so without the SIGINT it is a real engine failure.
 
 ## What remains unverified
 
