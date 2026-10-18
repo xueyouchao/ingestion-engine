@@ -212,16 +212,16 @@ def test_the_shared_search_api_returns_accepted_evidence_with_citations(monkeypa
     results = _search(runtime.out_dir, index_path, "Brighton")
     assert len(results.hits) == 1
     hit = results.hits[0]
-    assert hit.doc_id == document_key(URL)
-    assert hit.chunk_id in {chunk["chunk_id"] for chunk in _chunk_records(runtime.out_dir, URL)}
-    assert hit.source_url == URL
-    assert hit.digest == content_digest(body)
-    assert hit.page_number == 3
-    assert hit.text.strip() == "Brighton buoy reports swell and wind at dawn."
+    assert hit.chunk.doc_id == document_key(URL)
+    assert hit.chunk.chunk_id in {chunk["chunk_id"] for chunk in _chunk_records(runtime.out_dir, URL)}
+    assert hit.chunk.source_url == URL
+    assert hit.chunk.digest == content_digest(body)
+    assert hit.chunk.page_number == 3
+    assert hit.chunk.text.strip() == "Brighton buoy reports swell and wind at dawn."
     assert "<mark>Brighton</mark>" in hit.snippet
     assert hit.score > 0
-    assert hit.engine == "pymupdf@controlled-pages"
-    assert hit.language == "eng"
+    assert hit.chunk.engine == "pymupdf@controlled-pages"
+    assert hit.chunk.language == "eng"
 
     assert _search(runtime.out_dir, index_path, "uncertain").hits == (), "only accepted pages are evidence"
 
@@ -253,9 +253,9 @@ def test_metadata_filters_narrow_the_same_contract(tmp_path) -> None:
     chunks = chunk_page_records((first,), language="eng") + chunk_page_records((second,), language="fra")
 
     assert len(_search_chunks(index_path, chunks, "harbour").hits) == 2
-    assert [hit.doc_id for hit in _search_chunks(index_path, chunks, "harbour", language="fra").hits] == ["b" * 16]
-    assert [hit.doc_id for hit in _search_chunks(index_path, chunks, "harbour", engine="pymupdf@native").hits] == ["a" * 16]
-    assert [hit.doc_id for hit in _search_chunks(index_path, chunks, "harbour", doc_id="a" * 16).hits] == ["a" * 16]
+    assert [hit.chunk.doc_id for hit in _search_chunks(index_path, chunks, "harbour", language="fra").hits] == ["b" * 16]
+    assert [hit.chunk.doc_id for hit in _search_chunks(index_path, chunks, "harbour", engine="pymupdf@native").hits] == ["a" * 16]
+    assert [hit.chunk.doc_id for hit in _search_chunks(index_path, chunks, "harbour", doc_id="a" * 16).hits] == ["a" * 16]
     assert _search_chunks(index_path, chunks, "harbour", language="eng", engine="docling@cli").hits == ()
     assert len(_search_chunks(index_path, chunks, "harbour", top_k=1).hits) == 1
 
@@ -303,7 +303,7 @@ def test_reindexing_twice_is_idempotent_and_never_duplicates_hits(monkeypatch, t
     assert retried.upserted == retried.chunks
     assert _search(runtime.out_dir, index_path, "harbour").hits == results.hits
     assert len(results.hits) == 1
-    assert len({hit.chunk_id for hit in results.hits}) == len(results.hits), "one row per chunk, no duplicates"
+    assert len({hit.chunk.chunk_id for hit in results.hits}) == len(results.hits), "one row per chunk, no duplicates"
 
 
 FIRST_PAGES = (
@@ -333,7 +333,7 @@ def test_a_replacement_with_fewer_pages_retracts_old_chunks_and_their_hits(monke
     old_ids = {chunk["chunk_id"] for chunk in old_chunks}
     filler_hits = _search(runtime.out_dir, index_path, "filler")
     assert len(filler_hits.hits) >= 2, "the long first page was split into several chunks"
-    assert len({hit.chunk_id for hit in filler_hits.hits}) == len(filler_hits.hits)
+    assert len({hit.chunk.chunk_id for hit in filler_hits.hits}) == len(filler_hits.hits)
 
     _write_corpus(tmp_path / "corpus", {URL: second_body})
     _run(monkeypatch, tmp_path, runtime)
@@ -347,9 +347,9 @@ def test_a_replacement_with_fewer_pages_retracts_old_chunks_and_their_hits(monke
     delta = _search(runtime.out_dir, index_path, "Delta")
     assert len(delta.hits) == 1, "the surviving page is found exactly once"
     hit = delta.hits[0]
-    assert hit.digest == content_digest(second_body)
-    assert hit.page_number == 2
-    assert hit.chunk_id not in old_ids
+    assert hit.chunk.digest == content_digest(second_body)
+    assert hit.chunk.page_number == 2
+    assert hit.chunk.chunk_id not in old_ids
     assert [chunk["page_number"] for chunk in _chunk_records(runtime.out_dir, URL)] == [2]
 
 
@@ -366,8 +366,8 @@ def test_a_chunking_version_change_replaces_the_hits_instead_of_adding_them(monk
 
     before = _search(runtime.out_dir, index_path, "meteorology")
     assert len(before.hits) == 1
-    old_id = before.hits[0].chunk_id
-    assert before.hits[0].chunking_version == CHUNKING_VERSION
+    old_id = before.hits[0].chunk.chunk_id
+    assert before.hits[0].chunk.chunking_version == CHUNKING_VERSION
 
     monkeypatch.setattr("finepdfs.domain.chunks.CHUNKING_VERSION", "chunking-v2")
     _run(monkeypatch, tmp_path, runtime)
@@ -375,10 +375,10 @@ def test_a_chunking_version_change_replaces_the_hits_instead_of_adding_them(monk
 
     after = _search(runtime.out_dir, index_path, "meteorology")
     assert len(after.hits) == 1, "the same evidence is not returned twice under two chunking versions"
-    assert after.hits[0].chunk_id != old_id
-    assert after.hits[0].chunking_version == "chunking-v2"
+    assert after.hits[0].chunk.chunk_id != old_id
+    assert after.hits[0].chunk.chunking_version == "chunking-v2"
     assert report.removed == 1, "the version-one row is retracted, not left beside the new one"
-    assert after.hits[0].page_number == 1
+    assert after.hits[0].chunk.page_number == 1
 
 
 def test_an_exclusion_stops_its_chunks_being_searchable(monkeypatch, tmp_path) -> None:
@@ -493,8 +493,8 @@ def test_a_replacement_is_not_searchable_until_the_index_is_rebuilt(monkeypatch,
     assert _search(runtime.out_dir, index_path, "Bravo").hits == ()
     delta = _search(runtime.out_dir, index_path, "Delta")
     assert delta.available is True
-    assert [hit.page_number for hit in delta.hits] == [1]
-    assert delta.hits[0].digest == content_digest(second_body)
+    assert [hit.chunk.page_number for hit in delta.hits] == [1]
+    assert delta.hits[0].chunk.digest == content_digest(second_body)
 
 
 def test_a_removal_is_not_searchable_until_the_index_is_rebuilt(monkeypatch, tmp_path) -> None:

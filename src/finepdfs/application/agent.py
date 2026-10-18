@@ -29,11 +29,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from finepdfs.application.page_reads import DeclaredPageReader, read_pdf_page
+from finepdfs.application.page_reads import read_pdf_page
 from finepdfs.application.search import search_pdfs
 from finepdfs.domain.chunks import DeclaredChunkSet
-from finepdfs.domain.ports import SearchIndex
+from finepdfs.domain.ports import DeclaredPageReader, SearchIndex
 from finepdfs.domain.search import SearchFilters
+from finepdfs.domain.source_identity import SOURCE_IDENTITY_DIGITS
 
 TOOL_SEARCH = "search_pdfs"
 TOOL_READ = "read_pdf_page"
@@ -98,12 +99,13 @@ READ_SCHEMA = {
 TOOL_SCHEMAS = (SEARCH_SCHEMA, READ_SCHEMA)
 
 _CITATION = re.compile(
-    r'["\']?([0-9a-f]{16})["\']?\s*(?:,\s*)?(?:p\.|page\s+)\s*(\d+)',
+    rf'["\']?({SOURCE_IDENTITY_DIGITS})["\']?\s*(?:,\s*)?(?:p\.|page\s+)\s*(\d+)',
     re.IGNORECASE,
 )
-# Some models drop the doc_id but keep the tag. A page-only tag is resolved only when the evidence the
-# tools returned names that page for exactly one document; otherwise it is not a citation.
-_PAGE_ONLY_CITATION = re.compile(r"<doc_id>\s*(?:p\.|page\s+)\s*(\d+)\s*</doc_id>", re.IGNORECASE)
+# The prompt names the citation format as [DOC p.PAGE]; a model that copies the placeholder back has
+# written no doc_id, so the tag names no document. It is stripped as an unverified marker, never
+# resolved to whichever page happened to be read: that would invent a citation the model never wrote.
+_PLACEHOLDER_CITATION = re.compile(r"<doc_id>\s*(?:p\.|page\s+)\s*\d+\s*</doc_id>", re.IGNORECASE)
 # A model that answers and then contradicts itself ends with this marker on its own line; it is a tail
 # to drop, not a second answer.
 _INSUFFICIENT_LINE = re.compile(r"^[\s>*_#-]*INSUFFICIENT EVIDENCE\b.*$", re.IGNORECASE | re.MULTILINE)
@@ -343,11 +345,13 @@ def _system_prompt(max_tool_calls: int) -> str:
         "original page. If a snippet does not contain the answer, read the page it points at before "
         "answering.\n"
         f"You have at most {max_tool_calls} tool calls in total. Every call and every result is visible.\n"
-        "Cite every factual claim in plain text as [<doc_id> p.<page_number>], for example "
-        "[9bf665589f7333a8 p.8]. Use the exact doc_id string a tool returned; never abbreviate it and "
-        "never wrap a citation in any other tag. Cite only a page that read_pdf_page returned as "
-        "accepted: a search snippet locates a page but does not verify what that page says. A page "
-        "number written in prose, such as 'page 37', is not a citation and will not be accepted.\n"
+        "Cite every factual claim in plain text as [DOC p.PAGE], where DOC is the exact 16-character "
+        "doc_id a tool returned and PAGE is the original page number, for example "
+        "[9bf665589f7333a8 p.8]. That bracketed pair is the only citation format: never write the "
+        "placeholder text 'doc_id', never cite a page without its doc_id, and never wrap a citation in "
+        "another tag. Cite only a page that read_pdf_page returned as accepted: a search snippet "
+        "locates a page but does not verify what that page says. A page number written in prose, such "
+        "as 'page 37', is not a citation and will not be accepted.\n"
         "Never invent a document, page, quotation or URL.\n"
         "If the tools do not contain the answer, reply exactly 'INSUFFICIENT EVIDENCE: <what is "
         "missing>' and cite nothing."
@@ -356,16 +360,18 @@ def _system_prompt(max_tool_calls: int) -> str:
 
 _BUDGET_PROMPT = (
     "The tool budget is exhausted. Answer now from the evidence already returned, citing each claim "
-    "as [<doc_id> p.<page_number>] in plain text, or reply exactly 'INSUFFICIENT EVIDENCE: <what is "
-    "missing>'. Do not request another tool and do not wrap citations in other tags. Cite only a page "
+    "as [DOC p.PAGE] in plain text, where DOC is the exact doc_id a tool returned and PAGE the page "
+    "number, or reply exactly 'INSUFFICIENT EVIDENCE: <what is missing>'. Do not request another tool, "
+    "never cite a page without its doc_id, and do not wrap citations in other tags. Cite only a page "
     "read_pdf_page returned; if no returned page supports the claim, reply INSUFFICIENT EVIDENCE."
 )
 
 _REPAIR_PROMPT = (
     "Your answer is not backed by a page you read, so it cannot stand. Call read_pdf_page with the "
     "doc_id and page_number of the page that supports the claim, then answer again citing it as "
-    "[<doc_id> p.<page_number>]. A page number written in prose is not a citation. If no page already "
-    "returned by the tools supports the claim, reply exactly 'INSUFFICIENT EVIDENCE: <what is missing>'."
+    "[DOC p.PAGE] with that exact doc_id and page number. A page number written in prose or cited "
+    "without its doc_id is not a citation. If no page already returned by the tools supports the "
+    "claim, reply exactly 'INSUFFICIENT EVIDENCE: <what is missing>'."
 )
 
 _INSUFFICIENT_FALLBACK = (
@@ -505,8 +511,10 @@ def _only_verified_citations(
 ) -> tuple[str, tuple[Citation, ...]]:
     """Remove every citation whose page was not read, and return the ones that were.
 
-    A page-only tag is resolved only when the exact page was read for exactly one document; prose such
-    as "page 37" is left in the text but is not a citation, so an answer resting on it has none.
+    One written format is a citation: a doc_id a tool returned, followed by its page number. A
+    placeholder tag that carries a page number and no doc_id names no document, so it is removed like
+    any other unverified marker; prose such as "page 37" is left in the text but is not a citation, so
+    an answer resting on it has none.
     """
     found: list[Citation] = []
     seen: set[tuple[str, int]] = set()
@@ -519,17 +527,7 @@ def _only_verified_citations(
                 found.append(verified[key])
             continue
         spans.append(_span_with_brackets(answer, match.start(), match.end()))
-    by_page: dict[int, list[tuple[str, int]]] = {}
-    for key in verified:
-        by_page.setdefault(key[1], []).append(key)
-    for match in _PAGE_ONLY_CITATION.finditer(answer):
-        candidates = by_page.get(int(match.group(1)), [])
-        if len(candidates) == 1:
-            if candidates[0] not in seen:
-                seen.add(candidates[0])
-                found.append(verified[candidates[0]])
-            continue
-        spans.append((match.start(), match.end()))
+    spans.extend(match.span() for match in _PLACEHOLDER_CITATION.finditer(answer))
     if not spans:
         return answer, tuple(found)
     for start, end in sorted(spans, reverse=True):
@@ -543,7 +541,7 @@ def _only_verified_citations(
 def _without_citations(answer: str) -> str:
     """An insufficient-evidence reply cites nothing, so every marker is removed from it."""
     answer = _CITATION.sub("", answer)
-    answer = _PAGE_ONLY_CITATION.sub("", answer)
+    answer = _PLACEHOLDER_CITATION.sub("", answer)
     answer = re.sub(r"\[\s*\]|\(\s*\)", "", answer)
     answer = re.sub(r"[ \t]{2,}", " ", answer)
     return re.sub(r"\s+([.,;:!?])", r"\1", answer).strip()

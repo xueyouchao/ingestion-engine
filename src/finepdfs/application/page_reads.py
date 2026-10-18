@@ -12,38 +12,11 @@ a page left behind by a replacement are different answers with different reasons
 
 from __future__ import annotations
 
-import re
-from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Protocol
 
+from finepdfs.domain.ports import DeclaredPageReader
 from finepdfs.domain.publishing import PageRecord
-
-KEY_PATTERN = r"^[0-9a-f]{16}$"
-
-
-class DeclaredPageReader(Protocol):
-    """Where one Document's declared record, exclusion and accepted pages are read from."""
-
-    @property
-    def root(self) -> Path: ...
-
-    def has_output(self) -> bool:
-        """Whether a completed run declared anything at all."""
-        ...
-
-    def published_digest(self, doc_id: str) -> str | None:
-        """The digest of the Document's current published record, or None when it has none."""
-        ...
-
-    def exclusion(self, doc_id: str) -> tuple[str, str] | None:
-        """The exclusion kind and reason for a Document that was dropped, failed or duplicated."""
-        ...
-
-    def accepted_pages(self, doc_id: str) -> Sequence[PageRecord] | None:
-        """The accepted Page Texts in original page order, or None when no export is declared."""
-        ...
+from finepdfs.domain.source_identity import require_source_identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,11 +128,6 @@ def read_pdf_page(reader: DeclaredPageReader, doc_id: str, page_number: int) -> 
 
 
 def _validate(doc_id: str, page_number: int) -> None:
-    if not isinstance(doc_id, str) or not doc_id or not _is_key(doc_id):
-        raise ValueError(f"doc_id must be a 16-character source identity, not {doc_id!r}")
+    require_source_identity(doc_id)
     if not isinstance(page_number, int) or isinstance(page_number, bool) or page_number < 1:
         raise ValueError(f"page_number must be a 1-based integer, not {page_number!r}")
-
-
-def _is_key(value: str) -> bool:
-    return re.fullmatch(KEY_PATTERN, value) is not None

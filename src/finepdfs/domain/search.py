@@ -1,9 +1,10 @@
 """The search contract: one query, one hit shape, and no backend name in either.
 
 The browser and the agent read accepted evidence through this shape and nothing else, so replacing the
-backend cannot change what a citation means. A hit names the same source identity as a page record --
-``doc_id``, source URL, PDF digest and the original 1-based page number -- plus the chunk it came out
-of, the text, a highlighted snippet and the lexical score.
+backend cannot change what a citation means. A hit is one Chunk -- the source identity, source URL, PDF
+digest, original 1-based page number, the chunk it came out of and its text -- plus the highlighted
+snippet and the lexical score the query added. Composing the Chunk is what keeps a citation field from
+being written twice.
 
 Scores are BM25 with the score's sign flipped so that a larger number is a better match, because that
 is the direction a reader and a ranked list expect. Only the order is guaranteed; the magnitude belongs
@@ -13,6 +14,8 @@ to the backend.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
+from finepdfs.domain.chunks import Chunk
 
 DEFAULT_TOP_K = 10
 MAX_TOP_K = 100
@@ -38,40 +41,14 @@ class SearchQuery:
 
 @dataclass(frozen=True, slots=True)
 class SearchHit:
-    """One accepted chunk, cited."""
+    """One accepted chunk, cited: the chunk itself plus what the query ranked it by."""
 
-    doc_id: str
-    chunk_id: str
-    source_url: str
-    digest: str
-    engine: str
-    language: str
-    chunking_version: str
-    ordinal: int
-    page_number: int
-    start_offset: int
-    end_offset: int
-    text: str
+    chunk: Chunk
     snippet: str
     score: float
 
     def as_json(self) -> dict:
-        return {
-            "doc_id": self.doc_id,
-            "chunk_id": self.chunk_id,
-            "source_url": self.source_url,
-            "digest": self.digest,
-            "engine": self.engine,
-            "language": self.language,
-            "chunking_version": self.chunking_version,
-            "ordinal": self.ordinal,
-            "page_number": self.page_number,
-            "start_offset": self.start_offset,
-            "end_offset": self.end_offset,
-            "text": self.text,
-            "snippet": self.snippet,
-            "score": self.score,
-        }
+        return {**self.chunk.as_json(), "snippet": self.snippet, "score": self.score}
 
 
 class SearchUnavailable(Exception):
