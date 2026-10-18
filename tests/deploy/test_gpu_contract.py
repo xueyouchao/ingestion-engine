@@ -154,6 +154,10 @@ def test_the_state_file_is_named_by_the_environment_then_defaults(tmp_path) -> N
 
     assert contract.state_path({contract.STATE_FILE: str(explicit)}) == explicit
     assert contract.state_path({}) == Path(contract.DEFAULT_STATE_FILE).expanduser()
+    # A present-but-empty value is the unset value, not the path ".": exporting an empty variable must
+    # not turn stop into an "unreadable lease" report about a directory.
+    assert contract.state_path({contract.STATE_FILE: ""}) == Path(contract.DEFAULT_STATE_FILE).expanduser()
+    assert contract.state_path({contract.STATE_FILE: "   "}) == Path(contract.DEFAULT_STATE_FILE).expanduser()
 
 
 def test_secrets_are_redacted_from_text_that_would_be_printed() -> None:

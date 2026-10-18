@@ -184,8 +184,14 @@ class LeaseState:
 
 
 def state_path(environ: Mapping[str, str]) -> Path:
-    """Where this machine records the one worker it currently leases."""
-    return Path(environ.get(STATE_FILE, DEFAULT_STATE_FILE)).expanduser()
+    """Where this machine records the one worker it currently leases.
+
+    An empty value is not a path: it is the unset value every other optional variable here reads as
+    absent, so it falls back to the default rather than becoming ``.`` -- a directory that stop would
+    then report as an unreadable lease.
+    """
+    configured = environ.get(STATE_FILE, "").strip()
+    return Path(configured or DEFAULT_STATE_FILE).expanduser()
 
 
 def write_lease(path: Path, state: LeaseState) -> None:
