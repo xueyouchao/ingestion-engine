@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from finepdfs.domain.crawl import CrawlQuery
+from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
 from finepdfs.domain.document import content_digest
 from finepdfs.domain.ports import CrawlSource
 from finepdfs.infrastructure.corpus.manifest import (
@@ -114,6 +114,89 @@ def fetch_corpus(
         failed=failed,
         failures=tuple(failures),
     )
+
+
+def restore_corpus(
+    source: CrawlSource,
+    pinned: CorpusManifest,
+    corpus_dir: Path,
+    manifest_name: str = MANIFEST_NAME,
+) -> FetchReport:
+    """Replay a pinned manifest: one ranged fetch per missing record, bytes checked against its digest.
+
+    The pinned entries become the corpus target state before anything is fetched, so a URL that cannot
+    be read stays declared and later surfaces as a failed Document rather than as a source that was
+    deliberately removed. An entry already on disk counts as present only when its size and SHA-256 are
+    the pinned ones; anything else is fetched again and must match exactly or the record fails.
+    """
+    manifest_path = corpus_dir / manifest_name
+    pinned.save(manifest_path)
+
+    fetched = skipped = failed = 0
+    failures: list[FetchFailure] = []
+
+    for entry in pinned.entries:
+        if _is_restored(corpus_dir, entry):
+            skipped += 1
+            continue
+        record = _record(entry)
+        try:
+            payload = source.fetch(record)
+        except Exception as error:  # one unavailable URL must not end the replay
+            logger.warning("could not restore %s: %s", entry.url, error)
+            failures.append(FetchFailure(url=entry.url, reason=str(error)))
+            failed += 1
+            continue
+
+        digest = content_digest(payload)
+        if len(payload) != entry.bytes or digest != entry.digest:
+            reason = (
+                f"pinned {entry.bytes} bytes with SHA-256 {entry.digest}, "
+                f"the fetch returned {len(payload)} bytes with SHA-256 {digest}"
+            )
+            logger.warning("could not restore %s: %s", entry.url, reason)
+            failures.append(FetchFailure(url=entry.url, reason=reason))
+            failed += 1
+            continue
+
+        try:
+            _store(corpus_dir, digest, payload)
+        except OSError as error:  # a full disk is one record's problem too
+            logger.warning("could not store %s: %s", entry.url, error)
+            failures.append(FetchFailure(url=entry.url, reason=str(error)))
+            failed += 1
+            continue
+        fetched += 1
+
+    return FetchReport(
+        records_seen=len(pinned.entries),
+        fetched=fetched,
+        skipped=skipped,
+        failed=failed,
+        failures=tuple(failures),
+    )
+
+
+def _record(entry: CorpusEntry) -> CrawlRecord:
+    """The Crawl Record a pinned manifest entry names."""
+    return CrawlRecord(
+        url=entry.url,
+        crawl_id=entry.crawl_id,
+        warc_filename=entry.warc_filename,
+        offset=entry.offset,
+        length=entry.length,
+    )
+
+
+def _is_restored(corpus_dir: Path, entry: CorpusEntry) -> bool:
+    """A pinned entry is present only when the bytes on disk are the size and digest it names."""
+    path = pdf_path(corpus_dir, entry.digest)
+    try:
+        if path.stat().st_size != entry.bytes:
+            return False
+        return content_digest(path.read_bytes()) == entry.digest
+    except OSError:
+        return False
 
 
 def _is_stored(corpus_dir: Path, entry: CorpusEntry) -> bool:
