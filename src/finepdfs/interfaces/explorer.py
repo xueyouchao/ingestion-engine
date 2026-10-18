@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,6 +35,8 @@ from finepdfs.infrastructure.publishing.disk import (
     PublishedCorpus,
 )
 from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
+from finepdfs.interfaces import search_paths
+from finepdfs.interfaces.run_log import NOT_RECORDED, read_observed_run
 
 KEY_PATTERN = re.compile(r"^[0-9a-f]{16}$")
 DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -44,8 +45,9 @@ _UNSET = object()
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-# The CLI's index-search writes this name beside the published output; the explorer reads it.
-SEARCH_INDEX_NAME = "search.db"
+# The index name and the resolver live in interfaces/search_paths.py so `index-search`, `search`,
+# `explore` and `ask` cannot disagree about where the derived index is.
+SEARCH_INDEX_NAME = search_paths.SEARCH_INDEX_NAME
 
 
 class ExplorerError(Exception):
@@ -103,26 +105,14 @@ class Explorer:
         The explorer never builds or repairs the index: it is derived state written by `index-search`
         after a run, and a view that silently reindexed would be a second writer of search state.
         """
-        query = text.strip()
-        if not query:
+        if not text.strip():
             raise SearchRequestError("a search needs a non-empty query")
         if top_k < 1:
             raise SearchRequestError(f"top_k must be at least 1, not {top_k}")
-        if not self._index.is_file():
-            return _unavailable(
-                query,
-                filters,
-                f"no search index at {self._index}; run finepdfs index-search after a completed run",
-            )
-        try:
-            results = SearchAcceptedEvidence(SqliteFtsSearchIndex(self._index)).search(
-                query, filters=filters, top_k=top_k
-            )
-        except (sqlite3.Error, OSError) as error:
-            return _unavailable(query, filters, f"the search index at {self._index} could not be read: {error}")
-        payload = results.as_json()
-        payload["available"] = True
-        return payload
+        reader = SearchAcceptedEvidence(
+            SqliteFtsSearchIndex(self._index), self._published.read_declared_chunks
+        )
+        return reader.search(text, filters=filters, top_k=top_k).as_json()
 
     def summary(self) -> dict[str, Any]:
         """The measured counters exactly as the flow declared them, never recomputed."""
@@ -130,6 +120,17 @@ class Explorer:
         if not path.is_file():
             raise ExplorerError(f"no completed output at {self._out}: {path} does not exist")
         return _read_json_object(path)
+
+    def observed_run(self) -> dict[str, Any]:
+        """The observed wall-clock timing beside the outputs, or an explicit "not recorded".
+
+        It is not declared target state: the command that ran the pipeline measured it. Absent means
+        the elapsed time is not recorded, never zero and never guessed.
+        """
+        record = read_observed_run(self._out)
+        if record is None:
+            return {"recorded": False, "elapsed_seconds": None, "note": f"elapsed {NOT_RECORDED}"}
+        return {"recorded": True, **record}
 
     def records(self) -> list[dict[str, Any]]:
         """Published records, each with the key its exports are named after and its PDF link."""
@@ -338,23 +339,6 @@ def explorer_for(
     return explorer
 
 
-def _unavailable(text: str, filters: SearchFilters | None, reason: str) -> dict[str, Any]:
-    """An explicit "no search available" answer: the same shape, with nothing pretending to be a hit."""
-    filters = filters or SearchFilters()
-    return {
-        "available": False,
-        "reason": reason,
-        "query": text,
-        "filters": {
-            "language": filters.language,
-            "engine": filters.engine,
-            "doc_id": filters.doc_id,
-        },
-        "total": 0,
-        "hits": [],
-    }
-
-
 def _first(parameters: dict[str, list[str]], name: str) -> str | None:
     values = parameters.get(name)
     return values[0] if values else None
@@ -423,6 +407,8 @@ class ExplorerRequestHandler(BaseHTTPRequestHandler):
                 self._html(EXPLORER_HTML, head=head)
             elif path == "/api/summary":
                 self._json(self.explorer.summary(), head=head)
+            elif path == "/api/observed-run":
+                self._json(self.explorer.observed_run(), head=head)
             elif path == "/api/documents":
                 payload = {"summary": self.explorer.summary(), "documents": self.explorer.documents()}
                 self._json(payload, head=head)
@@ -740,7 +726,7 @@ EXPLORER_HTML = """<!doctype html>
   <div><dt>Extraction</dt><dd id="summary-extraction">-</dd></div>
   <div><dt>Published</dt><dd id="summary-published">-</dd></div>
   <div><dt>Exclusions</dt><dd id="summary-exclusions">-</dd></div>
-  <div><dt>Elapsed</dt><dd id="summary-elapsed">-</dd></div>
+  <div><dt>Elapsed (observed)</dt><dd id="summary-elapsed">not recorded</dd></div>
   <div><dt>Engine</dt><dd id="summary-engine">-</dd></div>
 </dl>
 <section class="filters" aria-label="Filters">
@@ -802,7 +788,7 @@ EXPLORER_HTML = """<!doctype html>
   <section id="document-detail" aria-label="Document detail" hidden></section>
 </main>
 <script>
-const state = { documents: [], summary: null, finishedAt: "", selected: null };
+const state = { documents: [], summary: null, observed: null, finishedAt: "", selected: null };
 
 const byId = (id) => document.getElementById(id);
 
@@ -838,12 +824,16 @@ function renderSummary() {
   byId("summary-published").textContent =
     formatCount(published.documents) + " documents / " + formatCount(published.page_records) + " page records";
   byId("summary-exclusions").textContent = formatCount(exclusions.total) + " (" + kinds + ")";
-  byId("summary-elapsed").textContent = formatCount(summary.run && summary.run.elapsed_seconds) + " s";
+  const observed = state.observed || {};
+  byId("summary-elapsed").textContent = observed.recorded
+    ? Number(observed.elapsed_seconds).toFixed(1) + " s (observed)"
+    : "not recorded";
   byId("summary-engine").textContent = engine.identity || engine.name || "-";
-  const run = summary.run || {};
-  byId("run-meta").textContent =
-    "Run finished at " + (run.finished_at || "unknown") + ". This view polls the summary and reloads after "
-    + "a completed update.";
+  byId("run-meta").textContent = observed.recorded
+    ? "Observed run finished at " + (observed.finished_at || "unknown") + " (wall clock, not declared "
+      + "target state). This view polls that observation and reloads after a completed update."
+    : "No run timing is recorded beside these outputs, so elapsed is not recorded. The declared summary "
+      + "carries no timestamps: run again and the same bytes are rewritten.";
 }
 
 function fillSelect(select, values) {
@@ -1001,7 +991,8 @@ async function loadAll() {
   const payload = await response.json();
   state.documents = Array.isArray(payload.documents) ? payload.documents : [];
   state.summary = payload.summary || {};
-  state.finishedAt = (state.summary.run && state.summary.run.finished_at) || "";
+  state.observed = await loadObserved();
+  state.finishedAt = (state.observed && state.observed.recorded && state.observed.finished_at) || "";
   renderSummary();
   refreshFilterOptions();
   renderTable();
@@ -1012,6 +1003,12 @@ function setError(error) {
   const status = byId("refresh-state");
   status.textContent = "Error: " + (error && error.message ? error.message : error);
   status.classList.add("error");
+}
+
+async function loadObserved() {
+  const response = await fetch("/api/observed-run", { cache: "no-store" });
+  if (!response.ok) return { recorded: false };
+  return await response.json();
 }
 
 async function refresh(reason) {
@@ -1028,14 +1025,14 @@ async function refresh(reason) {
 function startPolling() {
   setInterval(async () => {
     try {
-      const response = await fetch("/api/summary", { cache: "no-store" });
+      const response = await fetch("/api/observed-run", { cache: "no-store" });
       if (!response.ok) return;
-      const summary = await response.json();
-      const finishedAt = (summary.run && summary.run.finished_at) || "";
+      const observed = await response.json();
+      const finishedAt = (observed.recorded && observed.finished_at) || "";
       if (finishedAt && finishedAt !== state.finishedAt) {
         await loadAll();
         byId("refresh-state").textContent =
-          "A completed run finished at " + finishedAt + "; the view refreshed.";
+          "An observed run finished at " + finishedAt + " (wall clock, not declared state); the view refreshed.";
       }
     } catch (error) {
       setError(error);

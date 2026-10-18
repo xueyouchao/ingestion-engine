@@ -42,12 +42,14 @@ never wipes; only `reset` deletes it.
 
 ~~~~bash
 PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo restore
-PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --engine docling --engine-command docling
-PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --engine docling --engine-command docling
-PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --engine docling --engine-command docling --min-characters 5000
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --search --engine docling --engine-command docling
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --search --engine docling --engine-command docling
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --search --engine docling --engine-command docling --min-characters 5000
 ~~~~
 
-The second run reuses all 18 Extractions and the third changes only the publish decision. Read
+`--search` is what asks the flow to declare `out/chunks/`; without it a run is pure curation and
+declares no chunk export (any stale one is retracted). The second run reuses all 18 Extractions and the
+third changes only the publish decision. Read
 [`docs/demo/pdf-demo-runbook.md`](docs/demo/pdf-demo-runbook.md) for the counters, the summary schema,
 the real Docling page evidence and the honest failures, and
 [`docs/demo/pdf-demo-corpus.md`](docs/demo/pdf-demo-corpus.md) for the pin.
@@ -70,8 +72,11 @@ It binds `127.0.0.1` by default; `--host` changes that only when you mean it.
 The explorer is a **view over completed declared outputs**: `out/run-summary.json`, `out/records/`,
 `out/pages/`, `out/excluded/` and the corpus manifest that maps a digest to `pdfs/<digest>.pdf`. It
 never writes, never curates, and never makes a second Deduplication or Publish Policy decision. Every
-counter it displays is the measured summary the flow declared. It polls `finished_at` and reloads after
-a completed update; there is no streaming or partial state. Only the configured output and corpus roots
+counter it displays is the measured summary the flow declared. Elapsed time is *not* in that declared
+file: it is observed beside the outputs in `out/last-run.json`, written by the command that ran the
+pipeline, labelled observed and never declared target state. The browser shows "not recorded" when that
+file is absent, and polls the observation's `finished_at` to reload after a completed update; there is no
+streaming or partial state. Only the configured output and corpus roots
 are reachable, and document keys and PDF digests are validated before any file is opened, so a URL
 cannot name an arbitrary path. The default page is static HTML/CSS/JS served by Python's standard
 library; no extra dependency is needed.
@@ -132,6 +137,19 @@ vllm serve PaddlePaddle/PaddleOCR-VL-1.6 --trust-remote-code
 
 vllm serve opendatalab/MinerU2.5-Pro-2605-1.2B --logits-processors mineru_vl_utils:MinerULogitsProcessor
 .venv/bin/finepdfs run --engine mineru --base-url http://127.0.0.1:8000
+~~~~
+
+### Installing Docling (CPU)
+
+Docling is an **optional** extra, never a base dependency: the base install stays model-free and the
+default test suite needs no weights. The extra is pinned to the version the demo was rehearsed with,
+and no torch pin is listed there because Docling brings its own -- install a CPU build explicitly when
+there is no GPU:
+
+~~~~bash
+.venv/bin/pip install -e ".[docling]"        # docling==2.140.0
+.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+docling --version                            # check what you actually got
 ~~~~
 
 ### Docling page mapping
@@ -248,27 +266,34 @@ nothing was published, so an operator or a CI can tell "engine is down" from "no
 | `FINEPDFS_MIN_CHARACTERS` | `200` | publish minimum |
 | `FINEPDFS_LANGUAGES` | all | comma-separated allow-list in the codes the chosen adapter emits: `eng,spa` under `fasttext`, `Latn,Grek` under `script` |
 | `FINEPDFS_SIMILARITY_THRESHOLD` | `0.8` | fingerprint similarity above which one document is a near-duplicate of another |
+| `FINEPDFS_SEARCH` | unset (off) | `1`/`true` also declares `out/chunks/`; a run without it declares no chunk export and retracts a stale one, and `run --search` sets it |
 | `FINEPDFS_GPU_PROVIDER` | `none` | where a GPU engine runs: `none`, `static`, or `command` that rents one |
 | `FINEPDFS_GPU_BASE_URL` / `_MODEL` / `_API_KEY` | `FINEPDFS_ENGINE_*` | with `static`: where the GPU server is; each falls back to its `FINEPDFS_ENGINE_*` namesake |
 | `FINEPDFS_GPU_DETAIL` | `static:<model>`, or `static` without a model | with `static`: the memo name when `FINEPDFS_ENGINE_DETAIL` is not set; the model names the deployment, never the address (ADR-0007) |
 | `FINEPDFS_GPU_START_COMMAND` | -- | with `command`: starts a worker and prints its endpoint on stdout |
 | `FINEPDFS_GPU_STOP_COMMAND` | -- | with `command`: gives the worker back when the run ends |
 | `FINEPDFS_GPU_TIMEOUT` | `1800` | seconds allowed to start or stop a worker |
-| `FINEPDFS_SEARCH_INDEX` | `out/search.db` | the local full-text index `finepdfs search` reads |
+| `FINEPDFS_SEARCH_INDEX` | `out/search.db` | the local full-text index `finepdfs search`, `index-search`, `explore` and `ask` read; one resolver (`interfaces/search_paths.py`) applies the same precedence everywhere: `--index`, then this variable, then `<out>/search.db` |
 
 ## Output layout
 
 ~~~~
 out/
-  run-summary.json       this run's measured counters, declared by the flow (schema version 1)
+  run-summary.json       this run's counters, declared by the flow: reproducible bytes, no timing
+  last-run.json          observed wall-clock timing, written by the command, never declared
   docs/<key>.md          cleaned text of one published document
   records/<key>.json     url, digest, engine, routing decision, language, counts
   pages/<key>.jsonl      one accepted page per line: doc_id, source_url, digest, page_number, text, engine
-  chunks/<key>.jsonl     deterministic chunks of those pages, for local lexical search
+  chunks/<key>.jsonl     deterministic chunks of those pages, only when search is enabled
   excluded/<key>.json    kind (exact-duplicate | near-duplicate | dropped | failed) and the reason
   dedupe/kept.jsonl      the URLs this run decided to publish
   dedupe/duplicates.jsonl  every duplicate, what it duplicates and how alike they are
 ~~~~
+
+`run-summary.json` is deterministic for the same corpus, policy and state: an unchanged rerun rewrites
+the same bytes, which is what ADR-0006's "run again: no changes" means. Timing, host paths and lease data
+never enter it; `last-run.json` holds the observation the command made, is not declared target state,
+and is absent when a run was not wrapped by the CLI or the demo.
 
 `<key>` is the first 16 hex digits of the SHA-256 of the document URL, so a document never collides with
 another and two runs write the same names. The same key is the `doc_id` of that document's page records:
@@ -288,21 +313,31 @@ deployment could be made stable in time, and the source spec allows exactly this
 shipping both backends is not an option (ADR-0008). There are no embeddings.
 
 ~~~~bash
+# a run that also declares chunks: chunks exist only when search is enabled
+.venv/bin/finepdfs run --corpus corpus --out out --search
+
 # rebuild the index from the currently declared chunk files (idempotent)
 .venv/bin/finepdfs index-search --out out --index out/search.db
 
 # read the same contract the browser and the agent consume
-.venv/bin/finepdfs search --index out/search.db "dropwindsonde"
-.venv/bin/finepdfs search --index out/search.db --language Latn --top-k 5 --json "storm"
+.venv/bin/finepdfs search --out out "dropwindsonde"
+.venv/bin/finepdfs search --out out --language Latn --top-k 5 --json "storm"
 ~~~~
 
 A hit carries `doc_id`, `chunk_id`, source URL, PDF digest, the original 1-based page number, chunk
 offsets/ordinal, Engine Identity, language, `text`, a highlighted `snippet` and a BM25 `score`. The
 application seam is `SearchAcceptedEvidence.search(...)` (browser) and
-`search_pdfs(index, query, filters, top_k)` (agent); the adapter is
+`search_pdfs(index, declared, query, filters, top_k)` (agent), where `declared` reads the current
+declared chunk set so neither caller can answer from a stale index; the adapter is
 `infrastructure/search/sqlite_fts.py`. Chunks are page-local, versioned (`CHUNKING_VERSION`) and
-declared as target state, so a replacement, fewer pages, an exclusion or a removed Crawl Record
-retracts the obsolete chunks; re-running `index-search` retracts their rows. See
+declared as target state only when a run enabled search, so a replacement, fewer pages, an exclusion
+or a removed Crawl Record retracts the obsolete chunks; re-running `index-search` retracts their rows.
+
+The index records a fingerprint of the declared chunk set it was built from, and every read compares
+that with the current set. A stale index, an empty index, a 0-byte index and a missing one are all
+reported as `available: false` with the reason and "run `index-search`" -- never as a shorter hit list,
+and never as stale text. Reading opens SQLite with `mode=ro` and creates nothing, so serving the
+explorer cannot rebuild a database or become a second writer; only `index-search` writes. See
 [ADR-0008](docs/adr/0008-one-local-search-backend.md) and the
 [demo runbook](docs/demo/pdf-demo-runbook.md#search-accepted-evidence-the-local-fallback).
 
@@ -361,6 +396,6 @@ the whole crawl.
 * [`docs/demo/pdf-demo-corpus.md`](docs/demo/pdf-demo-corpus.md) -- the pinned 19-record / 18-Document Corpus and what it does not demonstrate
 * [`docs/demo/pdf-demo-runbook.md`](docs/demo/pdf-demo-runbook.md) -- the rehearsal: commands, versions, measured runs, OCR page evidence, mutations and limitations
 * `docs/GLOSSARY.md` -- the vocabulary, kept deliberately small
-* `docs/adr/0001..0007` -- the decisions, with the alternatives that lost
+* `docs/adr/0001..0008` -- the decisions, with the alternatives that lost
 * `research/` -- the research behind the design, including `paddleocr-vl-mineru-adapters.md`
 * `research/diagrams/` -- validated architecture diagrams of the FinePDFs pipeline

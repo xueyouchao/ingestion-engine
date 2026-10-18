@@ -74,12 +74,39 @@ class SearchHit:
         }
 
 
+class SearchUnavailable(Exception):
+    """The index cannot answer right now: absent, empty, schema-less or built from other evidence.
+
+    It is a state of derived state, not a failure of the query. A reader answers it with an explicit
+    unavailable result naming what to run, never with hits from an index it cannot vouch for.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class IndexState:
+    """What the index says about itself: the declared-evidence fingerprint it mirrors and its size."""
+
+    fingerprint: str | None
+    chunks: int
+
+
 @dataclass(frozen=True, slots=True)
 class SearchResults:
-    """The hits for one query, in score order."""
+    """The hits for one query, in score order -- or the reason there are none to trust.
+
+    ``available`` is false when the index is absent, empty, schema-less or stale. Then ``hits`` is
+    empty and ``reason`` says what state the reader is in and what to run: an unavailable answer is
+    never dressed up as "no matches".
+    """
 
     query: SearchQuery
     hits: tuple[SearchHit, ...]
+    available: bool = True
+    reason: str = ""
+
+    @classmethod
+    def unavailable(cls, query: SearchQuery, reason: str) -> SearchResults:
+        return cls(query=query, hits=(), available=False, reason=reason)
 
     @property
     def total(self) -> int:
@@ -87,6 +114,8 @@ class SearchResults:
 
     def as_json(self) -> dict:
         return {
+            "available": self.available,
+            "reason": self.reason,
             "query": self.query.text,
             "filters": {
                 "language": self.query.filters.language,

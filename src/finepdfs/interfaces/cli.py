@@ -39,7 +39,7 @@ from finepdfs.infrastructure.compute.providers import (
     UnknownGpuProvider,
     leased_environment,
 )
-from finepdfs.infrastructure.corpus.fetch import fetch_corpus, restore_corpus
+from finepdfs.infrastructure.corpus.fetch import fetch_corpus
 from finepdfs.infrastructure.corpus.index import CorpusIndex
 from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifest
 from finepdfs.infrastructure.engines.registry import KNOWN_ENGINES
@@ -47,14 +47,16 @@ from finepdfs.infrastructure.llm.chat_completions import ChatCompletionsClient, 
 from finepdfs.infrastructure.publishing.disk import DiskPageReader, PublishedCorpus
 from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
 from finepdfs.interfaces import explorer as explorer_module
+from finepdfs.interfaces import search_paths
+from finepdfs.interfaces.restore import restore_pinned_corpus
+from finepdfs.interfaces.run_log import RunClock, read_observed_run, write_observed_run
 from finepdfs.interfaces.summary import format_run_summary
 
 DEFAULT_CORPUS = Path("corpus")
 DEFAULT_OUT = Path("out")
-# The index layout name has one owner, the explorer that reads it; `index-search` writes the same one.
-SEARCH_INDEX_NAME = explorer_module.SEARCH_INDEX_NAME
-DEFAULT_SEARCH_INDEX = DEFAULT_OUT / SEARCH_INDEX_NAME
-SEARCH_INDEX_VARIABLE = "FINEPDFS_SEARCH_INDEX"
+# The index path has one resolver (interfaces/search_paths.py) shared by index-search, search, explore
+# and ask, so FINEPDFS_SEARCH_INDEX means the same thing to all four.
+DEFAULT_SEARCH_INDEX = search_paths.DEFAULT_OUT / search_paths.SEARCH_INDEX_NAME
 ASK_API_KEY = "FINEPDFS_ASK_API_KEY"
 
 # Flag name to environment variable. "engine_command" is deliberately not called "command": a
@@ -73,6 +75,7 @@ ENVIRONMENT_FOR_ENGINE = {
     "engine_detail": ENGINE_DETAIL,
     "dpi": "FINEPDFS_ENGINE_DPI",
     "similarity_threshold": "FINEPDFS_SIMILARITY_THRESHOLD",
+    "search": "FINEPDFS_SEARCH",
     "gpu_provider": GPU_PROVIDER,
     "gpu_start_command": GPU_START_COMMAND,
     "gpu_stop_command": GPU_STOP_COMMAND,
@@ -102,6 +105,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = commands.add_parser("run", help="run the incremental CocoIndex pipeline")
     _add_engine_arguments(run, out=True)
+    run.add_argument(
+        "--search",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="also declare searchable chunks (out/chunks); a run without it declares none",
+    )
 
     explore = commands.add_parser(
         "explore", help="serve a read-only local browser over completed declared outputs"
@@ -112,7 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--index",
         type=Path,
         default=None,
-        help=f"the search index the page reads; default is <out>/{SEARCH_INDEX_NAME}",
+        help=f"the search index the page reads; default is <out>/{search_paths.SEARCH_INDEX_NAME}",
     )
     explore.add_argument("--host", default=explorer_module.DEFAULT_HOST)
     explore.add_argument("--port", type=int, default=explorer_module.DEFAULT_PORT)
@@ -126,12 +135,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--out", type=Path, default=None, help="the published output directory the flow declared"
     )
     index_search.add_argument(
-        "--index", type=Path, default=None, help=f"the index to write; default is <out>/{SEARCH_INDEX_NAME}"
+        "--index", type=Path, default=None,
+        help=f"the index to write; default is $FINEPDFS_SEARCH_INDEX or <out>/{search_paths.SEARCH_INDEX_NAME}",
     )
 
     search = commands.add_parser("search", help="search accepted evidence in the local lexical index")
     search.add_argument(
-        "--index", type=Path, default=None, help=f"the index to read; default is {DEFAULT_SEARCH_INDEX}"
+        "--out",
+        type=Path,
+        default=None,
+        help="the published output directory holding the declared chunks the index must match",
+    )
+    search.add_argument(
+        "--index",
+        type=Path,
+        default=None,
+        help=f"the index to read; default is $FINEPDFS_SEARCH_INDEX or <out>/{search_paths.SEARCH_INDEX_NAME}",
     )
     search.add_argument("--top-k", dest="top_k", type=int, default=DEFAULT_TOP_K, help="maximum hits to return")
     search.add_argument("--language", default=None, help="only chunks whose language tag is this")
@@ -154,7 +173,10 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--model", required=True, help="the chat model name the endpoint serves")
     ask.add_argument("--out", type=Path, default=DEFAULT_OUT, help="the published output directory")
     ask.add_argument(
-        "--index", type=Path, default=None, help=f"the index to read; default is <out>/{SEARCH_INDEX_NAME}"
+        "--index",
+        type=Path,
+        default=None,
+        help=f"the index to read; default is $FINEPDFS_SEARCH_INDEX or <out>/{search_paths.SEARCH_INDEX_NAME}",
     )
     ask.add_argument(
         "--top-k",
@@ -282,23 +304,21 @@ def _dispatch(args: argparse.Namespace) -> int:
 
 
 def _search_index_path(args: argparse.Namespace) -> Path:
-    """Where the fallback index lives: the flag, else the output directory's own default, else the env."""
-    if args.index is not None:
-        return args.index
-    out_dir = getattr(args, "out", None)
-    if out_dir is not None:
-        return out_dir / SEARCH_INDEX_NAME
-    return Path(os.environ.get(SEARCH_INDEX_VARIABLE, DEFAULT_SEARCH_INDEX))
+    """The index path all four search commands share; see interfaces/search_paths.py."""
+    return search_paths.resolve_search_index(
+        out=getattr(args, "out", None), index=getattr(args, "index", None)
+    )
 
 
 def _index_search(args: argparse.Namespace) -> int:
     """Rebuild the local index from the declared chunk files: store the current set, delete the rest."""
-    out_dir = args.out if args.out is not None else Path(os.environ.get("FINEPDFS_OUT", DEFAULT_OUT))
+    out_dir = search_paths.resolve_out_dir(args.out)
     if not out_dir.is_dir():
         print(f"no published output at {out_dir}; run the pipeline first", file=sys.stderr)
         return 2
     index_path = _search_index_path(args)
-    report = reindex_search(SqliteFtsSearchIndex(index_path), PublishedCorpus(out_dir).read_chunks())
+    declared = PublishedCorpus(out_dir).read_declared_chunks()
+    report = reindex_search(SqliteFtsSearchIndex(index_path), declared)
     print(f"indexed {report.upserted} of {report.chunks} chunks from {report.documents} documents into {index_path}")
     if report.removed:
         print(f"  retracted {report.removed} chunks that are no longer declared")
@@ -310,13 +330,16 @@ def _index_search(args: argparse.Namespace) -> int:
 def _search(args: argparse.Namespace) -> int:
     """Read the shared contract from the terminal; the browser and the agent call the same reader."""
     index_path = _search_index_path(args)
-    if not index_path.exists():
-        print(f"no search index at {index_path}; run finepdfs index-search first", file=sys.stderr)
-        return 2
+    out_dir = search_paths.resolve_out_dir(args.out)
     query = " ".join(args.query)
     filters = SearchFilters(language=args.language, engine=args.engine, doc_id=args.doc_id)
-    results = search_pdfs(SqliteFtsSearchIndex(index_path), query, filters, args.top_k)
+    declared = PublishedCorpus(out_dir).read_declared_chunks
+    results = search_pdfs(SqliteFtsSearchIndex(index_path), declared, query, filters, args.top_k)
 
+    if not results.available:
+        # A missing, empty or stale index is an operator state, not a hit list: no stale text is printed.
+        print(f"{results.reason} (index: {index_path})", file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(results.as_json(), indent=2))
         return 0
@@ -333,7 +356,7 @@ def _search(args: argparse.Namespace) -> int:
 
 def _ask(args: argparse.Namespace) -> int:
     """Ask the accepted evidence through two bounded tools and an OpenAI-compatible chat endpoint."""
-    index_path = args.index if args.index is not None else args.out / SEARCH_INDEX_NAME
+    index_path = _search_index_path(args)
     if not index_path.is_file():
         print(f"no search index at {index_path}; run finepdfs index-search first", file=sys.stderr)
         return 2
@@ -349,6 +372,7 @@ def _ask(args: argparse.Namespace) -> int:
         tools = AcceptedEvidenceTools(
             SqliteFtsSearchIndex(index_path),
             DiskPageReader(args.out),
+            PublishedCorpus(args.out).read_declared_chunks,
             default_top_k=args.top_k,
         )
         client = ChatCompletionsClient(args.base_url, args.model, api_key=api_key)
@@ -432,18 +456,7 @@ def _fetch_corpus(args: argparse.Namespace) -> int:
 def _restore_corpus(args: argparse.Namespace) -> int:
     """Replay a committed manifest; a pinned record that cannot be restored is a visible failure."""
     corpus_dir = _runtime_from_args(args).corpus_dir
-    pinned = CorpusManifest.load(args.manifest)
-    if not pinned.entries:
-        print(f"no pinned manifest at {args.manifest} (or it lists no entries)", file=sys.stderr)
-        return 2
-
-    print(f"restoring {len(pinned.entries)} pinned PDFs from {pinned.crawl_id} into {corpus_dir}")
-    report = restore_corpus(CommonCrawlSource(), pinned, corpus_dir)
-
-    print(report.summary())
-    for failure in report.failures:
-        print(f"  failed: {failure.url} ({failure.reason})")
-    return 1 if report.failed else 0
+    return restore_pinned_corpus(args.manifest, corpus_dir)
 
 
 def _inspect(args: argparse.Namespace) -> int:
@@ -570,15 +583,20 @@ def _run(args: argparse.Namespace) -> int:
         print("  fetch one with finepdfs fetch-corpus, or pass --allow-empty to mean it", file=sys.stderr)
         return 2
 
+    # The clock belongs to the command, not the flow: what it measures is an observation beside the
+    # declared outputs, so an unchanged rerun still rewrites `run-summary.json` byte for byte.
+    clock = RunClock()
     with coco.runtime():
         build_app().update_blocking(report_to_stdout=True)
+    observed = write_observed_run(runtime.out_dir, clock.stop())
 
     published = PublishedCorpus(runtime.out_dir)
     records = published.read_records()
     exclusions = published.read_exclusions()
     summary = published.read_summary()
     if summary is not None:
-        print(format_run_summary(summary))
+        print(format_run_summary(summary, read_observed_run(runtime.out_dir)))
+        print(f"observed timing: {observed} (not declared target state)")
     else:
         failed = sum(1 for exclusion in exclusions if exclusion.get("kind") == "failed")
         print(
@@ -590,7 +608,7 @@ def _run(args: argparse.Namespace) -> int:
 
 def _explore(args: argparse.Namespace) -> int:
     """Serve the completed outputs read-only; an absent run summary is a clean refusal."""
-    index_path = args.index if args.index is not None else args.out / SEARCH_INDEX_NAME
+    index_path = _search_index_path(args)
     try:
         explorer = explorer_module.explorer_for(args.out, args.corpus, index_path=index_path)
     except explorer_module.ExplorerError as error:

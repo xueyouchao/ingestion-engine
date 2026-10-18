@@ -20,8 +20,9 @@ from finepdfs.application.agent import (
     run_agent,
 )
 from finepdfs.application.search import reindex_search
-from finepdfs.domain.chunks import chunk_page_records
+from finepdfs.domain.chunks import DeclaredChunkSet, chunk_page_records
 from finepdfs.domain.publishing import PageRecord
+from finepdfs.domain.search import IndexState
 from finepdfs.infrastructure.corpus.index import document_key
 from finepdfs.infrastructure.publishing.disk import DiskPageReader
 from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
@@ -29,6 +30,11 @@ from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
 URL = "https://a.example/one.pdf"
 DUPLICATE_URL = "https://a.example/duplicate.pdf"
 DIGEST = "1" * 64
+
+
+# The tools refuse to answer from an index that does not mirror the declared evidence, so every fake
+# index reports the fingerprint of the declared set the tools were given.
+NO_DECLARED = DeclaredChunkSet.of(())
 
 
 class RecordingIndex:
@@ -42,6 +48,12 @@ class RecordingIndex:
 
     def retain(self, chunk_ids):  # pragma: no cover - the tool never writes
         return 0
+
+    def record_freshness(self, fingerprint):  # pragma: no cover - the tool never writes
+        pass
+
+    def state(self):
+        return IndexState(fingerprint=NO_DECLARED.fingerprint, chunks=1)
 
     def search(self, query):
         self.queries.append(query)
@@ -137,15 +149,21 @@ def _tools(out: Path, *, top_k: int = 3) -> AcceptedEvidenceTools:
             (2, "a storm flight identifier"),
         )
     )
-    chunks = tuple(chunk for page in pages for chunk in chunk_page_records((page,), language="eng"))
+    declared = DeclaredChunkSet.of(
+        chunk for page in pages for chunk in chunk_page_records((page,), language="eng")
+    )
     index = SqliteFtsSearchIndex(out / "search.db")
-    reindex_search(index, chunks)
-    return AcceptedEvidenceTools(index, DiskPageReader(out), default_top_k=top_k, max_top_k=5)
+    reindex_search(index, declared)
+    return AcceptedEvidenceTools(
+        index, DiskPageReader(out), lambda: declared, default_top_k=top_k, max_top_k=5
+    )
 
 
 def test_search_tool_passes_query_filters_and_top_k_through_the_shared_contract() -> None:
     index = RecordingIndex()
-    tools = AcceptedEvidenceTools(index, DiskPageReader(Path("/nowhere")), default_top_k=4, max_top_k=6)
+    tools = AcceptedEvidenceTools(
+        index, DiskPageReader(Path("/nowhere")), lambda: NO_DECLARED, default_top_k=4, max_top_k=6
+    )
 
     result = tools.call(
         "search_pdfs",
@@ -164,16 +182,16 @@ def test_search_tool_passes_query_filters_and_top_k_through_the_shared_contract(
 
 def test_a_requested_top_k_is_bounded_by_the_tool(tmp_path) -> None:
     out, _key, _duplicate = _accepted_output(tmp_path)
-    tools = AcceptedEvidenceTools(SqliteFtsSearchIndex(out / "search.db"), DiskPageReader(out), max_top_k=5)
-    reindex_search(
-        SqliteFtsSearchIndex(out / "search.db"),
-        tuple(
-            chunk
-            for page in (
-                PageRecord(document_key(URL), URL, DIGEST, 1, "alpine alpine alpine", "pymupdf@1"),
-            )
-            for chunk in chunk_page_records((page,), language="eng")
-        ),
+    declared = DeclaredChunkSet.of(
+        chunk
+        for page in (
+            PageRecord(document_key(URL), URL, DIGEST, 1, "alpine alpine alpine", "pymupdf@1"),
+        )
+        for chunk in chunk_page_records((page,), language="eng")
+    )
+    reindex_search(SqliteFtsSearchIndex(out / "search.db"), declared)
+    tools = AcceptedEvidenceTools(
+        SqliteFtsSearchIndex(out / "search.db"), DiskPageReader(out), lambda: declared, max_top_k=5
     )
 
     result = tools.call("search_pdfs", {"query": "alpine", "top_k": 50})
@@ -242,7 +260,9 @@ def test_the_read_tool_refuses_stale_evidence_after_a_removal(tmp_path) -> None:
 
 
 def test_the_tools_expose_openai_function_schemas_without_a_backend_name() -> None:
-    tools = AcceptedEvidenceTools(RecordingIndex(), DiskPageReader(Path("/nowhere")))
+    tools = AcceptedEvidenceTools(
+        RecordingIndex(), DiskPageReader(Path("/nowhere")), lambda: NO_DECLARED
+    )
 
     schemas = {schema["function"]["name"]: schema for schema in tools.schemas}
 
@@ -461,7 +481,11 @@ def test_an_empty_question_is_rejected_before_any_model_call() -> None:
     model = FakeChatModel([])
 
     with pytest.raises(ValueError, match="question"):
-        run_agent("   ", model, AcceptedEvidenceTools(RecordingIndex(), DiskPageReader(Path("/nowhere"))))
+        run_agent(
+            "   ",
+            model,
+            AcceptedEvidenceTools(RecordingIndex(), DiskPageReader(Path("/nowhere")), lambda: NO_DECLARED),
+        )
 
     assert model.requests == []
 
@@ -592,3 +616,25 @@ def test_an_answer_with_no_verified_citation_becomes_insufficient_evidence(tmp_p
     assert answer.answer.startswith("INSUFFICIENT EVIDENCE")
     assert f"{key} p.2" not in answer.answer
     assert len(model.requests) == 3, "one repair turn, then the contract refuses the answer"
+
+
+def test_the_search_tool_refuses_stale_evidence_instead_of_returning_it(tmp_path) -> None:
+    """The agent may not return stale hits either: an out-of-date index is an explicit unavailable."""
+    out, _key, _duplicate = _accepted_output(tmp_path)
+    declared = DeclaredChunkSet.of(
+        chunk
+        for page in (
+            PageRecord(document_key(URL), URL, DIGEST, 1, "alpine meteorology", "pymupdf@1"),
+        )
+        for chunk in chunk_page_records((page,), language="eng")
+    )
+    reindex_search(SqliteFtsSearchIndex(out / "search.db"), declared)
+    tools = AcceptedEvidenceTools(
+        SqliteFtsSearchIndex(out / "search.db"), DiskPageReader(out), lambda: DeclaredChunkSet.of(())
+    )
+
+    result = tools.call("search_pdfs", {"query": "alpine"})
+
+    assert result["available"] is False
+    assert result["hits"] == [], "no stale chunk text reaches the model"
+    assert "index-search" in result["reason"]

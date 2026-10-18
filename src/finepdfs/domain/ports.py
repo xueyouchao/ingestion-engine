@@ -13,7 +13,7 @@ from finepdfs.domain.chunks import Chunk
 from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, TextLayerQuality
 from finepdfs.domain.language import PageLanguage
-from finepdfs.domain.search import IndexFailure, SearchHit, SearchQuery
+from finepdfs.domain.search import IndexFailure, IndexState, SearchHit, SearchQuery
 
 
 class CrawlSource(Protocol):
@@ -59,6 +59,10 @@ class SearchIndex(Protocol):
     store; ``retain`` deletes every stored chunk whose id is not in the current declared set, which is
     how replacements, fewer pages, exclusions and removed sources stop being searchable. ``search``
     answers the shared contract.
+
+    ``record_freshness`` and ``state`` are how the index remembers which declared evidence it mirrors:
+    a reader compares that fingerprint with the current declared chunk set before trusting a hit.
+    ``state`` raises ``SearchUnavailable`` when the index cannot be read at all.
     """
 
     def upsert(self, chunks: Sequence[Chunk]) -> Sequence[IndexFailure]: ...
@@ -68,3 +72,11 @@ class SearchIndex(Protocol):
         ...
 
     def search(self, query: SearchQuery) -> Sequence[SearchHit]: ...
+
+    def record_freshness(self, fingerprint: str) -> None:
+        """Remember the fingerprint of the declared evidence this index now mirrors."""
+        ...
+
+    def state(self) -> IndexState:
+        """The fingerprint this index was built from and how many chunks it holds."""
+        ...

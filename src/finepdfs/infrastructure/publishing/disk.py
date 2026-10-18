@@ -14,7 +14,7 @@ import re
 from collections.abc import Iterable, Sequence
 
 from finepdfs.application.page_reads import KEY_PATTERN
-from finepdfs.domain.chunks import Chunk
+from finepdfs.domain.chunks import Chunk, DeclaredChunkSet
 from finepdfs.domain.dedup import DedupPlan
 from finepdfs.domain.publishing import DocumentRecord, PageRecord
 from finepdfs.infrastructure.corpus.index import document_key
@@ -81,18 +81,20 @@ class PublishedCorpus:
             for path in sorted((self._root / EXCLUDED).glob("*.json"))
         ]
 
-    def read_chunks(self) -> tuple[Chunk, ...]:
-        """Every currently declared chunk, the only input the search index is built from.
+    def read_declared_chunks(self) -> DeclaredChunkSet:
+        """Every currently declared chunk, plus the fingerprint naming exactly that evidence.
 
         An excluded, duplicated or removed Document declares no chunk file, so target state has
-        already retracted it before this reader runs: there is no second curation decision here.
+        already retracted it before this reader runs: there is no second curation decision here. The
+        fingerprint is what a search index records when it is rebuilt, so a reader can tell whether
+        the rows it would return still describe this set.
         """
         chunks: list[Chunk] = []
         for path in sorted((self._root / CHUNKS).glob("*.jsonl")):
             for line in path.read_text(encoding="utf-8").splitlines():
                 if line.strip():
                     chunks.append(Chunk.from_json(json.loads(line)))
-        return tuple(chunks)
+        return DeclaredChunkSet.of(chunks)
 
     def dedup_report_path(self, name: str) -> pathlib.Path:
         return self._root / DEDUPE / name

@@ -31,6 +31,7 @@ from typing import Protocol
 
 from finepdfs.application.page_reads import DeclaredPageReader, read_pdf_page
 from finepdfs.application.search import search_pdfs
+from finepdfs.domain.chunks import DeclaredChunkSet
 from finepdfs.domain.ports import SearchIndex
 from finepdfs.domain.search import SearchFilters
 
@@ -188,6 +189,7 @@ class AcceptedEvidenceTools:
         self,
         index: SearchIndex,
         pages: DeclaredPageReader,
+        declared: Callable[[], DeclaredChunkSet],
         *,
         default_top_k: int = DEFAULT_AGENT_TOP_K,
         max_top_k: int = MAX_AGENT_TOP_K,
@@ -198,6 +200,7 @@ class AcceptedEvidenceTools:
             raise ValueError(f"max_top_k {max_top_k} must be at least default_top_k {default_top_k}")
         self._index = index
         self._pages = pages
+        self._declared = declared
         self._default_top_k = default_top_k
         self._max_top_k = max_top_k
 
@@ -220,7 +223,7 @@ class AcceptedEvidenceTools:
                 raise ValueError(f"{TOOL_SEARCH} needs a non-empty query")
             filters = _filters(arguments.get("filters"))
             top_k = self._top_k(arguments.get("top_k"))
-            results = search_pdfs(self._index, text, filters, top_k)
+            results = search_pdfs(self._index, self._declared, text, filters, top_k)
         except ValueError as error:
             return {"error": str(error)}
         payload = results.as_json()

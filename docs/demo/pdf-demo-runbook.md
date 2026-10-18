@@ -39,15 +39,16 @@ interpreter it was built against (`head -1 .venv/bin/finepdfs`); an installed pa
 PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo restore
 
 # 2. first run: genuinely cold, with the real Docling engine for the two scans
-PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run \
+#    --search declares out/chunks/, which is what the search stages below index
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --search \
   --engine docling --engine-command docling
 
 # 3. unchanged rerun: same command, same state; must reuse all 18 Extractions
-PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run \
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --search \
   --engine docling --engine-command docling
 
 # 4. cheap policy change: a new publish floor, no new Extraction
-PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run \
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --search \
   --engine docling --engine-command docling --min-characters 5000
 
 # 5. what the demo holds and what the last run declared (runs nothing)
@@ -60,8 +61,9 @@ PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo reset
 Use `--root <dir>` on every command to rehearse in another directory. The commands above are the
 whole workflow; `restore` is the only step that reaches the network.
 
-Expected restore output (the same replay `finepdfs restore-corpus` performs, recorded in
-[`pdf-demo-corpus.md`](pdf-demo-corpus.md)):
+Expected restore output. `demo restore` and `finepdfs restore-corpus` now dispatch to one
+implementation (`src/finepdfs/interfaces/restore.py`), so there is no second replay to disagree with
+this text (recorded in [`pdf-demo-corpus.md`](pdf-demo-corpus.md)):
 
 ```text
 restoring 19 pinned PDFs from CC-MAIN-2026-39 into <root>/corpus
@@ -84,6 +86,14 @@ Check the tool versions; these are the answers on the rehearsal host:
 | `python -c "import easyocr; print(easyocr.__version__)"` | 1.7.2 |
 | `nproc`, `lscpu`, `free -g` | 4 vCPU (AMD EPYC 9354P), 15 GiB RAM, no GPU |
 
+Check the install with the documented commands rather than assuming it:
+
+```bash
+.venv/bin/pip install -e ".[docling]"        # pinned: docling==2.140.0, never a base dependency
+.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
 Docling was installed in an isolated CPU virtualenv, so the repository environment is untouched; the
 engine command is a local CLI (`--engine-command docling`), and its Engine Identity is
 `docling@cli:docling:v2.140.0` -- the basename plus the probed version, not the path. The EasyOCR and
@@ -105,12 +115,15 @@ covered below as the budget-driven local fallback over the same accepted records
 
 ## Measured runs
 
-The first three rows are the recorded rehearsal logs (Docling for the two scans, 18 Extractions);
-`elapsed` is the run summary's own measure, wall time is `time` around the command. "Calls" are
-actual engine calls (memo misses), "reused" are memo keys the reading pass asked for and served from
-CocoIndex's memo.
+The first three rows are the recorded rehearsal logs (Docling for the two scans, 18 Extractions).
+"Elapsed" is the observed wall-clock time of the run and "wall" is `time` around the whole command;
+at rehearsal time the observed elapsed was read from a field in `out/run-summary.json`, and this branch
+moves that observation out of the declared file into `out/last-run.json` (see
+[the run summary and the observed log](#the-run-summary-and-the-observed-log)). The numbers were
+measured then and are not re-measured here. "Calls" are actual engine calls (memo misses), "reused"
+are memo keys the reading pass asked for and served from CocoIndex's memo.
 
-| Run | What changed | Calls | Reused | Routing | Published | Exclusions | Summary elapsed | Wall |
+| Run | What changed | Calls | Reused | Routing | Published | Exclusions | Observed elapsed | Wall |
 | --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: |
 | cold | nothing (empty `state.db`) | 18 | 0 | native 16, ocr 2 | 17 docs / 313 pages | 2 (exact 1, near 1) | 133.8 s | 134.2 s |
 | unchanged | nothing | 0 | 18 | native 16, ocr 2 | 17 docs / 313 pages | 2 (exact 1, near 1) | 8.6 s | 9.0 s |
@@ -124,32 +137,42 @@ deciding pass and target-state apply, not in an engine.
 ### The demo command itself
 
 The command was exercised in both directions on the same host and Corpus. A genuinely cold run on a
-copied corpus with no state database took **148.6 s wall / 148.2 s summary elapsed, 18 calls,
+copied corpus with no state database took **148.6 s wall / 148.2 s observed elapsed, 18 calls,
 0 reused, 17 published, 313 page records, 2 exclusions** -- the same counters as the CLI cold run
 above, because it is the same CocoIndex flow; only the directory and environment handling belong to
 the command.
 
 A run on a warm copy (state database restored alongside the corpus, so no Extraction was needed)
-measured the command's own overhead: **8.7 s wall / 8.2 s summary elapsed, 0 calls, 18 reused,
+measured the command's own overhead: **8.7 s wall / 8.2 s observed elapsed, 0 calls, 18 reused,
 17 published, 313 page records, 2 exclusions**. A second unchanged run took **8.5 s wall / 8.2 s
-summary elapsed** and rewrote every output byte-for-byte except `out/run-summary.json`, whose
-timestamps necessarily change. This is the evidence that the demo command does not wipe the warm
-state: the second run did no engine work at all. The same warm root with `--min-characters 5000`
-reported **8.7 s wall / 8.3 s summary elapsed, 0 calls, 18 reused, 14 published, 308 page records and
-5 exclusions**, so the policy change above also holds through the command.
+observed elapsed** and rewrote every output byte-for-byte except `out/run-summary.json`, whose
+timestamps changed on that revision. That was the visible breach of "a published record must be
+reproducible": the declared file carried when the run happened, so no two runs could declare the same
+bytes. This branch removes the timing from the declared summary, so the same rerun now rewrites
+identical `run-summary.json` bytes and the observation lands in the non-declared `out/last-run.json`;
+`tests/infrastructure/test_run_summary.py` and `tests/interfaces/test_cli.py` pin that. This is
+evidence that the demo command does not wipe the warm state: the second run did no engine work at all.
+The same warm root with `--min-characters 5000` reported **8.7 s wall / 8.3 s observed elapsed,
+0 calls, 18 reused, 14 published, 308 page records and 5 exclusions**, so the policy change above also
+holds through the command.
 
-## The run summary
+## The run summary and the observed log
 
 Each run declares `out/run-summary.json` as target state -- the flow is the only writer. `finepdfs
 run` and `finepdfs-demo run` print a one-line view of that same file; `finepdfs-demo status` prints
 the last one. Nothing recomputes a counter from the output directory.
+
+The declared file is **reproducible**: it carries the counters of the corpus, policy and state it ran
+over, and nothing that changes when nothing changed. A rerun over the same state rewrites the same
+bytes. No timestamp, duration, host path or lease id is in it, which is what
+`CODING_STANDARDS.md`'s "a published record must be reproducible" and ADR-0006's "run again: no
+changes" require.
 
 Schema version 1:
 
 ```json
 {
   "schema_version": 1,
-  "run": {"started_at": "…Z", "finished_at": "…Z", "elapsed_seconds": 8.863},
   "corpus": {"crawl_id": "CC-MAIN-2026-39", "domain": "…", "crawl_records": 19, "documents": 18},
   "routing": {"documents": 18, "native": 16, "ocr": 2},
   "extraction": {"requested": 18, "calls": 0, "reused": 18},
@@ -159,20 +182,44 @@ Schema version 1:
 }
 ```
 
+Timing lives beside it in `out/last-run.json`, written by the command that ran the pipeline (never by
+the flow, so it is not declared target state and target-state apply neither writes nor retracts it):
+
+```json
+{
+  "observed": true,
+  "note": "observed wall-clock timing of one run; it is not declared target state and is not reproducible",
+  "started_at": "…Z",
+  "finished_at": "…Z",
+  "elapsed_seconds": 8.311
+}
+```
+
+A run that the CLI or the demo did not wrap (for example `cocoindex update main.py` by hand) leaves no
+such file, and the browser then shows elapsed as **not recorded** rather than zero. The file is
+labelled observed everywhere it is read or printed; the terminal line appends `elapsed 8.3s (observed)`
+only when one was recorded.
+
 Two things to read carefully:
 
 * `extraction.calls` is counted inside the memoised extract body, so it is one actual engine call and
   never a memo hit. `extraction.reused` is `requested - calls` over memo keys, i.e. observed reuse of
   the run's own work, not a CocoIndex component statistic. The two are deliberately different numbers
   from CocoIndex's "unchanged" line in the progress output.
-* `elapsed_seconds` measures the run up to the summary's declaration, before CocoIndex applies target
-  state. Wall time around the command is the number that includes the apply. `routing.documents`
-  counts routed Documents, so the exact-duplicate record that is skipped before routing is not in it;
-  `corpus.documents` is the distinct-digest count.
+* `elapsed_seconds` is in the observed log, not the summary, and measures the command around the run,
+  including CocoIndex's target-state apply. `routing.documents` counts routed Documents, so the
+  exact-duplicate record that is skipped before routing is not in it; `corpus.documents` is the
+  distinct-digest count.
 
 `exclusions.by_kind` always carries all four kinds (`dropped`, `failed`, `exact-duplicate`,
 `near-duplicate`) with zeros, so a reader can depend on the shape. The terminal line prints only the
 non-zero kinds.
+
+An exact duplicate only names a keeper that is actually published. If the digest keeper is itself a
+near-duplicate loser, its exact duplicates follow the keeper's near decision and name the published near
+keeper, with the same similarity; if the keeper was dropped or failed, the duplicate is declared with
+that same honest disposition and a reason naming the keeper, and no exact row is written. None of this
+adds an Extraction: the decision is made from decisions, never from more reading.
 
 ## Routing and the real OCR page evidence
 
@@ -298,8 +345,10 @@ if a real deployment is ever wanted it replaces this adapter rather than sitting
 
 ### What the flow declares
 
-Every published Document already declared its accepted Page Texts under `out/pages/<key>.jsonl`. It now
-also declares deterministic chunks under `out/chunks/<key>.jsonl`, one JSON object per line:
+Every published Document already declared its accepted Page Texts under `out/pages/<key>.jsonl`. When a
+run enables search (`--search`, or `FINEPDFS_SEARCH=1`) it also declares deterministic chunks under
+`out/chunks/<key>.jsonl`; a plain curation run declares no chunk export and retracts a stale one, per
+the spec's "chunks when search is enabled". One JSON object per line:
 
 ```json
 {"chunk_id": "0a1b2c3d4e5f60718293a4b5c6d7e8f9", "chunking_version": "chunking-v1",
@@ -318,9 +367,10 @@ Chunking rules (`chunking-v1`; bumping `CHUNKING_VERSION` changes every `chunk_i
   `text == page_text[start_offset:end_offset]`;
 * `ordinal` runs over the Document's chunks in page order.
 
-Pages and Markdown are unchanged by this. Because chunks are declared target state like the pages, a
-replacement with fewer pages, a Document that becomes an exclusion or duplicate, or a Crawl Record that
-leaves the manifest retracts the obsolete chunk files on the next run -- the index never has to guess.
+Pages and Markdown are unchanged by this, and they are declared with or without `--search`. Because
+chunks are declared target state like the pages, a replacement with fewer pages, a Document that becomes
+an exclusion or duplicate, or a Crawl Record that leaves the manifest retracts the obsolete chunk files
+on the next run -- the index never has to guess. Turning search off retracts them all.
 
 ### Commands
 
@@ -331,17 +381,38 @@ PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli index-search \
 
 # query it; metadata filters and JSON output use the same contract the browser and agent read
 PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli search \
-  --index .demo/out/search.db "dropwindsonde"
+  --out .demo/out --index .demo/out/search.db "dropwindsonde"
 
 PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli search \
-  --index .demo/out/search.db --language Latn --engine pymupdf@… --top-k 5 --json "storm"
+  --out .demo/out --index .demo/out/search.db --language Latn --engine pymupdf@… --top-k 5 --json "storm"
 ```
 
 `index-search` prints how many chunks were stored and how many were retracted, and exits 1 if any
 chunk failed to store (each failure names the `chunk_id` and the reason). `search` exits 2 when the
-index does not exist and prints no matches rather than an error when a valid query finds nothing. The
-index itself is derived state: it is not declared by the flow, so after a run that changes evidence,
-re-run `index-search` before searching.
+index is missing, empty or stale-- it never prints a hit it cannot vouch for -- and prints no matches
+rather than an error when a valid query finds nothing.
+
+One resolver (`src/finepdfs/interfaces/search_paths.py`) gives `index-search`, `search`, `explore` and
+`ask` the same index path: an explicit `--index`, else `FINEPDFS_SEARCH_INDEX`, else `<out>/search.db`.
+`search` also needs `--out` (or `FINEPDFS_OUT`) because it compares the index against the chunks that
+are declared there; before this helper `ask` ignored `FINEPDFS_SEARCH_INDEX` and each command resolved
+the path differently.
+
+The index is derived state, not declared by the flow, and it now records a **fingerprint of the
+declared chunk set it was built from**. Every read compares that fingerprint with the current declared
+set:
+
+* a replacement, a removal, an exclusion, a chunking-version bump or a run with search turned off makes
+  the index stale, and the answer is `available: false` with the reason and "run `index-search`" -- no
+  hits, and no stale text;
+* a missing index, an empty one and a 0-byte one are the same kind of answer;
+* a partial rebuild (a chunk that failed to store) deliberately leaves the index stale until a clean
+  rebuild, so a half-built index is never presented as current.
+
+Reading is strictly read-only: SQLite is opened with `mode=ro`, no schema is created and nothing is
+written, so serving the explorer cannot rebuild a database or become a second writer. Only
+`index-search` writes. `tests/infrastructure/test_search_index.py` and
+`tests/interfaces/test_explorer.py` pin the stale answers and that a 0-byte `search.db` stays 0 bytes.
 
 ### The contract
 
@@ -349,14 +420,17 @@ re-run `index-search` before searching.
 `chunk_id`, source URL, PDF digest, original page number, chunk offsets/ordinal, Engine Identity,
 language, `text`, a highlighted `snippet` (`<mark>…</mark>`) and a BM25 `score` (larger is better; only
 the ordering is meaningful). `finepdfs/application/search.py` exposes `SearchAcceptedEvidence.search(...)`
-for the browser and `search_pdfs(index, query, filters, top_k)` for the agent; both validate a
-non-empty query, bound `top_k` to 100 and accept the same `SearchFilters(language, engine, doc_id)`.
+for the browser and `search_pdfs(index, declared, query, filters, top_k)` for the agent; both validate a
+non-empty query, bound `top_k` to 100, accept the same `SearchFilters(language, engine, doc_id)` and
+refuse to answer from an index that does not mirror the current declared chunks, so the explorer and
+the agent cannot return stale hits either.
 The SQLite adapter lives in `finepdfs/infrastructure/search/sqlite_fts.py` and satisfies the
 `SearchIndex` port. `interfaces/explorer.py` reads this contract for the browser: `GET /api/search`
 takes `query`, optional `language`, `engine` and `doc_id` filters, and `top_k`, and returns the same
 `available`/`query`/`filters`/`total`/`hits` shape. The page has a search box and a results region; an
-absent index is an explicit `{"available": false, "reason": "... run finepdfs index-search ..."}` with
-no hits, and the view never builds or repairs the index it reads.
+absent, empty, schema-less or stale index is an explicit
+`{"available": false, "reason": "... run finepdfs index-search ..."}` with no hits, and the view never
+builds, migrates or repairs the index it reads.
 
 ```bash
 # the same read through the browser view; --index defaults to <out>/search.db
@@ -392,8 +466,10 @@ HTML.
 * **Query terms are OR'd** (each quoted as a literal) so a multi-word question still returns evidence;
   BM25 ranks chunks matching more terms higher. Punctuation is not FTS5 syntax, so it cannot break a
   query.
-* **The index is derived and local.** It must be rebuilt after a run; deleting it costs one
-  `index-search`, no Extraction.
+* **The index is derived and local.** It must be rebuilt after a run; until then it reports itself
+  stale instead of answering. Deleting it costs one `index-search`, no Extraction. Every read
+  re-derives the freshness fingerprint from the declared chunk files -- a directory read over a
+  few hundred small JSONL files for this Corpus, not a rebuild.
 * **Page reads are the agent's second tool.** `read_pdf_page(doc_id, page_number)` reads the declared
   page export, not Markdown and not the index; it refuses an absent, excluded, duplicate, unpublished,
   retracted or stale page explicitly. See [Agent tools](#agent-tools-search-and-inspect-accepted-pages).

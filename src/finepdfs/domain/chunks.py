@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 
 from finepdfs.domain.publishing import PageRecord
@@ -32,6 +32,39 @@ DEFAULT_CHUNK_CHARACTERS = 1200
 
 # A blank line: a newline, any whitespace and another newline. Paragraph text never includes it.
 _PARAGRAPH_BREAK = re.compile(r"\n\s*\n")
+
+
+@dataclass(frozen=True, slots=True)
+class DeclaredChunkSet:
+    """The chunks the flow currently declares, and a fingerprint naming exactly that evidence.
+
+    The fingerprint is what the search index records when it is built, so a reader can tell a current
+    index from one that predates a replacement, a removal or a chunking-version bump (ADR-0008). Keeping
+    the two fields together means a fingerprint can never be paired with a different chunk set.
+    """
+
+    chunks: tuple[Chunk, ...]
+    fingerprint: str
+
+    @classmethod
+    def of(cls, chunks: Iterable[Chunk]) -> DeclaredChunkSet:
+        items = tuple(chunks)
+        return cls(chunks=items, fingerprint=chunk_set_fingerprint(items))
+
+
+def chunk_set_fingerprint(chunks: Iterable[Chunk]) -> str:
+    """A stable digest of exactly this evidence: every chunk identity and every chunk text.
+
+    Identity alone would miss a replacement that kept the ids; text alone would miss a re-ordering.
+    Both, in ``chunk_id`` order, move whenever declared evidence changes and never when it does not.
+    """
+    digest = hashlib.sha256()
+    for chunk in sorted(chunks, key=lambda item: item.chunk_id):
+        digest.update(chunk.chunk_id.encode("utf-8"))
+        digest.update(b"\x1f")
+        digest.update(chunk.text.encode("utf-8"))
+        digest.update(b"\x1e")
+    return f"sha256:{digest.hexdigest()}"
 
 
 @dataclass(frozen=True, slots=True)

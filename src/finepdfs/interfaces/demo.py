@@ -23,10 +23,11 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
-from finepdfs.infrastructure.corpus.fetch import restore_corpus
 from finepdfs.infrastructure.corpus.manifest import CorpusManifest
 from finepdfs.infrastructure.engines.registry import KNOWN_ENGINES
 from finepdfs.infrastructure.publishing.disk import PublishedCorpus
+from finepdfs.interfaces.restore import restore_pinned_corpus
+from finepdfs.interfaces.run_log import RunClock, read_observed_run, write_observed_run
 from finepdfs.interfaces.summary import format_run_summary
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -67,6 +68,7 @@ def demo_environment(
     engine_command: str = "",
     min_characters: int | None = None,
     similarity_threshold: float | None = None,
+    search: bool = False,
 ) -> dict[str, str]:
     """The FINEPDFS_* values that point one run at the demo root and its warm database."""
     values = {
@@ -81,6 +83,8 @@ def demo_environment(
         values["FINEPDFS_MIN_CHARACTERS"] = str(min_characters)
     if similarity_threshold is not None:
         values["FINEPDFS_SIMILARITY_THRESHOLD"] = str(similarity_threshold)
+    # The demo's search stage needs the chunk export; a plain curation run does not declare it.
+    values["FINEPDFS_SEARCH"] = "1" if search else "0"
     return values
 
 
@@ -109,22 +113,8 @@ def restore_demo_corpus(
     *,
     source=None,
 ) -> int:
-    """Replay the pinned manifest into the demo corpus, the same command the CLI's restore-corpus runs."""
-    pinned = CorpusManifest.load(manifest_path)
-    if not pinned.entries:
-        print(f"no pinned manifest at {manifest_path} (or it lists no entries)", file=sys.stderr)
-        return 2
-    if source is None:
-        from finepdfs.infrastructure.commoncrawl.source import CommonCrawlSource
-
-        source = CommonCrawlSource()
-
-    print(f"restoring {len(pinned.entries)} pinned PDFs from {pinned.crawl_id} into {paths.corpus}")
-    report = restore_corpus(source, pinned, paths.corpus)
-    print(report.summary())
-    for failure in report.failures:
-        print(f"  failed: {failure.url} ({failure.reason})")
-    return 1 if report.failed else 0
+    """Replay the pinned manifest into the demo corpus through the same function restore-corpus uses."""
+    return restore_pinned_corpus(manifest_path, paths.corpus, source=source)
 
 
 @contextmanager
@@ -163,15 +153,19 @@ def run_demo(
     if runtime is not None:
         # A caller that built the run itself (a test, or a replay with a fixed engine) keeps it.
         flow.configure_runtime(runtime)
+    # The demo measures the run it started; the flow declares only the reproducible counters.
+    clock = RunClock()
     with _applied(values), coco.runtime():
         flow.build_app().update_blocking(report_to_stdout=True)
+    observed_log = write_observed_run(paths.out, clock.stop())
 
     published = PublishedCorpus(paths.out)
     summary = published.read_summary()
     if summary is None:
         print(f"the run declared no summary under {paths.out}", file=sys.stderr)
         return 1
-    print(format_run_summary(summary))
+    print(format_run_summary(summary, read_observed_run(paths.out)))
+    print(f"observed timing: {observed_log} (not declared target state)")
     records = published.read_records()
     exclusions = published.read_exclusions()
     return 1 if exclusions and not records else 0
@@ -193,7 +187,7 @@ def demo_status(paths: DemoPaths) -> int:
     if summary is None:
         print("  no run summary yet; run the demo to declare one", file=sys.stderr)
         return 0
-    print(f"  {format_run_summary(summary)}")
+    print(f"  {format_run_summary(summary, read_observed_run(paths.out))}")
     return 0
 
 
@@ -216,6 +210,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--engine-command", dest="engine_command", default="")
     run.add_argument("--min-characters", dest="min_characters", type=int, default=None)
     run.add_argument("--similarity-threshold", dest="similarity_threshold", type=float, default=None)
+    run.add_argument(
+        "--search",
+        action="store_true",
+        help="also declare searchable chunks, for the index-search and explore stages",
+    )
 
     reset = commands.add_parser("reset", help="delete the demo corpus, output and database explicitly")
     reset.add_argument("--root", type=Path, default=None)
@@ -238,6 +237,7 @@ def main(argv: list[str] | None = None) -> int:
             engine_command=args.engine_command,
             min_characters=args.min_characters,
             similarity_threshold=args.similarity_threshold,
+            search=args.search,
         )
         return run_demo(paths, values)
     if args.command == "reset":

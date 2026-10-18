@@ -177,9 +177,48 @@ def test_a_run_summary_counts_documents_routing_calls_publications_and_exclusion
         "by_kind": {"exact-duplicate": 1, "failed": 1, "dropped": 0, "near-duplicate": 0},
     }
     assert summary["engine"] == {"name": "docling", "identity": "docling@cli:docling:v2.140.0"}
-    assert summary["run"]["elapsed_seconds"] >= 0
-    assert summary["run"]["started_at"].endswith("Z")
     assert engines.native.calls == 1 and engines.ocr.calls == 1
+
+
+def test_two_identical_runs_declare_a_byte_identical_summary(monkeypatch, tmp_path, corpus) -> None:
+    """A published record must be reproducible: the same corpus, policy and warm state rewrite the same bytes.
+
+    A cold run is a different run by definition -- it made Extraction calls the warm one reuses -- so
+    "identical" means two runs over the same state, which is what ADR-0006's "run again: no changes" is.
+    """
+    out_dir = tmp_path / "out"
+    engines = _engines()
+
+    _run(monkeypatch, tmp_path, _runtime(corpus, out_dir, engines), "runs")
+    _run(monkeypatch, tmp_path, _runtime(corpus, out_dir, engines), "runs")
+    first = (out_dir / "run-summary.json").read_bytes()
+    _run(monkeypatch, tmp_path, _runtime(corpus, out_dir, engines), "runs")
+
+    assert (out_dir / "run-summary.json").read_bytes() == first
+    assert not (out_dir / "last-run.json").exists(), (
+        "the flow declares no timing log: observation belongs to the command wrapper, not target state"
+    )
+
+
+def test_the_declared_summary_carries_no_observation_of_when_the_run_happened(
+    monkeypatch, tmp_path, corpus
+) -> None:
+    out_dir = tmp_path / "out"
+    _run(monkeypatch, tmp_path, _runtime(corpus, out_dir, _engines()), "runs")
+
+    summary = _summary(out_dir)
+
+    assert set(summary) == {
+        "schema_version",
+        "corpus",
+        "routing",
+        "extraction",
+        "published",
+        "exclusions",
+        "engine",
+    }, "timing, host paths and lease data stay out of declared target state"
+    assert "started_at" not in json.dumps(summary)
+    assert "elapsed_seconds" not in json.dumps(summary)
 
 
 def test_an_unchanged_rerun_makes_zero_actual_extractions_and_reports_the_reuse(
@@ -258,7 +297,10 @@ def test_a_cheap_policy_change_reuses_extraction_and_updates_the_declared_output
     summary = _summary(out_dir)
     assert summary["extraction"] == {"requested": 2, "calls": 0, "reused": 2}
     assert summary["published"] == {"documents": 0, "page_records": 0}
-    assert summary["exclusions"]["by_kind"]["dropped"] == 2
+    assert summary["exclusions"]["by_kind"]["dropped"] == 3, (
+        "the exact duplicate inherits the dropped disposition of its unpublished digest keeper"
+    )
+    assert summary["exclusions"]["by_kind"]["exact-duplicate"] == 0
     assert not markdown_path.exists(), "the published Markdown the new policy rejects is retracted"
     exclusion = json.loads((out_dir / "excluded" / f"{document_key(NATIVE)}.json").read_text())
     assert exclusion["kind"] == "dropped"

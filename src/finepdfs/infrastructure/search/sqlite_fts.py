@@ -10,6 +10,11 @@ The index is built from the declared chunk files, never from the corpus: the flo
 writer of what is accepted, and this module only stores, deletes and ranks what the flow declared.
 Every row is one chunk, so the same chunk cannot appear twice; ``retain`` deletes the rows of chunks
 that are no longer declared.
+
+Two connections exist and they are deliberately different. ``upsert``/``retain``/``record_freshness``
+are the rebuild, run by the operator's ``index-search``, and may create schema. ``search``/``state`` are
+read-only: SQLite is opened with ``mode=ro``, no schema is created and nothing is written, so serving
+the explorer can never become a second writer or rebuild a database behind the flow's back.
 """
 
 from __future__ import annotations
@@ -19,9 +24,10 @@ import re
 import sqlite3
 from collections.abc import Collection, Iterator, Sequence
 from contextlib import contextmanager
+from urllib.parse import quote
 
 from finepdfs.domain.chunks import Chunk
-from finepdfs.domain.search import IndexFailure, SearchHit, SearchQuery
+from finepdfs.domain.search import IndexFailure, IndexState, SearchHit, SearchQuery, SearchUnavailable
 
 SNIPPET_START = "<mark>"
 SNIPPET_END = "</mark>"
@@ -65,6 +71,16 @@ CREATE TRIGGER IF NOT EXISTS chunks_after_update AFTER UPDATE ON chunks BEGIN
     INSERT INTO chunks_fts (chunks_fts, rowid, text) VALUES ('delete', old.id, old.text);
     INSERT INTO chunks_fts (rowid, text) VALUES (new.id, new.text);
 END;
+CREATE TABLE IF NOT EXISTS index_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+
+FRESHNESS_KEY = "declared_fingerprint"
+_FRESHNESS_UPSERT = """
+INSERT INTO index_meta (key, value) VALUES (:key, :value)
+ON CONFLICT (key) DO UPDATE SET value = excluded.value
 """
 
 _UPSERT = """
@@ -119,7 +135,7 @@ class SqliteFtsSearchIndex:
         """Store the chunks, idempotently, reporting every chunk that could not be stored."""
         failures: list[IndexFailure] = []
         seen: dict[str, Chunk] = {}
-        with self._connection() as connection:
+        with self._write_connection() as connection:
             for chunk in chunks:
                 previous = seen.get(chunk.chunk_id)
                 if previous is not None:
@@ -140,7 +156,7 @@ class SqliteFtsSearchIndex:
 
     def retain(self, chunk_ids: Collection[str]) -> int:
         """Delete every stored chunk whose id is not declared any more; return the number removed."""
-        with self._connection() as connection:
+        with self._write_connection() as connection:
             connection.execute("CREATE TEMP TABLE IF NOT EXISTS current_chunk_ids (chunk_id TEXT PRIMARY KEY)")
             connection.execute("DELETE FROM current_chunk_ids")
             connection.executemany(
@@ -177,12 +193,37 @@ class SqliteFtsSearchIndex:
         # ``bm25`` is negative and lower is better; order by it and flip the sign only for the report.
         sql += " ORDER BY rank, c.chunk_id LIMIT :top_k"
 
-        with self._connection() as connection:
-            rows = connection.execute(sql, parameters).fetchall()
+        with self._read_only_connection() as connection:
+            try:
+                rows = connection.execute(sql, parameters).fetchall()
+            except sqlite3.Error as error:
+                raise SearchUnavailable(f"the search index at {self._path} could not be read: {error}") from error
         return tuple(_hit(row) for row in rows)
 
+    def record_freshness(self, fingerprint: str) -> None:
+        """Record which declared evidence this index now mirrors; only the rebuild writes it."""
+        with self._write_connection() as connection:
+            connection.execute(_FRESHNESS_UPSERT, {"key": FRESHNESS_KEY, "value": fingerprint})
+
+    def state(self) -> IndexState:
+        """What the index mirrors, or ``SearchUnavailable`` naming the state and what to run."""
+        _require_readable(self._path)
+        with self._read_only_connection() as connection:
+            try:
+                row = connection.execute(
+                    "SELECT value FROM index_meta WHERE key = ?", (FRESHNESS_KEY,)
+                ).fetchone()
+                chunks = int(connection.execute("SELECT count(*) FROM chunks").fetchone()[0])
+            except sqlite3.Error as error:
+                raise SearchUnavailable(
+                    f"the search index at {self._path} is not a search index ({error});"
+                    " run finepdfs index-search"
+                ) from error
+        return IndexState(fingerprint=str(row[0]) if row else None, chunks=chunks)
+
     @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
+    def _write_connection(self) -> Iterator[sqlite3.Connection]:
+        """The rebuild's connection: it may create the schema, because index-search is its only caller."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self._path)
         try:
@@ -191,6 +232,28 @@ class SqliteFtsSearchIndex:
                 yield connection
         finally:
             connection.close()
+
+    @contextmanager
+    def _read_only_connection(self) -> Iterator[sqlite3.Connection]:
+        """A reader's connection: ``mode=ro``, no schema, no mkdir, nothing written."""
+        _require_readable(self._path)
+        uri = f"file:{quote(str(self._path), safe='/')}?mode=ro"
+        try:
+            connection = sqlite3.connect(uri, uri=True)
+        except sqlite3.Error as error:
+            raise SearchUnavailable(f"the search index at {self._path} could not be read: {error}") from error
+        try:
+            yield connection
+        finally:
+            connection.close()
+
+
+def _require_readable(path: pathlib.Path) -> None:
+    """The two states a reader can name before opening SQLite at all."""
+    if not path.is_file():
+        raise SearchUnavailable(f"no search index at {path}; run finepdfs index-search after a completed run")
+    if path.stat().st_size == 0:
+        raise SearchUnavailable(f"the search index at {path} is empty; run finepdfs index-search")
 
 
 def _parameters(chunk: Chunk) -> dict[str, object]:

@@ -28,7 +28,9 @@ The seam is the record contract, and the backend is behind it:
   1-based page number -- plus `chunk_id`, chunk offsets/ordinal, text, a highlighted snippet and the
   lexical score. No backend name appears in it.
 * `SearchIndex` in `finepdfs/domain/ports.py` is the write/read port: idempotent `upsert` that reports
-  every per-chunk failure, `retain` that deletes what is no longer declared, and `search`.
+  every per-chunk failure, `retain` that deletes what is no longer declared, `search`, and the freshness
+  pair `record_freshness`/`state`, where `state` reports the declared-evidence fingerprint the index
+  mirrors and raises `SearchUnavailable` when it cannot be read at all.
 * `finepdfs/application/search.py` owns the use cases: `reindex_search` makes the index exactly the
   declared chunk set, and `SearchAcceptedEvidence` / `search_pdfs` validate and answer a query. The
   browser and the agent call this, never a database.
@@ -53,6 +55,18 @@ The seam is the record contract, and the backend is behind it:
 * Every per-chunk failure is reported, and a retry is idempotent; `chunk_id` is the primary key, so a
   reindex cannot duplicate a hit, and `retain` retracts replacements, fewer pages, exclusions and
   removed Crawl Records.
+* "Only as fresh as the last `index-search`" is enforced, not documented: the rebuild records a
+  fingerprint of the declared chunk set, and every read compares it with the current set. A stale,
+  empty, schema-less or missing index is an explicit `available: false` with the reason and "run
+  `index-search`", never a shorter hit list and never stale text -- neither the explorer nor the agent
+  can serve one. A partial rebuild leaves the index stale on purpose.
+* Reading is read-only, by construction: the adapter opens SQLite with `mode=ro`, creates no schema and
+  writes nothing, so serving the explorer (or asking a question) cannot rebuild a database or become a
+  second writer. Only `index-search`, the operator's explicit rebuild, may write.
+* Chunks are declared only when a run enables search (`FINEPDFS_SEARCH`, `--search`), per the spec's
+  "chunks when search is enabled"; a plain curation run declares no chunk export and retracts a stale
+  one. The index path is resolved in one helper (`interfaces/search_paths.py`) shared by
+  `index-search`, `search`, `explore` and `ask`, honouring `FINEPDFS_SEARCH_INDEX`.
 
 ## Alternatives considered
 
