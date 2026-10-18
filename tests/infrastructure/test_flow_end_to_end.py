@@ -34,9 +34,16 @@ from finepdfs.infrastructure.language.script import ScriptLanguageIdentifier
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
+# Controlled fixtures, labelled in tests/fixtures/README.md. They exist to exercise failure and
+# language-policy paths that the real Corpus cannot currently demonstrate; they are not evidence of
+# extraction quality on real PDFs.
+INVALID_PDF = FIXTURES / "not_a_pdf.pdf"
+MIXED_LANGUAGE_PDF = FIXTURES / "mixed_language.pdf"
+
 ONE = "https://a.example/one.pdf"
 DUPLICATE = "https://b.example/one.pdf"
 BROKEN = "https://c.example/broken.pdf"
+MIXED = "https://d.example/mixed.pdf"
 
 SCANNED = TextLayerQuality(page_count=1, pages_with_text=0, character_count=0, garbled_ratio=0.0, image_dominated_pages=1)
 
@@ -67,7 +74,7 @@ class ScanningProbe:
 
 def _write_corpus(corpus_dir: Path) -> None:
     real_pdf = (FIXTURES / "warc_payload.bin").read_bytes()
-    broken = b"this file is not a pdf at all"
+    broken = INVALID_PDF.read_bytes()
     corpus_dir.mkdir(parents=True, exist_ok=True)
     (corpus_dir / "pdfs").mkdir(exist_ok=True)
 
@@ -572,6 +579,36 @@ def test_a_near_duplicate_is_excluded_and_stays_excluded(monkeypatch, tmp_path) 
     assert engine.calls == 2, "one call per document, and none on the second run"
     assert not (out_dir / "docs" / f"{document_key(NEAR)}.md").exists(), "a re-run must not resurrect it"
     assert _exclusion(out_dir, NEAR)["kind"] == "near-duplicate"
+
+
+def test_a_controlled_mixed_language_document_drops_the_page_in_the_other_script(
+    monkeypatch, tmp_path
+) -> None:
+    """Controlled provenance, not real extraction quality.
+
+    ``tests/fixtures/mixed_language.pdf`` is three pages built for this test: English and Spanish
+    (both Latin script) and Russian (Cyrillic). It covers the mixed-language case the pinned
+    Corpus does not contain. Under the default ``script`` Language Mode the two Latin pages are
+    both ``Latn``, so the policy cannot separate English from Spanish, but the Cyrillic page is a
+    different script and is dropped. The record and Markdown must both show the drop; a fastText
+    mode with its model present is what would name the two Latin-script languages separately.
+    """
+    corpus_dir = tmp_path / "corpus"
+    _write_near_duplicate_corpus(
+        corpus_dir, (_Entry(url=MIXED, body=MIXED_LANGUAGE_PDF.read_bytes()),)
+    )
+
+    _run(monkeypatch, tmp_path, _runtime(corpus_dir, tmp_path / "out"), "runs")
+
+    record = _record(tmp_path / "out", MIXED)
+    assert record["language"] == "Latn"
+    assert record["page_count"] == 3
+    assert record["accepted_pages"] == 2
+    assert record["dropped_pages"] == 1
+    markdown = (tmp_path / "out" / "docs" / f"{document_key(MIXED)}.md").read_text()
+    assert "English" in markdown
+    assert "español" in markdown
+    assert "Чесапикского" not in markdown, "the Cyrillic page is not published"
 
 
 def test_a_corpus_file_that_no_longer_matches_its_digest_fails(monkeypatch, tmp_path) -> None:

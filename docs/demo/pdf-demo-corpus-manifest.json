@@ -1,6 +1,6 @@
 {
   "crawl_id": "CC-MAIN-2026-39",
-  "domain": "www.noaa.gov, www.aoml.noaa.gov",
+  "domain": "www.noaa.gov, www.aoml.noaa.gov, buoybay.noaa.gov",
   "entries": [
     {
       "url": "https://www.noaa.gov/sites/default/files/2021-09/NOAA-in-the-Caribbean-2021-Summer-Newsletter-English.pdf",
@@ -151,6 +151,46 @@
       "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492999573.96/warc/CC-MAIN-20260916175233-20260916205233-00125.warc.gz",
       "offset": 536301591,
       "length": 2567051
+    },
+    {
+      "url": "https://www.buoybay.noaa.gov/sites/default/files/files/s_geography_text.pdf",
+      "digest": "5e4c1b36e9949a148616b4e199fdd12a9fc70643c76f607625da376352d25595",
+      "file": "pdfs/5e4c1b36e9949a148616b4e199fdd12a9fc70643c76f607625da376352d25595.pdf",
+      "bytes": 18055,
+      "crawl_id": "CC-MAIN-2026-39",
+      "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492699789.28/warc/CC-MAIN-20260908053654-20260908083654-00903.warc.gz",
+      "offset": 569071896,
+      "length": 8865
+    },
+    {
+      "url": "https://content.buoybay.noaa.gov/sites/default/files/files/s_geography_text.pdf",
+      "digest": "5e4c1b36e9949a148616b4e199fdd12a9fc70643c76f607625da376352d25595",
+      "file": "pdfs/5e4c1b36e9949a148616b4e199fdd12a9fc70643c76f607625da376352d25595.pdf",
+      "bytes": 18055,
+      "crawl_id": "CC-MAIN-2026-39",
+      "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492699777.19/warc/CC-MAIN-20260908023422-20260908053422-00617.warc.gz",
+      "offset": 177347735,
+      "length": 8723
+    },
+    {
+      "url": "https://buoybay.noaa.gov/sites/default/files/2024-04/NCBOWinter202324SeasonalSummary.pdf",
+      "digest": "b148a89e002e79a471e2dd7d6c35d6f4a63fea3aa1ecb3394c2ba3746b634493",
+      "file": "pdfs/b148a89e002e79a471e2dd7d6c35d6f4a63fea3aa1ecb3394c2ba3746b634493.pdf",
+      "bytes": 1643393,
+      "crawl_id": "CC-MAIN-2026-39",
+      "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492699715.20/warc/CC-MAIN-20260907051702-20260907081702-00632.warc.gz",
+      "offset": 121624012,
+      "length": 1470035
+    },
+    {
+      "url": "https://buoybay.noaa.gov/sites/default/files/2024-05/NCBOWinter202324SeasonalSummaryA.pdf",
+      "digest": "a7e0e9cd056ffa99eaebc1d9de8b79ac98cd72bbbbaa54cec54e1ac19e8a5d60",
+      "file": "pdfs/a7e0e9cd056ffa99eaebc1d9de8b79ac98cd72bbbbaa54cec54e1ac19e8a5d60.pdf",
+      "bytes": 1643485,
+      "crawl_id": "CC-MAIN-2026-39",
+      "warc_filename": "crawl-data/CC-MAIN-2026-39/segments/1788492699715.20/warc/CC-MAIN-20260907051702-20260907081702-00912.warc.gz",
+      "offset": 110101740,
+      "length": 1470132
     }
   ]
 }
