@@ -39,6 +39,7 @@ from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifes
 from finepdfs.infrastructure.engines.registry import KNOWN_ENGINES
 from finepdfs.infrastructure.publishing.disk import PublishedCorpus
 from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
+from finepdfs.interfaces import explorer as explorer_module
 from finepdfs.interfaces.summary import format_run_summary
 
 DEFAULT_CORPUS = Path("corpus")
@@ -92,6 +93,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = commands.add_parser("run", help="run the incremental CocoIndex pipeline")
     _add_engine_arguments(run, out=True)
+
+    explore = commands.add_parser(
+        "explore", help="serve a read-only local browser over completed declared outputs"
+    )
+    explore.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    explore.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
+    explore.add_argument("--host", default=explorer_module.DEFAULT_HOST)
+    explore.add_argument("--port", type=int, default=explorer_module.DEFAULT_PORT)
 
     # The local full-text fallback (ADR-0008): rebuild the index from the declared chunk files, then
     # read the same contract the browser and the agent use. Two commands, one backend.
@@ -209,6 +218,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _dry_run(args)
     if args.command == "run":
         return _run(args)
+    if args.command == "explore":
+        return _explore(args)
     if args.command == "index-search":
         return _index_search(args)
     if args.command == "search":
@@ -438,6 +449,25 @@ def _run(args: argparse.Namespace) -> int:
             f"{len(exclusions) - failed} other exclusions under {runtime.out_dir}"
         )
     return 1 if exclusions and not records else 0
+
+
+def _explore(args: argparse.Namespace) -> int:
+    """Serve the completed outputs read-only; an absent run summary is a clean refusal."""
+    try:
+        explorer = explorer_module.explorer_for(args.out, args.corpus)
+    except explorer_module.ExplorerError as error:
+        print(error, file=sys.stderr)
+        return 2
+
+    print(f"exploring {args.out} read-only at http://{args.host}:{args.port}/")
+    try:
+        explorer_module.serve_explorer(explorer, host=args.host, port=args.port)
+    except KeyboardInterrupt:
+        return 0
+    except OSError as error:
+        print(f"cannot serve the explorer at {args.host}:{args.port}: {error}", file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":

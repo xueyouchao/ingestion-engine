@@ -52,6 +52,30 @@ The second run reuses all 18 Extractions and the third changes only the publish 
 the real Docling page evidence and the honest failures, and
 [`docs/demo/pdf-demo-corpus.md`](docs/demo/pdf-demo-corpus.md) for the pin.
 
+## Browser explorer (P1, read-only)
+
+After a run has declared its outputs, a small local explorer shows the status table, filters it by
+URL/text, language/script, routing and exclusion kind, and opens a document's accepted pages beside a
+link to the locally retained PDF at the original page. It is the P1 demo extension, not part of the
+P0 ingestion gate.
+
+~~~~bash
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli explore --out out --corpus corpus --port 8765
+# then open http://127.0.0.1:8765/
+~~~~
+
+The installed console script has the same command: `.venv/bin/finepdfs explore --out out --corpus corpus`.
+It binds `127.0.0.1` by default; `--host` changes that only when you mean it.
+
+The explorer is a **view over completed declared outputs**: `out/run-summary.json`, `out/records/`,
+`out/pages/`, `out/excluded/` and the corpus manifest that maps a digest to `pdfs/<digest>.pdf`. It
+never writes, never curates, and never makes a second Deduplication or Publish Policy decision. Every
+counter it displays is the measured summary the flow declared. It polls `finished_at` and reloads after
+a completed update; there is no streaming or partial state. Only the configured output and corpus roots
+are reachable, and document keys and PDF digests are validated before any file is opened, so a URL
+cannot name an arbitrary path. The default page is static HTML/CSS/JS served by Python's standard
+library; no extra dependency is needed.
+
 ## What one document goes through
 
 1. **Fetch** -- the Common Crawl index API gives a WARC file, a byte offset and a length; one HTTP
