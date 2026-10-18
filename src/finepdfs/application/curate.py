@@ -135,7 +135,9 @@ class CurationStep:
         if not publishable:
             return CurationOutcome(status="dropped", url=url, record=record, reason=reason)
         markdown = "\n\n".join(page.text for page in pages)
-        return CurationOutcome(status="published", url=url, record=record, markdown=markdown, reason=reason)
+        return CurationOutcome(
+            status="published", url=url, record=record, pages=pages, markdown=markdown, reason=reason
+        )
 
     def _record(self, extraction, pages, language, url: str, digest: str) -> DocumentRecord:
         engine: EngineIdentity = extraction.document.engine

@@ -54,12 +54,32 @@ class DocumentRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class PageRecord:
+    """One accepted Page Text as a reader cites it: whose page it is and where the text came from."""
+
+    doc_id: str
+    source_url: str
+    digest: str
+    page_number: int
+    text: str
+    engine: str
+
+    def as_json(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
 class CurationOutcome:
-    """What curating one document produced."""
+    """What curating one document produced.
+
+    ``pages`` are the accepted Page Texts the Markdown projects, still carrying their original 1-based
+    numbers, so a published Document can export them. A document that is not published exports none.
+    """
 
     status: OutcomeStatus
     url: str
     record: DocumentRecord | None = None
+    pages: tuple[PageText, ...] = ()
     markdown: str = ""
     reason: str = ""
 

@@ -26,6 +26,7 @@ from finepdfs.domain.dedup import (
     plan_deduplication,
 )
 from finepdfs.domain.document import Document, ExtractedDocument, content_digest
+from finepdfs.domain.publishing import PageRecord
 from finepdfs.infrastructure.cocoindex.runtime import Runtime, runtime_from_environment
 from finepdfs.infrastructure.compute.providers import leased_environment
 from finepdfs.infrastructure.corpus.index import CorpusDocument
@@ -229,6 +230,29 @@ def _declare(
     localfs.declare_file(published.doc_path(document.key), outcome.markdown, create_parent_dirs=True)
     localfs.declare_file(
         published.record_path(document.key), published.record_payload(outcome.record), create_parent_dirs=True
+    )
+    # Only a published Document declares page records, so an exclusion, a duplicate or a Crawl Record
+    # that left the manifest stops declaring them and the target state retracts the old file.
+    localfs.declare_file(
+        published.pages_path(document.key),
+        published.pages_payload(_page_records(document, outcome)),
+        create_parent_dirs=True,
+    )
+
+
+def _page_records(document: CorpusDocument, outcome: CurationOutcome) -> tuple[PageRecord, ...]:
+    """The accepted Page Texts, under the source identity their declared file is named after."""
+    assert outcome.record is not None
+    return tuple(
+        PageRecord(
+            doc_id=document.key,
+            source_url=document.url,
+            digest=document.digest,
+            page_number=page.number,
+            text=page.text,
+            engine=outcome.record.engine,
+        )
+        for page in outcome.pages
     )
 
 

@@ -1,22 +1,24 @@
 """Reading and writing the published corpus.
 
 The layout is deliberately boring: one Markdown file per document, one JSON record per document, one
-JSON exclusion per document that was dropped or failed. Every file is named by a key derived from the
-document URL, so a document never collides with another one.
+JSONL page export per published document, one JSON exclusion per document that was dropped or failed.
+Every file is named by a key derived from the document URL, so a document never collides with another
+one.
 """
 
 from __future__ import annotations
 
 import json
 import pathlib
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 from finepdfs.domain.dedup import DedupPlan
-from finepdfs.domain.publishing import DocumentRecord
+from finepdfs.domain.publishing import DocumentRecord, PageRecord
 from finepdfs.infrastructure.corpus.index import document_key
 
 DOCS = "docs"
 RECORDS = "records"
+PAGES = "pages"
 EXCLUDED = "excluded"
 DEDUPE = "dedupe"
 KEPT_REPORT = "kept.jsonl"
@@ -42,8 +44,15 @@ class PublishedCorpus:
     def exclusion_path(self, key: str) -> pathlib.Path:
         return self._root / EXCLUDED / f"{key}.json"
 
+    def pages_path(self, key: str) -> pathlib.Path:
+        return self._root / PAGES / f"{key}.jsonl"
+
     def record_payload(self, record: DocumentRecord) -> str:
         return json.dumps(record.as_json(), indent=2) + "\n"
+
+    def pages_payload(self, records: Sequence[PageRecord]) -> str:
+        """One published document's accepted Page Texts, one JSON object per line, in page order."""
+        return _jsonl(record.as_json() for record in sorted(records, key=lambda record: record.page_number))
 
     def exclusion_payload(self, url: str, reason: str, kind: str) -> str:
         return json.dumps({"url": url, "key": document_key(url), "kind": kind, "reason": reason}, indent=2) + "\n"
