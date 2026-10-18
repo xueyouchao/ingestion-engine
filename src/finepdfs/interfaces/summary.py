@@ -8,7 +8,25 @@ observation rather than as declared state.
 
 from __future__ import annotations
 
-from finepdfs.interfaces.run_log import observed_elapsed
+from pathlib import Path
+
+from finepdfs.infrastructure.publishing.disk import PublishedCorpus
+from finepdfs.interfaces.run_log import RunClock, observed_elapsed, read_observed_run, write_observed_run
+
+
+def conclude_run(out_dir: Path | str, clock: RunClock) -> tuple[str | None, Path]:
+    """Stop the clock, record the observation, and render the summary the flow declared.
+
+    The order -- observation beside the outputs, then the declared summary read back -- is the same for
+    every command that wraps a run, so `run` and the demo consume this one function instead of each
+    repeating it. The line is ``None`` when the flow declared no summary; the path is where the
+    observation went, so the caller can label it as observed rather than declared.
+    """
+    log_path = write_observed_run(out_dir, clock.stop())
+    summary = PublishedCorpus(Path(out_dir)).read_summary()
+    if summary is None:
+        return None, log_path
+    return format_run_summary(summary, read_observed_run(out_dir)), log_path
 
 
 def format_run_summary(summary: dict, observed: dict | None = None) -> str:

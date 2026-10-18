@@ -21,11 +21,9 @@ from finepdfs.application.curate import CurationOutcome, ExtractionResult, Routi
 from finepdfs.application.metrics import RunMetrics
 from finepdfs.domain.chunks import chunk_page_records
 from finepdfs.domain.dedup import (
-    DedupPlan,
     DuplicateDecision,
-    PublishedDocumentView,
+    decide_duplicates,
     exact_duplicate_keepers,
-    plan_deduplication,
 )
 from finepdfs.domain.document import Document, ExtractedDocument, content_digest
 from finepdfs.domain.publishing import PageRecord
@@ -163,26 +161,34 @@ async def publish_corpus(readings: tuple[DocumentReading, ...], similar_at: floa
     published = runtime.published()
 
     curated: dict[str, tuple[CorpusDocument, CurationOutcome]] = {}
+    outcomes: dict[str, CurationOutcome] = {}
     for item in readings:
         if item.extracted is None or item.exact_duplicate_of:
             continue
         url = item.document.url
-        curated[url] = (item.document, runtime.curation.curate(_extraction(item), url, item.document.digest))
+        outcome = runtime.curation.curate(_extraction(item), url, item.document.digest)
+        curated[url] = (item.document, outcome)
+        outcomes[url] = outcome
+    # A reading that failed is a disposition like any other, so the duplicate decision can say what an
+    # exact duplicate of it inherits without reading it again.
+    for item in readings:
+        if item.extracted is None and not item.exact_duplicate_of:
+            url = item.document.url
+            outcomes[url] = CurationOutcome(status="failed", url=url, reason=item.failure)
 
-    plan = plan_deduplication(
-        [
-            PublishedDocumentView(url=document.url, digest=document.digest, text=outcome.markdown)
-            for document, outcome in curated.values()
-            if outcome.published
-        ],
+    # One owner for both kinds of duplicate (domain/dedup.decide_duplicates), so the dry run and these
+    # declarations cannot disagree. An exact duplicate may only name a keeper that is actually
+    # published: the digest keeper can itself be a near-duplicate loser, dropped by policy, or failed.
+    decision = decide_duplicates(
+        {item.document.url: item.document.digest for item in readings},
+        outcomes,
         similarity_threshold=similar_at,
     )
-    # An exact duplicate may only name a keeper that is actually published. The digest keeper is not
-    # always that document: it can itself be a near-duplicate loser, dropped by policy, or unreadable.
-    plan, inherited = _exact_decisions(
-        plan, readings, curated, {decision.url: decision for decision in plan.duplicates if decision.kind == "near"}
-    )
-    duplicates = plan.duplicates_by_url()
+    plan = decision.plan
+    duplicates = decision.duplicates_by_url()
+    inherited = {
+        url: (fate.kind, fate.keeper, fate.reason) for url, fate in decision.inherited_by_url().items()
+    }
 
     for item in readings:
         _declare(
@@ -198,8 +204,8 @@ async def publish_corpus(readings: tuple[DocumentReading, ...], similar_at: floa
         create_parent_dirs=True,
     )
     # The summary is target state too, so the flow stays the only writer and a rerun refreshes it in
-    # place. Its elapsed_seconds measures the run up to this declaration, before CocoIndex applies the
-    # target state; wall-clock timing around the command is what includes the apply.
+    # place. It carries no timing: elapsed time is an observation the command wrapper around the run
+    # records in `out/last-run.json` (interfaces/run_log.py), never a declared field.
     manifest = runtime.corpus().manifest()
     engine = runtime.engines[runtime.policy.engine_name]
     summary = runtime.metrics.summary(
@@ -211,61 +217,6 @@ async def publish_corpus(readings: tuple[DocumentReading, ...], similar_at: floa
         engine_identity=str(engine.identity),
     )
     localfs.declare_file(published.summary_path(), published.summary_payload(summary), create_parent_dirs=True)
-
-
-def _exact_decisions(
-    plan: DedupPlan,
-    readings: tuple[DocumentReading, ...],
-    curated: dict[str, tuple[CorpusDocument, CurationOutcome]],
-    near_by_url: dict[str, DuplicateDecision],
-) -> tuple[DedupPlan, dict[str, tuple[str, str, str]]]:
-    """Point every exact duplicate at a keeper this run actually publishes, or at its honest fate.
-
-    A published, non-duplicate digest keeper gets the exact decision it always got. When the keeper is
-    itself a near-duplicate loser, its exact duplicates follow the keeper's near decision, so the
-    published near keeper is the one named. When the keeper was dropped or failed, no keeper exists to
-    name: the duplicate is recorded with that same disposition and a reason naming the keeper, and it
-    still costs no Extraction because this is decided from decisions, not from more reading.
-    """
-    failed_keepers = {
-        item.document.url: item.failure or "it could not be read"
-        for item in readings
-        if item.extracted is None and not item.exact_duplicate_of
-    }
-    exact: list[DuplicateDecision] = []
-    inherited: dict[str, tuple[str, str, str]] = {}
-    for item in readings:
-        keeper = item.exact_duplicate_of
-        if not keeper:
-            continue
-        near = near_by_url.get(keeper)
-        if near is not None:
-            exact.append(
-                DuplicateDecision(
-                    url=item.document.url,
-                    kind="near",
-                    duplicate_of=near.duplicate_of,
-                    similarity=near.similarity,
-                )
-            )
-            continue
-        outcome = curated.get(keeper)
-        if outcome is not None and not outcome[1].published:
-            inherited[item.document.url] = (outcome[1].status, keeper, outcome[1].reason)
-            continue
-        if keeper in failed_keepers:
-            inherited[item.document.url] = ("failed", keeper, failed_keepers[keeper])
-            continue
-        exact.append(
-            DuplicateDecision(url=item.document.url, kind="exact", duplicate_of=keeper, similarity=1.0)
-        )
-    return (
-        DedupPlan(
-            keepers=plan.keepers,
-            duplicates=tuple(sorted([*plan.duplicates, *exact], key=lambda decision: decision.url)),
-        ),
-        inherited,
-    )
 
 
 def _extraction(item: DocumentReading) -> ExtractionResult:

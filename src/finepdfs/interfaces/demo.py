@@ -27,8 +27,8 @@ from finepdfs.infrastructure.corpus.manifest import CorpusManifest
 from finepdfs.infrastructure.engines.registry import KNOWN_ENGINES
 from finepdfs.infrastructure.publishing.disk import PublishedCorpus
 from finepdfs.interfaces.restore import restore_pinned_corpus
-from finepdfs.interfaces.run_log import RunClock, read_observed_run, write_observed_run
-from finepdfs.interfaces.summary import format_run_summary
+from finepdfs.interfaces.run_log import RunClock, read_observed_run
+from finepdfs.interfaces.summary import conclude_run, format_run_summary
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_ROOT = PROJECT_ROOT / ".demo"
@@ -157,14 +157,13 @@ def run_demo(
     clock = RunClock()
     with _applied(values), coco.runtime():
         flow.build_app().update_blocking(report_to_stdout=True)
-    observed_log = write_observed_run(paths.out, clock.stop())
+    summary_line, observed_log = conclude_run(paths.out, clock)
 
     published = PublishedCorpus(paths.out)
-    summary = published.read_summary()
-    if summary is None:
+    if summary_line is None:
         print(f"the run declared no summary under {paths.out}", file=sys.stderr)
         return 1
-    print(format_run_summary(summary, read_observed_run(paths.out)))
+    print(summary_line)
     print(f"observed timing: {observed_log} (not declared target state)")
     records = published.read_records()
     exclusions = published.read_exclusions()

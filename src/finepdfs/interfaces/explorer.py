@@ -31,8 +31,8 @@ from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifes
 from finepdfs.infrastructure.corpus.manifest import pdf_path as retained_pdf_path
 from finepdfs.infrastructure.publishing.disk import (
     EXCLUDED,
-    PAGES,
     RECORDS,
+    DiskPageReader,
     PublishedCorpus,
 )
 from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
@@ -46,9 +46,6 @@ _UNSET = object()
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-# The index name and the resolver live in interfaces/search_paths.py so `index-search`, `search`,
-# `explore` and `ask` cannot disagree about where the derived index is.
-SEARCH_INDEX_NAME = search_paths.SEARCH_INDEX_NAME
 
 
 class ExplorerError(Exception):
@@ -75,7 +72,14 @@ class Explorer:
         self._out = Path(out_dir)
         self._corpus = Path(corpus_dir)
         self._published = PublishedCorpus(self._out)
-        self._index = Path(index_path) if index_path is not None else self._out / SEARCH_INDEX_NAME
+        # The page exports are parsed by the same reader `read_pdf_page` uses, so the view cannot show
+        # text the agent's tool would reject as stale.
+        self._page_reader = DiskPageReader(self._out)
+        self._index = (
+            Path(index_path)
+            if index_path is not None
+            else self._out / search_paths.SEARCH_INDEX_NAME
+        )
         self._manifest_lock = threading.Lock()
         self._manifest_signature: object = _UNSET
         self._by_url: dict[str, Any] = {}
@@ -169,7 +173,7 @@ class Explorer:
             row = _document_row(
                 key, record=record, exclusion=None if record is not None else exclusions[key]
             )
-            row["text"] = self._text_for(key) if record is not None else ""
+            row["text"] = self._text_for(key, record.get("digest")) if record is not None else ""
             row["detail_url"] = f"/api/documents/{key}"
             documents.append(row)
         return documents
@@ -178,11 +182,11 @@ class Explorer:
         """Accepted Page Texts in original page order, each with a PDF fragment for that page."""
         if not is_source_identity(key):
             raise UnknownDocument(f"no document {key}")
-        pages = self._page_rows(key)
-        if pages is None:
-            raise UnknownDocument(f"no page export for {key}")
         record = next((record for record in self.records() if record["key"] == key), None)
         record_digest = record.get("digest") if record else None
+        pages = self._page_rows(key, record_digest)
+        if pages is None:
+            raise UnknownDocument(f"no page export for {key}")
         for page in pages:
             base = self._pdf_url(page.get("digest") or record_digest)
             page["pdf_url"] = f"{base}#page={page['page_number']}" if base else None
@@ -249,28 +253,27 @@ class Explorer:
                 self._manifest_signature = signature
             return self._by_digest, self._by_url
 
-    def _page_rows(self, key: str) -> list[dict[str, Any]] | None:
-        """Parse one declared page export once, in original page order; None when none is declared.
+    def _page_rows(self, key: str, digest: Any) -> list[dict[str, Any]] | None:
+        """One declared page export, read by ``DiskPageReader`` exactly as ``read_pdf_page`` reads it.
 
-        The export is written in page order by the flow, but a reader never assumes it: the original
-        1-based page number in each row is what orders them, and every caller reads the same parse.
+        None means no export is declared. A page whose digest no longer matches the published record,
+        or whose doc_id is not this key, is not accepted evidence: the export was left behind by a
+        replacement or a removal, so it is dropped rather than shown as current text. The reader keeps
+        original page order, so the table's text and the detail's pages cannot disagree.
         """
-        path = self._out / PAGES / f"{key}.jsonl"
-        if not path.is_file():
+        try:
+            pages = self._page_reader.accepted_pages(key)
+        except ValueError as error:
+            raise ExplorerError(f"the page export for {key} is not accepted evidence: {error}") from error
+        if pages is None:
             return None
-        pages = []
-        for line in _read_text(path).splitlines():
-            if not line.strip():
-                continue
-            page = _json_object(line, path)
-            if not isinstance(page.get("page_number"), int):
-                raise ExplorerError(f"{path} holds a page without an integer page_number")
-            pages.append(page)
-        return sorted(pages, key=lambda page: page["page_number"])
+        if not isinstance(digest, str):
+            return []
+        return [page.as_json() for page in pages if page.digest == digest and page.doc_id == key]
 
-    def _text_for(self, key: str) -> str:
+    def _text_for(self, key: str, digest: Any) -> str:
         """The accepted text of one published document, in its original page order."""
-        pages = self._page_rows(key) or []
+        pages = self._page_rows(key, digest) or []
         return "\n".join(str(page.get("text", "")) for page in pages)
 
 

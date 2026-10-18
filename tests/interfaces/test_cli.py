@@ -331,9 +331,10 @@ def test_a_stale_index_is_refused_by_the_search_command(tmp_path, capsys) -> Non
 
 
 def test_the_search_index_path_comes_from_one_resolver_that_honours_the_environment(monkeypatch) -> None:
-    from finepdfs.interfaces.search_paths import resolve_search_index
+    from finepdfs.interfaces.search_paths import resolve_out_dir, resolve_search_index
 
     monkeypatch.setenv("FINEPDFS_SEARCH_INDEX", "/data/configured.db")
+    monkeypatch.setenv("FINEPDFS_OUT", "/data/out")
     assert resolve_search_index() == Path("/data/configured.db")
     assert resolve_search_index(out=Path("o")) == Path("/data/configured.db"), (
         "the documented variable wins over the output directory's default name"
@@ -341,9 +342,70 @@ def test_the_search_index_path_comes_from_one_resolver_that_honours_the_environm
     assert resolve_search_index(out=Path("o"), index=Path("flag.db")) == Path("flag.db"), (
         "an explicit flag wins over the environment"
     )
+    assert resolve_out_dir() == Path("/data/out"), "the output directory honours its documented variable"
+    assert resolve_out_dir(Path("o")) == Path("o"), "an explicit --out wins over the variable"
 
     monkeypatch.delenv("FINEPDFS_SEARCH_INDEX")
+    monkeypatch.delenv("FINEPDFS_OUT")
     assert resolve_search_index(out=Path("o")) == Path("o/search.db")
+    assert resolve_out_dir() == Path("out")
+
+
+def _completed_output(out_dir: Path) -> None:
+    """A declared output the explorer accepts: chunks are not needed, a summary and a corpus are."""
+    _write_declared_chunks(out_dir)
+    (out_dir / "run-summary.json").write_text("{}\n", encoding="utf-8")
+
+
+def test_explore_takes_its_output_directory_and_index_from_the_environment(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """explore's --out used to default to out/, so FINEPDFS_OUT was ignored; one resolver fixes it."""
+    from finepdfs.interfaces import cli
+    from finepdfs.interfaces import explorer as explorer_module
+
+    out_dir = tmp_path / "published"
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    _completed_output(out_dir)
+    monkeypatch.setenv("FINEPDFS_OUT", str(out_dir))
+    served = []
+    monkeypatch.setattr(explorer_module, "serve_explorer", lambda explorer, **kwargs: served.append(explorer))
+
+    assert cli.main(["explore", "--corpus", str(corpus_dir)]) == 0
+
+    assert served, "explore served a completed output"
+    assert served[0].out_dir == out_dir, "FINEPDFS_OUT names the directory the explorer serves"
+    assert served[0].index_path == out_dir / "search.db", "the index follows the same resolved output"
+    assert "no search index" in capsys.readouterr().out
+
+
+def test_explore_flags_win_over_the_environment(tmp_path, monkeypatch) -> None:
+    from finepdfs.interfaces import cli
+    from finepdfs.interfaces import explorer as explorer_module
+
+    configured = tmp_path / "configured"
+    flagged = tmp_path / "flagged"
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    _completed_output(configured)
+    _completed_output(flagged)
+    monkeypatch.setenv("FINEPDFS_OUT", str(configured))
+    monkeypatch.setenv("FINEPDFS_SEARCH_INDEX", str(tmp_path / "configured.db"))
+    served = []
+    monkeypatch.setattr(explorer_module, "serve_explorer", lambda explorer, **kwargs: served.append(explorer))
+
+    assert cli.main(
+        [
+            "explore",
+            "--corpus", str(corpus_dir),
+            "--out", str(flagged),
+            "--index", str(flagged / "flag.db"),
+        ]
+    ) == 0
+
+    assert served[0].out_dir == flagged
+    assert served[0].index_path == flagged / "flag.db"
 
 
 def test_ask_honours_the_documented_search_index_variable(tmp_path, capsys, monkeypatch) -> None:
@@ -369,6 +431,59 @@ def test_ask_honours_the_documented_search_index_variable(tmp_path, capsys, monk
 
     assert cli._ask(args) == 0
     assert "no search index" not in capsys.readouterr().err
+
+
+def test_ask_takes_its_output_directory_and_index_from_the_environment(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """ask used to resolve --out to a literal out/, so FINEPDFS_OUT never named its pages or index."""
+    from finepdfs.infrastructure.corpus.index import document_key
+    from finepdfs.interfaces import cli
+
+    out_dir = tmp_path / "published"
+    _write_declared_chunks(out_dir)
+    assert cli.main(["index-search", "--out", str(out_dir)]) == 0
+    capsys.readouterr()
+    monkeypatch.setenv("FINEPDFS_OUT", str(out_dir))
+    monkeypatch.delenv("FINEPDFS_SEARCH_INDEX", raising=False)
+    doc_id = document_key("https://example.org/page-9.pdf")
+    monkeypatch.setattr(cli, "ChatCompletionsClient", lambda *args, **kwargs: _ask_model(doc_id))
+    args = build_parser().parse_args(
+        [
+            "ask", "--question", "q", "--base-url", "http://[::1]:11434/v1", "--model", "m",
+        ]
+    )
+
+    assert cli._ask(args) == 0
+
+    printed = capsys.readouterr().out
+    assert "no search index" not in printed
+    assert f"- {doc_id} p.9" in printed, "the page read came from the same resolved output directory"
+
+
+def test_ask_flags_win_over_the_environment(tmp_path, capsys, monkeypatch) -> None:
+    from finepdfs.infrastructure.corpus.index import document_key
+    from finepdfs.interfaces import cli
+
+    configured = tmp_path / "configured"
+    flagged = tmp_path / "flagged"
+    _write_declared_chunks(configured)
+    _write_declared_chunks(flagged)
+    assert cli.main(["index-search", "--out", str(flagged), "--index", str(tmp_path / "flag.db")]) == 0
+    capsys.readouterr()
+    monkeypatch.setenv("FINEPDFS_OUT", str(configured))
+    monkeypatch.setenv("FINEPDFS_SEARCH_INDEX", str(tmp_path / "configured.db"))
+    doc_id = document_key("https://example.org/page-9.pdf")
+    monkeypatch.setattr(cli, "ChatCompletionsClient", lambda *args, **kwargs: _ask_model(doc_id))
+    args = build_parser().parse_args(
+        [
+            "ask", "--question", "q", "--base-url", "http://[::1]:11434/v1", "--model", "m",
+            "--out", str(flagged), "--index", str(tmp_path / "flag.db"),
+        ]
+    )
+
+    assert cli._ask(args) == 0
+    assert f"- {doc_id} p.9" in capsys.readouterr().out
 
 
 def test_indexing_a_directory_that_holds_no_run_is_an_operator_error(tmp_path, capsys) -> None:
@@ -581,3 +696,78 @@ def test_ask_json_carries_the_answer_citations_and_trace(tmp_path, capsys, monke
     assert payload["citations"][0]["verified"] is True
     assert [call["tool"] for call in payload["tool_calls"]] == ["search_pdfs", "read_pdf_page"]
     assert payload["insufficient_evidence"] is False
+
+
+NEAR_KEEPER_URL = "https://a.example/promoted.pdf"
+DIGEST_KEEPER_URL = "https://b.example/digest-keeper.pdf"
+DIGEST_DUPLICATE_URL = "https://c.example/digest-keeper.pdf"
+
+
+def _near_loser_corpus(tmp_path: Path) -> Path:
+    """Two digests: one shared by two URLs, one whose text is near-identical to it."""
+    import hashlib
+
+    from finepdfs.infrastructure.corpus.manifest import CorpusEntry, CorpusManifest, relative_pdf_path
+
+    body = (Path(__file__).resolve().parent.parent / "fixtures" / "warc_payload.bin").read_bytes()
+    contents = {
+        NEAR_KEEPER_URL: body + b"\n% a different Document whose text is near-identical\n",
+        DIGEST_KEEPER_URL: body,
+        DIGEST_DUPLICATE_URL: body,
+    }
+    corpus_dir = tmp_path / "corpus"
+    (corpus_dir / "pdfs").mkdir(parents=True)
+    entries = []
+    for url, content in contents.items():
+        digest = hashlib.sha256(content).hexdigest()
+        (corpus_dir / relative_pdf_path(digest)).write_bytes(content)
+        entries.append(
+            CorpusEntry(
+                url=url,
+                digest=digest,
+                file=relative_pdf_path(digest),
+                bytes=len(content),
+                crawl_id="CC-MAIN-2026-39",
+                warc_filename="crawl-data/CC-MAIN-2026-39/segments/x/warc/y.warc.gz",
+                offset=1,
+                length=len(content),
+            )
+        )
+    CorpusManifest(crawl_id="CC-MAIN-2026-39", domain="a.example", entries=entries).save(
+        corpus_dir / "manifest.json"
+    )
+    return corpus_dir
+
+
+def test_the_dry_run_cannot_lie_about_an_exact_duplicate_whose_digest_keeper_is_a_near_loser(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """The dry run and the flow read one decision, so both name the same published near keeper.
+
+    Before the shared decision the dry run printed the raw digest keeper as an exact duplicate and
+    counted the Document as byte-identical, which the flow never declared: the dry run could lie about
+    what a run would publish.
+    """
+    from finepdfs.interfaces import cli
+
+    corpus_dir = _near_loser_corpus(tmp_path)
+    out_dir = tmp_path / "out"
+    monkeypatch.setenv("FINEPDFS_DB", str(tmp_path / "runs.db"))
+    assert cli.main(["run", "--corpus", str(corpus_dir), "--out", str(out_dir), "--engine", "pymupdf"]) == 0
+
+    declared = [json.loads(line) for line in (out_dir / "dedupe" / "duplicates.jsonl").read_text().splitlines()]
+    published = {json.loads(path.read_text())["url"] for path in (out_dir / "records").glob("*.json")}
+    assert published == {NEAR_KEEPER_URL}
+    assert {row["duplicate_of"] for row in declared} == {NEAR_KEEPER_URL}
+
+    capsys.readouterr()
+    assert cli.main(["dry-run", "--corpus", str(corpus_dir), "--engine", "pymupdf"]) == 0
+
+    printed = capsys.readouterr().out
+    for row in declared:
+        line = next(line for line in printed.splitlines() if row["url"] in line)
+        reason = line.split(row["url"], 1)[1]
+        assert line.split()[0] == f"{row['kind']}-duplicate", "the dry run names the kind the flow declared"
+        assert NEAR_KEEPER_URL in reason, "the dry run names the keeper the flow declared"
+        assert DIGEST_KEEPER_URL not in reason, "no row names the unpublished digest keeper"
+    assert "0 byte-identical" in printed, "an exact duplicate of a near loser is not counted as exact"

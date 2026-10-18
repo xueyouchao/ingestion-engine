@@ -30,6 +30,25 @@ from finepdfs.domain.publishing import PageRecord
 CHUNKING_VERSION = "chunking-v1"
 DEFAULT_CHUNK_CHARACTERS = 1200
 
+# The fields of a Chunk, in the order the declared JSONL carries them. One list, so the domain's own
+# JSON, the store's SQL projection and every reader move together and a new field cannot silently miss
+# one of them.
+CHUNK_FIELDS = (
+    "chunk_id",
+    "doc_id",
+    "source_url",
+    "digest",
+    "engine",
+    "language",
+    "chunking_version",
+    "ordinal",
+    "page_number",
+    "start_offset",
+    "end_offset",
+    "text",
+)
+_INTEGER_FIELDS = frozenset({"ordinal", "page_number", "start_offset", "end_offset"})
+
 # A blank line: a newline, any whitespace and another newline. Paragraph text never includes it.
 _PARAGRAPH_BREAK = re.compile(r"\n\s*\n")
 
@@ -85,37 +104,16 @@ class Chunk:
     text: str
 
     def as_json(self) -> dict:
-        return {
-            "chunk_id": self.chunk_id,
-            "doc_id": self.doc_id,
-            "source_url": self.source_url,
-            "digest": self.digest,
-            "engine": self.engine,
-            "language": self.language,
-            "chunking_version": self.chunking_version,
-            "ordinal": self.ordinal,
-            "page_number": self.page_number,
-            "start_offset": self.start_offset,
-            "end_offset": self.end_offset,
-            "text": self.text,
-        }
+        return {field: getattr(self, field) for field in CHUNK_FIELDS}
 
     @classmethod
     def from_json(cls, payload: dict) -> Chunk:
         """Read one declared chunk. An unknown or missing field is a visible KeyError, not a guess."""
         return cls(
-            chunk_id=payload["chunk_id"],
-            doc_id=payload["doc_id"],
-            source_url=payload["source_url"],
-            digest=payload["digest"],
-            engine=payload["engine"],
-            language=payload["language"],
-            chunking_version=payload["chunking_version"],
-            ordinal=int(payload["ordinal"]),
-            page_number=int(payload["page_number"]),
-            start_offset=int(payload["start_offset"]),
-            end_offset=int(payload["end_offset"]),
-            text=payload["text"],
+            **{
+                field: int(payload[field]) if field in _INTEGER_FIELDS else payload[field]
+                for field in CHUNK_FIELDS
+            }
         )
 
 

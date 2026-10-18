@@ -60,11 +60,12 @@ class SearchIndex(Protocol):
     ``upsert`` is an idempotent write of the chunks it is given and reports every chunk it could not
     store; ``retain`` deletes every stored chunk whose id is not in the current declared set, which is
     how replacements, fewer pages, exclusions and removed sources stop being searchable. ``search``
-    answers the shared contract.
+    answers the shared contract, and raises ``SearchUnavailable`` when the index cannot be read at all
+    -- an absent, empty or corrupted index is an answer, never a shorter hit list.
 
     ``record_freshness`` and ``state`` are how the index remembers which declared evidence it mirrors:
     a reader compares that fingerprint with the current declared chunk set before trusting a hit.
-    ``state`` raises ``SearchUnavailable`` when the index cannot be read at all.
+    ``state`` raises ``SearchUnavailable`` for the same reason ``search`` does.
     """
 
     def upsert(self, chunks: Sequence[Chunk]) -> Sequence[IndexFailure]: ...
@@ -95,7 +96,12 @@ class DeclaredPageReader(Protocol):
     def root(self) -> Path: ...
 
     def has_output(self) -> bool:
-        """Whether a completed run declared anything at all."""
+        """Whether there is an output directory to read at all.
+
+        This is the adapter's own definition -- ``DiskPageReader`` answers with the directory's
+        existence -- and it is deliberately not "a completed run declared something": a Document absent
+        from an existing directory is the methods' ``None`` answer, not "no output".
+        """
         ...
 
     def published_digest(self, doc_id: str) -> str | None:

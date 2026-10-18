@@ -2,8 +2,10 @@
 
 `index-search`, `search`, `explore` and `ask` all read or write the same derived index beside the same
 declared chunks. Before this helper each resolved the path its own way, so `ask` silently ignored
-`FINEPDFS_SEARCH_INDEX` and `index-search` preferred `--out` over it. One resolver, used by all four,
-is the only way the flag, the documented variable and the default cannot drift apart (ADR-0008).
+`FINEPDFS_SEARCH_INDEX`, `index-search` preferred `--out` over it, and `explore`/`ask` hard-coded
+`out/` so `FINEPDFS_OUT` never named their pages or index. One resolver, used by all four for both
+directories, is the only way the flag, the documented variable and the default cannot drift apart
+(ADR-0008).
 """
 
 from __future__ import annotations

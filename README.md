@@ -10,7 +10,7 @@ re-runs; name a different engine and exactly the documents that engine is for ar
 ## Quick start
 
 ~~~~bash
-python -m venv .venv && .venv/bin/pip install -e ".[dev]"
+python -m venv .venv && .venv/bin/pip install -e ".[dev]"   # pinned: cocoindex==1.0.25, pymupdf==1.28.2
 
 # 1. real PDFs from the newest full Common Crawl, straight from the index into corpus/
 .venv/bin/finepdfs fetch-corpus --domain noaa.gov --limit 12
@@ -67,7 +67,9 @@ PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli explore --out out --c
 ~~~~
 
 The installed console script has the same command: `.venv/bin/finepdfs explore --out out --corpus corpus`.
-It binds `127.0.0.1` by default; `--host` changes that only when you mean it.
+`--out` can be omitted when `FINEPDFS_OUT` names the directory: `explore` and `ask` resolve it, and the
+index beside it, exactly as `run`, `search` and `index-search` do. It binds `127.0.0.1` by default;
+`--host` changes that only when you mean it.
 
 The explorer is a **view over completed declared outputs**: `out/run-summary.json`, `out/records/`,
 `out/pages/`, `out/excluded/` and the corpus manifest that maps a digest to `pdfs/<digest>.pdf`. It
@@ -143,12 +145,16 @@ vllm serve opendatalab/MinerU2.5-Pro-2605-1.2B --logits-processors mineru_vl_uti
 
 Docling is an **optional** extra, never a base dependency: the base install stays model-free and the
 default test suite needs no weights. The extra is pinned to the version the demo was rehearsed with,
-and no torch pin is listed there because Docling brings its own -- install a CPU build explicitly when
-there is no GPU:
+and no torch pin is listed there because Docling brings its own. The observed working environment --
+docling 2.140.0, torch 2.10.0+cpu, easyocr 1.7.2 -- is recorded in
+[`docs/demo/requirements-demo.txt`](docs/demo/requirements-demo.txt), because those exact versions are
+what produced the page text, chunk ids and citations the runbook shows. The base install is pinned
+exactly too (`cocoindex==1.0.25`, `pymupdf==1.28.2`): an unpinned floor can change both:
 
 ~~~~bash
 .venv/bin/pip install -e ".[docling]"        # docling==2.140.0
-.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/pip install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/pip install -r docs/demo/requirements-demo.txt   # the same three pins, recorded
 docling --version                            # check what you actually got
 ~~~~
 
@@ -246,7 +252,7 @@ nothing was published, so an operator or a CI can tell "engine is down" from "no
 | Variable | Default | Meaning |
 |---|---|---|
 | `FINEPDFS_CORPUS` | `corpus` | corpus directory (manifest plus PDFs) |
-| `FINEPDFS_OUT` | `out` | output directory |
+| `FINEPDFS_OUT` | `out` | output directory; `run`, `explore`, `ask`, `index-search` and `search` resolve it as `--out`, then this variable, then `out/` |
 | `FINEPDFS_DB` | `cocoindex.db` | CocoIndex state (an LMDB directory) |
 | `FINEPDFS_ENGINE` | `pymupdf` | engine for documents whose text layer is unusable |
 | `FINEPDFS_ENGINE_BASE_URL` | -- | OpenAI-compatible `/v1` server, or MinerU's base URL |
