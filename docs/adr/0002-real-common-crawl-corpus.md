@@ -19,5 +19,7 @@ generated PDFs, their outputs and the generator are removed from the repository.
 
 - Every claim about extraction is made against real crawled documents.
 - Processing never depends on the network: the corpus is on disk.
-- The corpus is not committed; it is reproducible from the manifest and the fetch command.
+- The corpus is not committed; it is reproducible from the manifest and the fetch command. The
+  pinned demo manifest is committed as package data (`src/finepdfs/data/`), so `finepdfs-demo
+  restore` replays it from a wheel install as well as from a source checkout.
 - Common Crawl licence and attribution apply to the corpus.

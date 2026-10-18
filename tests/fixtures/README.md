@@ -1,8 +1,9 @@
 # Test fixtures
 
 Offline inputs for the default suite. The real Corpus lives in
-[`docs/demo/pdf-demo-corpus-manifest.json`](../../docs/demo/pdf-demo-corpus-manifest.json) and is
-restored from Common Crawl; the files here are not crawled PDFs unless this file says so.
+[`src/finepdfs/data/pdf-demo-corpus-manifest.json`](../../src/finepdfs/data/pdf-demo-corpus-manifest.json)
+(package data, replayed by `finepdfs-demo restore`) and is restored from Common Crawl; the files here
+are not crawled PDFs unless this file says so.
 
 ## Controlled fixtures added for Corpus coverage
 
