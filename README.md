@@ -45,7 +45,8 @@ The CocoIndex CLI works too, because the pipeline *is* a CocoIndex app:
    table headers, hyphenated line breaks.
 5. **Language** -- per-page language, then a document language; pages that disagree are dropped.
 6. **Judge** -- minimum pages, minimum characters, allowed languages (ADR-0004).
-7. **Publish** -- Markdown plus a JSON record; anything dropped or failed becomes a JSON exclusion.
+7. **Publish** -- Markdown, a JSON record and a JSONL export of the same accepted pages; anything
+   dropped or failed becomes a JSON exclusion.
 8. **Decide** -- the second pass sees every cleaned text at once, so it can settle both kinds of
    duplicate in one place: identical bytes from the manifest digests, near-duplicates from text
    fingerprints. What it drops becomes an exclusion; what it keeps is declared (ADR-0006).
@@ -217,13 +218,18 @@ nothing was published, so an operator or a CI can tell "engine is down" from "no
 out/
   docs/<key>.md          cleaned text of one published document
   records/<key>.json     url, digest, engine, routing decision, language, counts
+  pages/<key>.jsonl      one accepted page per line: doc_id, source_url, digest, page_number, text, engine
   excluded/<key>.json    kind (exact-duplicate | near-duplicate | dropped | failed) and the reason
   dedupe/kept.jsonl      the URLs this run decided to publish
   dedupe/duplicates.jsonl  every duplicate, what it duplicates and how alike they are
 ~~~~
 
 `<key>` is the first 16 hex digits of the SHA-256 of the document URL, so a document never collides with
-another and two runs write the same names.
+another and two runs write the same names. The same key is the `doc_id` of that document's page records:
+it names the source, not the bytes, so replacing a Document's content rewrites `pages/<key>.jsonl` in
+place and a Document that stops being published loses it. Only published Documents export pages, and
+Markdown remains a projection of the same accepted pages -- a page record's number is the accepted
+page's original 1-based number in the PDF.
 
 The corpus directory holds `manifest.json` (URL, digest, WARC location) and `pdfs/<sha256>.pdf` -- bytes
 named by their own digest, which is also what makes exact duplicates free to spot.

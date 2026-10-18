@@ -16,8 +16,18 @@ parsed, payload verified. Fetching is separate from processing.
 Crawl Record: the same Document can be reachable from several Crawl Records, which is exactly what
 deduplication is about.
 
+**Source Identity** — where a Document came from, named by its source URL and never by its bytes: the
+first 16 hex digits of the SHA-256 of the URL, the `doc_id` of its page records and the key its declared
+outputs are named after. Replacing the bytes changes the Document and its digest but not its Source
+Identity, so the same exports are rewritten in place; removing the Crawl Record retracts them. A
+Document is identified by its digest, a Source Identity by its origin.
+
 **Page Text** — the text of a single page, with its 1-based page number, as produced by a text layer or
 an engine.
+
+**Page Record** — one accepted Page Text as a reader cites it: Source Identity, source URL, PDF digest,
+original 1-based page number, text and Engine Identity. A Published Document exports its accepted pages
+as page records; its Markdown is a projection of the same pages and is not the source of a citation.
 
 **Extraction** — turning Document bytes into an Extracted Document (Page Texts plus Engine Identity).
 Extraction is the expensive step and is memoized.
