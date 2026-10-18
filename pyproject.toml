@@ -16,6 +16,7 @@ language = ["fasttext-numpy2-wheel>=0.9.2"]
 
 [project.scripts]
 finepdfs = "finepdfs.interfaces.cli:main"
+finepdfs-demo = "finepdfs.interfaces.demo:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -9,9 +9,10 @@ from __future__ import annotations
 import os
 import pathlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from finepdfs.application.curate import CurateDocument, CurationPolicy, CurationStep, ExtractionStep
+from finepdfs.application.metrics import RunMetrics
 from finepdfs.domain.language import LanguagePolicy
 from finepdfs.domain.ports import OcrEngine
 from finepdfs.domain.publishing import PublishPolicy
@@ -46,6 +47,10 @@ class Runtime:
     extraction: ExtractionStep
     curation: CurationStep
     similarity_threshold: float = 0.8
+    # What this run actually did. The flow counts into it at the real seams (routing, the memoised
+    # extract body, each declaration) and writes out/run-summary.json from it. Observation, not
+    # wiring: it is excluded from equality so two identically wired runtimes still compare equal.
+    metrics: RunMetrics = field(default_factory=RunMetrics, compare=False, repr=False)
 
     @property
     def engines(self) -> Mapping[str, OcrEngine]:

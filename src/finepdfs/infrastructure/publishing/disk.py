@@ -23,6 +23,7 @@ EXCLUDED = "excluded"
 DEDUPE = "dedupe"
 KEPT_REPORT = "kept.jsonl"
 DUPLICATES_REPORT = "duplicates.jsonl"
+RUN_SUMMARY = "run-summary.json"
 
 
 class PublishedCorpus:
@@ -71,6 +72,19 @@ class PublishedCorpus:
 
     def dedup_report_path(self, name: str) -> pathlib.Path:
         return self._root / DEDUPE / name
+
+    def summary_path(self) -> pathlib.Path:
+        """The run's measured counters, declared by the flow and read by people and browsers."""
+        return self._root / RUN_SUMMARY
+
+    def summary_payload(self, summary: dict) -> str:
+        return json.dumps(summary, indent=2) + "\n"
+
+    def read_summary(self) -> dict | None:
+        path = self.summary_path()
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
 
     def kept_payload(self, plan: DedupPlan) -> str:
         """The URLs this plan keeps, one JSON object per line."""

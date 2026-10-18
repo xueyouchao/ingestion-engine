@@ -15,7 +15,7 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev]"
 # 1. real PDFs from the newest full Common Crawl, straight from the index into corpus/
 .venv/bin/finepdfs fetch-corpus --domain noaa.gov --limit 12
 
-# or restore the pinned 15-Document demo corpus instead of discovering a new one
+# or restore the pinned 18-Document demo corpus instead of discovering a new one
 .venv/bin/finepdfs restore-corpus --manifest docs/demo/pdf-demo-corpus-manifest.json --corpus corpus/pdf-demo
 
 # 2. see what would happen, without writing anything
@@ -32,6 +32,25 @@ The CocoIndex CLI works too, because the pipeline *is* a CocoIndex app:
 .venv/bin/cocoindex update main.py           # incremental update
 .venv/bin/cocoindex update main.py -L        # live: watch the corpus directory
 ~~~~
+
+## The demo, rehearsed
+
+[`docs/demo/`](docs/demo/) pins a real 19-record / 18-Document Corpus and records the rehearsal,
+including measured timings, OCR page evidence and the limitations that remain. The demo command keeps
+its corpus, output and warm CocoIndex database in one isolated root (`.demo/`, gitignored) that a run
+never wipes; only `reset` deletes it.
+
+~~~~bash
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo restore
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --engine docling --engine-command docling
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --engine docling --engine-command docling
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --engine docling --engine-command docling --min-characters 5000
+~~~~
+
+The second run reuses all 18 Extractions and the third changes only the publish decision. Read
+[`docs/demo/pdf-demo-runbook.md`](docs/demo/pdf-demo-runbook.md) for the counters, the summary schema,
+the real Docling page evidence and the honest failures, and
+[`docs/demo/pdf-demo-corpus.md`](docs/demo/pdf-demo-corpus.md) for the pin.
 
 ## What one document goes through
 
@@ -216,6 +235,7 @@ nothing was published, so an operator or a CI can tell "engine is down" from "no
 
 ~~~~
 out/
+  run-summary.json       this run's measured counters, declared by the flow (schema version 1)
   docs/<key>.md          cleaned text of one published document
   records/<key>.json     url, digest, engine, routing decision, language, counts
   pages/<key>.jsonl      one accepted page per line: doc_id, source_url, digest, page_number, text, engine
@@ -286,7 +306,9 @@ the whole crawl.
 
 * `docs/spec/finepdfs-integration.md` -- the specification this was built from
 * [PDF workflow demo plan](docs/spec/pdf-workflow-demo.md) -- two-day priorities, acceptance criteria and optional search
+* [`docs/demo/pdf-demo-corpus.md`](docs/demo/pdf-demo-corpus.md) -- the pinned 19-record / 18-Document Corpus and what it does not demonstrate
+* [`docs/demo/pdf-demo-runbook.md`](docs/demo/pdf-demo-runbook.md) -- the rehearsal: commands, versions, measured runs, OCR page evidence, mutations and limitations
 * `docs/GLOSSARY.md` -- the vocabulary, kept deliberately small
-* `docs/adr/0001..0006` -- the decisions, with the alternatives that lost
+* `docs/adr/0001..0007` -- the decisions, with the alternatives that lost
 * `research/` -- the research behind the design, including `paddleocr-vl-mineru-adapters.md`
 * `research/diagrams/` -- validated architecture diagrams of the FinePDFs pipeline

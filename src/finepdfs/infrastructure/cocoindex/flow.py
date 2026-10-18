@@ -18,6 +18,7 @@ import cocoindex as coco
 from cocoindex.connectors import localfs
 
 from finepdfs.application.curate import CurationOutcome, ExtractionResult, RoutingPlan
+from finepdfs.application.metrics import RunMetrics
 from finepdfs.domain.dedup import (
     DedupPlan,
     DuplicateDecision,
@@ -89,6 +90,9 @@ async def extract_with_engine(digest: str, engine_name: str, engine_identity: st
     if content_digest(content) != digest:
         raise ValueError(f"{path} does not hold the bytes its digest names")
     document = Document(name=str(path), content=content)
+    # This body runs only on a memo miss, so this is one actual Extraction and never a memo hit. It
+    # is counted after the digest check because a file that no longer matches never reaches an engine.
+    runtime.metrics.count_extraction(digest, engine_name, engine_identity)
     return runtime.extraction.extract_with(document, engine_name)
 
 
@@ -124,6 +128,11 @@ async def read_document(request: ReadingRequest) -> DocumentReading:
             raise ValueError(f"{document.path} does not hold the bytes its digest names")
         plan = runtime.extraction.route(content)
         engine = runtime.engines[plan.engine_name]
+        # Route the keeper and remember the memo key this run is about to ask for. The routing
+        # decision is outside the memoised body, so a threshold change can move a document between
+        # text layer and OCR and the key moves with it (ADR-0005).
+        runtime.metrics.route(needs_ocr=plan.decision.needs_ocr)
+        runtime.metrics.request_extraction(document.digest, plan.engine_name, str(engine.identity))
         # The mount path is part of CocoIndex's memo scope, not just the arguments below: naming the
         # component by URL would put a survivor promoted to keeper under a path that never ran, so the
         # corpus would pay for the same bytes twice. The digest is the identity ADR-0005 keys
@@ -182,7 +191,7 @@ async def publish_corpus(readings: tuple[DocumentReading, ...], similar_at: floa
     duplicates = plan.duplicates_by_url()
 
     for item in readings:
-        _declare(published, item, curated, duplicates)
+        _declare(published, item, curated, duplicates, runtime.metrics)
 
     localfs.declare_file(
         published.dedup_report_path(KEPT_REPORT), published.kept_payload(plan), create_parent_dirs=True
@@ -192,6 +201,20 @@ async def publish_corpus(readings: tuple[DocumentReading, ...], similar_at: floa
         published.duplicates_payload(plan),
         create_parent_dirs=True,
     )
+    # The summary is target state too, so the flow stays the only writer and a rerun refreshes it in
+    # place. Its elapsed_seconds measures the run up to this declaration, before CocoIndex applies the
+    # target state; wall-clock timing around the command is what includes the apply.
+    manifest = runtime.corpus().manifest()
+    engine = runtime.engines[runtime.policy.engine_name]
+    summary = runtime.metrics.summary(
+        crawl_id=manifest.crawl_id,
+        domain=manifest.domain,
+        crawl_records=len(readings),
+        documents=len({item.document.digest for item in readings}),
+        engine_name=runtime.policy.engine_name,
+        engine_identity=str(engine.identity),
+    )
+    localfs.declare_file(published.summary_path(), published.summary_payload(summary), create_parent_dirs=True)
 
 
 def _extraction(item: DocumentReading) -> ExtractionResult:
@@ -204,27 +227,28 @@ def _declare(
     item: DocumentReading,
     curated: dict[str, tuple[CorpusDocument, CurationOutcome]],
     duplicates: dict[str, DuplicateDecision],
+    metrics: RunMetrics,
 ) -> None:
     """Declare one document's outputs: its text and record, or the reason it is not published."""
     document = item.document
     decision = duplicates.get(document.url)
     if decision is not None and decision.kind == "exact":
         _declare_exclusion(
-            published, document, f"identical bytes to {decision.duplicate_of}", "exact-duplicate"
+            published, metrics, document, f"identical bytes to {decision.duplicate_of}", "exact-duplicate"
         )
         return
     if item.extracted is None:
-        _declare_exclusion(published, document, item.failure, "failed")
+        _declare_exclusion(published, metrics, document, item.failure, "failed")
         return
 
     outcome = curated[document.url][1]
     if not outcome.published or outcome.record is None:
-        _declare_exclusion(published, document, outcome.reason, outcome.status)
+        _declare_exclusion(published, metrics, document, outcome.reason, outcome.status)
         return
 
     if decision is not None:
         reason = f"near-duplicate of {decision.duplicate_of} (similarity {decision.similarity:.3f})"
-        _declare_exclusion(published, document, reason, "near-duplicate")
+        _declare_exclusion(published, metrics, document, reason, "near-duplicate")
         return
 
     localfs.declare_file(published.doc_path(document.key), outcome.markdown, create_parent_dirs=True)
@@ -238,6 +262,7 @@ def _declare(
         published.pages_payload(_page_records(document, outcome)),
         create_parent_dirs=True,
     )
+    metrics.count_published(len(outcome.pages))
 
 
 def _page_records(document: CorpusDocument, outcome: CurationOutcome) -> tuple[PageRecord, ...]:
@@ -256,12 +281,15 @@ def _page_records(document: CorpusDocument, outcome: CurationOutcome) -> tuple[P
     )
 
 
-def _declare_exclusion(published: PublishedCorpus, document: CorpusDocument, reason: str, kind: str) -> None:
+def _declare_exclusion(
+    published: PublishedCorpus, metrics: RunMetrics, document: CorpusDocument, reason: str, kind: str
+) -> None:
     localfs.declare_file(
         published.exclusion_path(document.key),
         published.exclusion_payload(document.url, reason, kind),
         create_parent_dirs=True,
     )
+    metrics.count_exclusion(kind)
 
 
 @coco.fn
