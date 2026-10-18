@@ -404,6 +404,6 @@ the whole crawl.
 * [`docs/demo/pdf-demo-corpus.md`](docs/demo/pdf-demo-corpus.md) -- the pinned 19-record / 18-Document Corpus and what it does not demonstrate
 * [`docs/demo/pdf-demo-runbook.md`](docs/demo/pdf-demo-runbook.md) -- the rehearsal: commands, versions, measured runs, OCR page evidence, mutations and limitations
 * `docs/GLOSSARY.md` -- the vocabulary, kept deliberately small
-* `docs/adr/0001..0008` -- the decisions, with the alternatives that lost
+* `docs/adr/0001..0009` -- the decisions, with the alternatives that lost
 * `research/` -- the research behind the design, including `paddleocr-vl-mineru-adapters.md`
 * `research/diagrams/` -- validated architecture diagrams of the FinePDFs pipeline
