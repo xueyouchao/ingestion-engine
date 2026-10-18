@@ -20,7 +20,7 @@ def document_key(url: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class CorpusDocument:
-    """One document in the corpus, with the key the flow mounts it under."""
+    """One document in the corpus, with the key its published outputs are named after."""
 
     key: str
     url: str

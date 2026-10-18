@@ -11,6 +11,7 @@ from finepdfs.interfaces.cli import build_parser
     "argv, expected_command",
     [
         (["fetch-corpus", "--domain", "noaa.gov"], "fetch-corpus"),
+        (["restore-corpus", "--manifest", "pinned.json"], "restore-corpus"),
         (["inspect", "--corpus", "c"], "inspect"),
         (["dry-run", "--corpus", "c", "--engine", "mineru"], "dry-run"),
         (["run", "--corpus", "c", "--out", "o", "--engine", "paddleocr-vl"], "run"),
@@ -53,6 +54,11 @@ def test_an_unknown_engine_is_rejected() -> None:
 def test_fetch_corpus_needs_a_domain() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["fetch-corpus"])
+
+
+def test_restore_corpus_needs_a_manifest() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["restore-corpus"])
 
 
 def test_a_flag_that_was_not_given_leaves_the_environment_alone(monkeypatch) -> None:

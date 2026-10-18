@@ -15,6 +15,9 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev]"
 # 1. real PDFs from the newest full Common Crawl, straight from the index into corpus/
 .venv/bin/finepdfs fetch-corpus --domain noaa.gov --limit 12
 
+# or restore the pinned 15-Document demo corpus instead of discovering a new one
+.venv/bin/finepdfs restore-corpus --manifest docs/demo/pdf-demo-corpus-manifest.json --corpus corpus/pdf-demo
+
 # 2. see what would happen, without writing anything
 .venv/bin/finepdfs dry-run
 

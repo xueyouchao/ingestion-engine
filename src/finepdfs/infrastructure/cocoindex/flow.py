@@ -19,6 +19,7 @@ from cocoindex.connectors import localfs
 
 from finepdfs.application.curate import CurationOutcome, ExtractionResult, RoutingPlan
 from finepdfs.domain.dedup import (
+    DedupPlan,
     DuplicateDecision,
     PublishedDocumentView,
     exact_duplicate_keepers,
@@ -122,8 +123,13 @@ async def read_document(request: ReadingRequest) -> DocumentReading:
             raise ValueError(f"{document.path} does not hold the bytes its digest names")
         plan = runtime.extraction.route(content)
         engine = runtime.engines[plan.engine_name]
+        # The mount path is part of CocoIndex's memo scope, not just the arguments below: naming the
+        # component by URL would put a survivor promoted to keeper under a path that never ran, so the
+        # corpus would pay for the same bytes twice. The digest is the identity ADR-0005 keys
+        # Extraction on, so it names the component too. A database written before this path existed
+        # misses once and re-reads each document before memoising it again.
         extracted = await coco.use_mount(
-            coco.component_subpath("extract", document.key),
+            coco.component_subpath("extract", document.digest),
             extract_with_engine,
             document.digest,
             plan.engine_name,
@@ -160,10 +166,22 @@ async def publish_corpus(readings: tuple[DocumentReading, ...], similar_at: floa
         ],
         similarity_threshold=similar_at,
     )
-    near_duplicate = {decision.url: decision for decision in plan.duplicates if decision.kind == "near"}
+    # Reuse the digest keepers that skipped Extraction; they also explain every exact exclusion.
+    exact = [
+        DuplicateDecision(
+            url=item.document.url, kind="exact", duplicate_of=item.exact_duplicate_of, similarity=1.0
+        )
+        for item in readings
+        if item.exact_duplicate_of
+    ]
+    plan = DedupPlan(
+        keepers=plan.keepers,
+        duplicates=tuple(sorted([*plan.duplicates, *exact], key=lambda decision: decision.url)),
+    )
+    duplicates = plan.duplicates_by_url()
 
     for item in readings:
-        _declare(published, item, curated, near_duplicate)
+        _declare(published, item, curated, duplicates)
 
     localfs.declare_file(
         published.dedup_report_path(KEPT_REPORT), published.kept_payload(plan), create_parent_dirs=True
@@ -184,13 +202,14 @@ def _declare(
     published: PublishedCorpus,
     item: DocumentReading,
     curated: dict[str, tuple[CorpusDocument, CurationOutcome]],
-    near_duplicate: dict[str, DuplicateDecision],
+    duplicates: dict[str, DuplicateDecision],
 ) -> None:
     """Declare one document's outputs: its text and record, or the reason it is not published."""
     document = item.document
-    if item.exact_duplicate_of:
+    decision = duplicates.get(document.url)
+    if decision is not None and decision.kind == "exact":
         _declare_exclusion(
-            published, document, f"identical bytes to {item.exact_duplicate_of}", "exact-duplicate"
+            published, document, f"identical bytes to {decision.duplicate_of}", "exact-duplicate"
         )
         return
     if item.extracted is None:
@@ -202,7 +221,6 @@ def _declare(
         _declare_exclusion(published, document, outcome.reason, outcome.status)
         return
 
-    decision = near_duplicate.get(document.url)
     if decision is not None:
         reason = f"near-duplicate of {decision.duplicate_of} (similarity {decision.similarity:.3f})"
         _declare_exclusion(published, document, reason, "near-duplicate")
