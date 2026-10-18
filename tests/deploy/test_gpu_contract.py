@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 
 import pytest
+from lease_holder import hold_reservation_then_die
 
 from deploy.gpu import contract
 from finepdfs.infrastructure.compute.providers import GpuStartFailed, endpoint_from_start_output
@@ -295,6 +296,16 @@ def test_a_detail_that_carries_a_url_is_refused_without_repeating_it() -> None:
     assert TUNNEL not in str(caught.value)
 
 
+def _second_start_is_refused(path: Path) -> str:
+    """Ask for a reservation that is already held, and return the message that refused it."""
+    with (
+        pytest.raises(contract.WorkerContractError, match="reserv") as caught,
+        contract.lease_reservation(path),
+    ):
+        raise AssertionError("a second reservation must not be granted")
+    return str(caught.value)
+
+
 def test_a_lease_reservation_is_held_until_the_lease_is_written_and_is_never_read_as_a_lease(tmp_path) -> None:
     """Reading the lease and creating the worker must be one critical section, so the gate is owned."""
     path = tmp_path / "leases" / "manual.json"
@@ -302,10 +313,11 @@ def test_a_lease_reservation_is_held_until_the_lease_is_written_and_is_never_rea
 
     with contract.lease_reservation(path):
         assert reservation.exists()
-        assert reservation.read_text(encoding="utf-8") == str(os.getpid())
         assert sorted(path.parent.glob("*.json")) == [], "a reservation is not a lease"
+        _second_start_is_refused(path)
 
-    assert not reservation.exists(), "the reservation is released with the start"
+    assert reservation.exists(), "the lock file stays: unlinking it could split the lock's inode"
+    assert contract.read_lease(path) is None, "a lock file is never read as a lease"
 
 
 def test_a_lease_reservation_is_released_when_the_start_fails(tmp_path) -> None:
@@ -315,32 +327,68 @@ def test_a_lease_reservation_is_released_when_the_start_fails(tmp_path) -> None:
     with pytest.raises(RuntimeError, match="quota"), contract.lease_reservation(path):
         raise RuntimeError("quota exceeded")
 
-    assert not contract.reservation_path(path).exists()
+    with contract.lease_reservation(path):
+        pass
 
 
-def test_a_live_reservation_refuses_a_second_one_and_names_the_holder(tmp_path) -> None:
-    """O_EXCL, not flock: two starts in one process, and two processes, both conflict."""
+def test_a_live_reservation_refuses_a_second_one_without_inventing_a_holder(tmp_path) -> None:
+    """Each acquisition opens its own descriptor, and flock locks per descriptor: threads conflict too.
+
+    The refusal names the lease, not a pid: the lock file is bookkeeping, not a claim about who is
+    alive, and an unrelated process that inherited the pid must not be reported as the owner.
+    """
     path = tmp_path / "manual.json"
 
-    with (
-        contract.lease_reservation(path),
-        pytest.raises(contract.WorkerContractError, match="reserv") as caught,
-        contract.lease_reservation(path),
-    ):
-        raise AssertionError("a second reservation must not be granted")
+    with contract.lease_reservation(path):
+        message = _second_start_is_refused(path)
 
-    assert str(os.getpid()) in str(caught.value), "the message names the start that holds it"
+    assert "manual.json" in message, "the message names the lease that is taken"
+    assert "(pid" not in message, "the holder is unnameable: a pid here would be a guess"
+    assert str(os.getpid()) not in message
 
 
-@pytest.mark.parametrize("stale", ["999999", "", "not-a-pid", "0"])
-def test_a_reservation_left_by_a_dead_or_unreadable_holder_is_reclaimed(tmp_path, stale: str) -> None:
-    """A crash must not block the lease for ever: no lock a dead process holds, no unreadable lock."""
+def test_a_lock_file_naming_an_unrelated_live_pid_does_not_block_the_lease(tmp_path) -> None:
+    """A crashed start leaves ``manual.json.lock`` behind, and the pid in it may belong to anyone now.
+
+    Pid reuse is what broke crash recovery: the file named a process that had never reserved anything,
+    the old liveness check called that process the holder, and the next start refused to rent for ever
+    (this reproducer failed against that design with "another start (pid ...) is reserving"). Nothing
+    holds the lock here, so the reservation is granted whatever a leftover file happens to say.
+    """
     path = tmp_path / "manual.json"
     reservation = contract.reservation_path(path)
     reservation.parent.mkdir(parents=True, exist_ok=True)
-    reservation.write_text(stale, encoding="utf-8")
+    reservation.write_text(str(os.getpid()), encoding="utf-8")
+
+    with contract.lease_reservation(path) as held:
+        assert held == reservation
 
     with contract.lease_reservation(path):
-        assert reservation.read_text(encoding="utf-8") == str(os.getpid())
+        pass
 
-    assert not reservation.exists()
+
+def test_a_crashed_holder_releases_the_reservation_when_its_process_dies(tmp_path) -> None:
+    """The kernel releases the lock with the process, which is what makes a crash recoverable.
+
+    A start killed while renting leaves its worker id unrecorded and its lock held. The child here takes
+    the real reservation and dies without releasing it. The parent first shows the lock is held while the
+    child is alive -- a reservation that refused nothing would prove nothing about the release -- then
+    lets the child die and asks for the same reservation again. No pid is read anywhere, so the only thing
+    that can free the lock is the OS releasing it with the process.
+    """
+    path = tmp_path / "manual.json"
+    holder = hold_reservation_then_die(path, tmp_path)
+
+    try:
+        holder.wait_until_holding()
+        _second_start_is_refused(path)
+        status = holder.die_holding()
+    finally:
+        if holder.process.poll() is None:  # pragma: no cover - only on a failed assertion above
+            holder.kill()
+
+    assert status == 1, "the child died holding the reservation rather than releasing it"
+    assert contract.reservation_path(path).exists(), "the dead start's lock file is still there"
+
+    with contract.lease_reservation(path) as reservation:
+        assert reservation.exists(), "and it is not the lock: the reservation is granted again"

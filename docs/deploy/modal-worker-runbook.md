@@ -128,10 +128,16 @@ the weights revision and image digest and never the address. `start` refuses to 
 lease: run `stop` first, so a previous worker is never orphaned. If a start fails after creating the
 worker, the id is already on disk and `stop` is the next command.
 
-Two hand-run starts would name the same `manual.json`, so a start reserves it for its whole
-read-check-create-write sequence (`manual.json.lock`, holding that start's pid). A second start in that
-window exits nonzero and names the pid that holds the lease; a `.lock` left by a start that died is
-reclaimed by the next start, so it never has to be removed by hand.
+Two hand-run starts would name the same `manual.json`, so a start takes that file's reservation for its
+whole read-check-create-write sequence: an OS lock (`flock`) on the sibling `manual.json.lock`. A second
+start in that window exits nonzero saying another start is reserving the lease; it cannot name a pid,
+because the lock file is not a claim about who is alive. The OS releases the lock when the start ends,
+including when it crashes, so there is nothing to clean up and nothing to reclaim.
+
+The `.lock` file stays on disk after every start, and that is expected: the scripts close it and never
+delete it (deleting a lock file lets two starts lock different files). A `.lock` is harmless bookkeeping
+and is never a lease -- every reader looks for `*.json` -- so do not delete one and do not treat its
+presence as "a worker is running". `ls ~/.cache/finepdfs/gpu-workers/*.json` shows the leases.
 
 The tunnel URL is the credential: both scripts mask any URL before they print it (the scheme stays, the
 host does not), so an error names what failed and never the address. The one place the address appears is the endpoint JSON on

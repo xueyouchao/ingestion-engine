@@ -7,10 +7,10 @@ survives this process exiting, and is terminated by id from the stop command. No
 
 Ordering is the contract:
 
-1. reserve this lease's file, and keep the reservation until its worker id is recorded: a hand-run start
-   has no provider identity, so two of them share ``manual.json`` and without the reservation both pass
-   the gate, both rent a worker, and the later write drops the earlier id -- a GPU billing with no handle
-   stop can find;
+1. take this lease's reservation -- an OS ``flock`` on the sibling lock file -- and keep it until the
+   worker id is recorded: a hand-run start has no provider identity, so two of them share
+   ``manual.json`` and without the reservation both pass the gate, both rent a worker, and the later
+   write drops the earlier id -- a GPU billing with no handle stop can find;
 2. create the Sandbox;
 3. write its id to the lease state *immediately*, before any readiness wait, so a start that times out
    or fails readiness still leaves the stop command something to terminate. The file is the one named
@@ -93,9 +93,10 @@ def _import_sdk() -> Any:
 def _create_worker(modal: Any, environ: Mapping[str, str]) -> Any:
     """Rent one worker while holding this lease's reservation, from the gate until its id is recorded.
 
-    The reservation is the lock (``lease_reservation``): it covers the read/check below and the
+    The reservation is the OS lock (``lease_reservation``): it covers the read/check below and the
     ``Sandbox.create`` that follows, so two hand-run starts cannot both pass the gate. It is released
-    when the lease file has the id, or when either step fails.
+    when the lease file has the id, or when either step fails, and released by the kernel if this process
+    dies first -- which is why a crashed start cannot block the lease.
     """
     path = lease_file(environ)
     with lease_reservation(path):

@@ -95,11 +95,20 @@ run's lease. An identity the provider chooses, rather than a path an operator mu
 what makes two concurrent runs independent. A start run by hand has no provider to mint one and records
 under the fixed `manual` name, so `start` then `stop` from one shell still meet.
 
-Two hand-run starts therefore name the same file, and an identity cannot tell them apart. A start
-reserves that file for its whole read-check-create-write sequence: a sibling `<identity>.json.lock`
-created with `O_EXCL` and holding the start's pid. A second start inside the window exits nonzero naming
-the pid that holds it, and a reservation whose pid is gone is reclaimed, so a crashed start cannot hold a
-lease for ever. `flock` was rejected for this: it does not conflict between two threads of one process.
+Two hand-run starts therefore name the same file, and an identity cannot tell them apart. A start takes
+that file's reservation for its whole read-check-create-write sequence: an `fcntl.flock` exclusive,
+non-blocking lock on a sibling `<identity>.json.lock`. A second start inside the window exits nonzero
+saying another start is reserving the lease, and it is not told a pid, because a lock file says nothing
+about who holds the lock now. The kernel releases the lock when the holding process ends -- closed
+normally, killed, or crashed -- so recovery from a crash is the OS's job rather than a reader's guess.
+The lock file is closed and never unlinked: unlinking would let the next start create a new file and lock
+a different inode while the old one is still held. A leftover `.lock` is bookkeeping, never a lease (every
+reader here looks for `*.json`).
+
+Two earlier designs were rejected. An `O_EXCL` file holding the start's pid made recovery depend on pid
+liveness, and a recycled pid belonging to an unrelated live process blocked the lease for ever. Using a
+single `flock` descriptor, or one inherited across a `fork`, would not conflict between two threads of one
+process; a fresh `os.open` per acquisition does, because `flock` locks are per open file description.
 
 ### The Modal unit is a detached Sandbox, not a deployed app
 

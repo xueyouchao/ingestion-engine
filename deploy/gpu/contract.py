@@ -10,7 +10,7 @@ This module owns the parts that must not be re-decided per vendor:
 * the lease state, one file per lease and named after the identity the provider gives that lease,
   written as soon as a worker exists and before any readiness wait, so a stop can still find and
   terminate a worker that never finished starting, and cannot find another run's;
-* the lease reservation, a sibling file a start holds from before it reads that lease until the lease
+* the lease reservation, a sibling lock a start holds from before it reads that lease until the lease
   records its worker, so two hand-run starts that share the unnamed ``manual`` lease cannot both rent a
   worker and lose one of the two ids to the later write;
 * redaction of anything secret -- a credential or the leased address -- from text that is about to be
@@ -21,6 +21,7 @@ It imports no vendor SDK, so the offline suite can test it with no Modal install
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -71,10 +72,10 @@ LEASE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 # A start owns its lease between reading it and recording its worker, and a hand-run start's lease is the
 # fixed `manual` name: without ownership two starts read no lease, both rent a worker, and the later write
-# drops the earlier id, leaving a GPU billing with no handle stop can find. The reservation is a sibling
-# file with a non-JSON suffix, created O_EXCL so it is atomic across processes *and* threads (flock is not:
-# two starts in one process' threads do not conflict on it). It is never a lock a crash holds for ever: a
-# reservation that names no live pid is stale and the next start reclaims it.
+# drops the earlier id, leaving a GPU billing with no handle stop can find. The reservation is an OS lock
+# (`flock`) on a sibling file with a non-JSON suffix. The OS releases it when the holding descriptor closes
+# or the process dies, so recovery from a crash is the kernel's job, and a file left behind names no owner
+# anybody has to trust: the pid that wrote it may belong to an unrelated process by the time it is read.
 RESERVATION_SUFFIX = ".lock"
 
 # Environment names whose values must never reach stdout, stderr or a log line.
@@ -255,7 +256,8 @@ def reservation_path(lease_path: Path) -> Path:
     """The sibling file that reserves ``lease_path`` while a start rents its worker.
 
     A sibling because it guards one lease, and non-JSON because it is not a lease: every reader here
-    looks for ``*.json``, and a pid must never be read as a worker id.
+    looks for ``*.json``, so a lock file that outlives the start that created it is never read as a
+    worker id.
     """
     return lease_path.with_name(lease_path.name + RESERVATION_SUFFIX)
 
@@ -266,54 +268,42 @@ def lease_reservation(lease_path: Path) -> Iterator[Path]:
 
     That is the whole gate -- read, check, create, write -- and holding it is what protects the one case
     the provider's per-lease identity cannot: two starts run by hand, which both name the same file. The
-    reservation carries the holder's pid, so a live start is reported rather than raced, and it is
-    released in ``finally``, so a failed ``Sandbox.create`` or ``write_lease`` does not block the lease.
+    hold is an OS lock (``flock``) on the sibling file, so the kernel is the only judge of who holds it:
+
+    * a second start is refused, in another process or in another thread of this one, because each
+      acquisition opens its own descriptor and ``flock`` locks are per descriptor, not per process;
+    * a start that crashes releases it, because the kernel drops a lock when the holding descriptor goes
+      away. No pid is read and no liveness is guessed at: the pid a dead start left in the file can belong
+      to an unrelated process by the time anyone looks, so trusting it is how a lease gets blocked for ever;
+    * the file is closed and never unlinked. Unlinking would let a second start create a *new* file and
+      lock a different inode while the first still holds the old one -- the split lock, reintroduced.
+
+    A leftover ``.lock`` is therefore harmless bookkeeping: it is not JSON, and every reader here looks for
+    ``*.json``, so a lock file can never be mistaken for a lease.
     """
     reservation = reservation_path(lease_path)
     try:
         reservation.parent.mkdir(parents=True, exist_ok=True)
     except OSError as error:
         raise _uncreatable(reservation, error) from error
-    _claim_reservation(reservation)
     try:
+        descriptor = os.open(reservation, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as error:
+        raise _uncreatable(reservation, error) from error
+    # The descriptor is not inheritable (``os.open`` sets close-on-exec), so nothing this start launches
+    # can outlive it holding the lock: the reservation ends with the process that took it.
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # The holder is unnameable on purpose: this file says nothing about who holds the lock now.
+            raise WorkerContractError(
+                f"another start is reserving the GPU lease at {lease_path}; "
+                "wait for it to finish or check whether it is still running"
+            ) from None
         yield reservation
     finally:
-        reservation.unlink(missing_ok=True)
-
-
-def _claim_reservation(reservation: Path) -> None:
-    """Create the reservation exclusively, replacing a holder that is gone at most once."""
-    try:
-        _create_reservation(reservation)
-        return
-    except FileExistsError:
-        pass
-    except OSError as error:
-        raise _uncreatable(reservation, error) from error
-    holder = _reserved_pid(reservation)
-    if holder is not None and _process_is_alive(holder):
-        raise WorkerContractError(
-            f"another start (pid {holder}) is reserving the GPU lease at {reservation}; "
-            "wait for it to finish or check whether it is still running"
-        ) from None
-    # A start that crashed leaves this file behind with a pid nothing owns now. Reclaim it once, and the
-    # retry still has to win O_EXCL: a start that is alive can never have its reservation taken away.
-    try:
-        reservation.unlink()
-    except FileNotFoundError:
-        pass
-    except OSError as error:
-        raise WorkerContractError(
-            f"the stale GPU lease reservation at {reservation} cannot be removed: {error}"
-        ) from error
-    try:
-        _create_reservation(reservation)
-    except FileExistsError:
-        raise WorkerContractError(
-            f"the GPU lease reservation at {reservation} reappeared while it was being reclaimed"
-        ) from None
-    except OSError as error:
-        raise _uncreatable(reservation, error) from error
+        os.close(descriptor)
 
 
 def _uncreatable(reservation: Path, error: OSError) -> WorkerContractError:
@@ -321,43 +311,6 @@ def _uncreatable(reservation: Path, error: OSError) -> WorkerContractError:
     return WorkerContractError(
         f"the GPU lease reservation at {reservation} cannot be created: {error}"
     )
-
-
-def _create_reservation(reservation: Path) -> None:
-    descriptor = os.open(reservation, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    try:
-        os.write(descriptor, str(os.getpid()).encode("ascii"))
-    finally:
-        os.close(descriptor)
-
-
-def _reserved_pid(reservation: Path) -> int | None:
-    """The pid a reservation names, or ``None`` when it names no usable one.
-
-    An unreadable reservation is stale, not a reason to wait: whatever wrote it cannot be waited for, and
-    blocking the lease on it would be the lock a crash leaves behind for ever.
-    """
-    try:
-        text = reservation.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    if not text.isdigit():
-        return None
-    pid = int(text)
-    # Zero and negative pids are process groups to os.kill, not processes, so they are never a holder.
-    return pid if pid > 0 else None
-
-
-def _process_is_alive(pid: int) -> bool:
-    """Whether this pid names a process that exists; a pid we may not signal exists."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        # PermissionError and anything else: the process is there and not ours to signal.
-        return True
-    return True
 
 
 def positive_seconds(environ: Mapping[str, str], name: str, default: int) -> int:

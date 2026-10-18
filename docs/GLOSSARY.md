@@ -82,9 +82,11 @@ terminate. Written before the Worker is known to be ready, removed once it is gi
 after the Lease Identity so two runs cannot read, clear or stop each other's.
 
 **Lease Reservation** — a start's exclusive hold on one Lease State file, taken before that file is read
-and released once the Worker id is recorded. It keeps two starts that would name the same file from both
-passing the check and renting a Worker, and it is not durable state: a reservation whose holder is gone is
-reclaimed by the next start, so a crash never blocks the Lease.
+and released once the Worker id is recorded. It is an operating-system lock on a sibling file
+(`<identity>.json.lock`), not a claim about which process is alive: a second start is refused while the lock
+is held, and the OS releases it when the holding process ends, normally or by crashing. The lock file may
+outlive its holder and is harmless bookkeeping — a Lease Reservation is never a Lease State and is never
+read as one.
 
 **Lease** — the hold a run takes on a GpuProvider's Endpoint, released on the way out, including when
 the run fails: a rented Worker is given back either way, because a leaked GPU bills by the hour.

@@ -21,6 +21,7 @@ from fake_modal import (
     ScriptRunner,
     worker_environment,
 )
+from lease_holder import hold_reservation_then_die
 
 from deploy.gpu.contract import (
     VLLM_IMAGE,
@@ -29,6 +30,7 @@ from deploy.gpu.contract import (
     WORKER_PORT,
     LeaseState,
     lease_file,
+    lease_reservation,
     read_lease,
     reservation_path,
     write_lease,
@@ -188,7 +190,8 @@ def test_a_lease_that_cannot_be_written_terminates_the_worker(tmp_path, capsys, 
 
     assert modal.sandbox.terminated is True
     assert "could not be written" in capsys.readouterr().err
-    assert not reservation_path(lease_dir / "manual.json").exists(), "the reservation is released"
+    with lease_reservation(lease_dir / "manual.json"):
+        pass
 
 
 def test_a_state_directory_that_cannot_be_reserved_rents_no_worker(tmp_path, capsys) -> None:
@@ -385,24 +388,52 @@ def test_two_overlapping_manual_starts_rent_one_worker(tmp_path, capsys) -> None
     assert not first.is_alive()
     assert outcome["code"] == 0, "the first start still succeeds"
     assert read_lease(lease_file(values)).worker_id == "sb-first", "the first worker's id survives"
-    assert not reservation_path(lease_file(values)).exists()
+    with lease_reservation(lease_file(values)):
+        pass
 
 
-def test_a_start_reclaims_a_stale_reservation_left_by_a_dead_process(tmp_path) -> None:
-    """A crashed start must not block the lease for ever: the dead holder's reservation is taken over."""
+def test_a_start_after_a_crashed_start_can_still_rent(tmp_path, capsys) -> None:
+    """A start killed while renting must not block the lease: the OS frees the lock when it dies.
+
+    The old design read the pid the dead start left in ``manual.json.lock`` and asked whether a process
+    with that pid existed. Once the pid was recycled that was an unrelated live process, so the lease was
+    blocked for ever -- the crash-recovery bug this replaces. The child here takes the real reservation and
+    dies without releasing it, and both directions are shown: the start is refused while the child holds
+    it, and it rents once the child is gone. Every wait is bounded, so a stuck child fails instead of
+    hanging the suite.
+    """
     lease_dir = _leases(tmp_path)
     values = worker_environment(lease_dir)
-    stale = reservation_path(lease_file(values))
-    stale.parent.mkdir(parents=True)
-    stale.write_text("999999", encoding="utf-8")
+    path = lease_file(values)
+    holder = hold_reservation_then_die(path, tmp_path)
+
+    try:
+        holder.wait_until_holding()
+
+        blocked = FakeModal(lease_dir, object_id="sb-blocked")
+        assert start.main(values, sdk=blocked, opener=RecordingOpener()) == 1
+        assert blocked.created == {}, "a start is refused while another one reserves the lease"
+        assert "reserv" in capsys.readouterr().err
+        assert read_lease(path) is None, "the refused start recorded nothing"
+
+        status = holder.die_holding()
+    finally:
+        if holder.process.poll() is None:  # pragma: no cover - only on a failed assertion above
+            holder.kill()
+
+    assert status == 1, "the child died holding the reservation rather than releasing it"
+    assert reservation_path(path).exists(), "the dead start's lock file is still on disk"
 
     assert start.main(values, sdk=FakeModal(lease_dir), opener=RecordingOpener()) == 0
 
-    assert not stale.exists()
-    assert read_lease(lease_file(values)).worker_id == "sb-abc123"
+    assert read_lease(path).worker_id == "sb-abc123"
+    assert [candidate.name for candidate in sorted(lease_dir.glob("*.json"))] == ["manual.json"], (
+        "the lock file is bookkeeping; the lease is the only *.json"
+    )
 
 
-def test_a_successful_start_leaves_no_reservation_and_stop_frees_the_lease_for_the_next_one(tmp_path) -> None:
+def test_a_successful_start_leaves_the_lock_file_and_stop_frees_the_lease_for_the_next_one(tmp_path) -> None:
+    """A clean start releases the reservation and keeps its lock file; stop clears only the lease."""
     lease_dir = _leases(tmp_path)
     values = worker_environment(lease_dir)
     path = lease_file(values)
@@ -410,13 +441,16 @@ def test_a_successful_start_leaves_no_reservation_and_stop_frees_the_lease_for_t
 
     assert start.main(values, sdk=FakeModal(lease_dir), opener=RecordingOpener()) == 0
 
-    assert not reservation.exists(), "the reservation ends when the lease records the worker"
+    assert reservation.exists(), "the lock file stays after a clean release, and is not a lease"
     assert path.exists()
 
     assert stop.main(values, sdk=FakeStopModal()) == 0
-    assert not path.exists()
+    assert not path.exists(), "stop forgets the worker"
+    assert not sorted(lease_dir.glob("*.json")), "no lease survives the stop, and the .lock is not one"
+    assert reservation.exists(), "the stop removed the lease and left the lock file alone"
+    assert read_lease(path) is None, "a state directory holding only a .lock reads as no lease"
 
     assert start.main(values, sdk=FakeModal(lease_dir, object_id="sb-def456"), opener=RecordingOpener()) == 0
 
     assert read_lease(path).worker_id == "sb-def456"
-    assert not reservation.exists()
+    assert reservation.exists()
