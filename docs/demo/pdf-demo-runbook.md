@@ -570,6 +570,47 @@ unsupported answer is reported as insufficient evidence; answer correctness beyo
 property, observed twice per question here.
 
 
+## The browser explorer, verified
+
+The P1 explorer was exercised in a real browser on 2026-10-18 against a completed current-head
+output; the "no browser" wording this file used to carry was wrong. Chrome was Google Chrome
+148.0.7778.96 driven by `chrome-devtools-axi` 0.1.44. Serve a completed run and open the page:
+
+```bash
+# one completed current-head run; pymupdf was the only engine installed on the verification host
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo run --root <root> --engine pymupdf
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli explore \
+  --out <root>/out --corpus <root>/corpus --host 127.0.0.1 --port 8791
+# then open http://127.0.0.1:8791/
+```
+
+Observed:
+
+* **Status table:** 19 rows for 19 declared Crawl Records; the summary read 19 / 18 documents,
+  routing native 16 / ocr 2, extraction calls 0 / reused 18, 15 documents / 310 page records,
+  exclusions 4 (dropped 2, exact-duplicate 1, near-duplicate 1), elapsed 1.4 s (observed), engine
+  `pymupdf@1.28.2`.
+* **Filters:** `storm` in URL-or-text -> 6 rows; Routing `text-layer` -> 15; Status
+  near-duplicate 1, exact-duplicate 1, dropped 2, published 15.
+* **Document detail:** source URL, `Latn`, Engine Identity, routing reason, "44 accepted, 1
+  dropped, 45 original", and accepted pages listed as Page 2...45 in original numbering with one
+  `Open PDF page N` link each.
+* **Retained PDF:** a page link opened `/pdf/<digest>.pdf#page=2` and Chrome's viewer reported
+  `2 / 45`, so the locally retained PDF is served at the original page.
+* **Refresh:** an unchanged warm rerun (0 calls, 18 reused, same counters) moved the observed
+  elapsed from 1.5 s to 1.4 s and the finish timestamp; the page's poll and `Refresh now` both
+  showed the new observation while the declared counters stayed identical.
+* **Console:** no messages, so no console errors; every request answered 200.
+
+Screenshots were temporary evidence under `/tmp/pdf-demo-browser-verify/` (`01-status-table.png`,
+`02-document-detail.png`, `03-pdf-page2.png`, `04-filter-text.png`,
+`05-filter-near-duplicate.png`) and are not committed. Limitations: the verification host had no
+Docling, so the two OCR-routed scans produced no text and were dropped by the publish floor -- the
+routing filter therefore offered only `text-layer`, and an `ocr` routing reason and a Docling Engine
+Identity were not re-verified here. Search was not exercised either: that run declared no chunks and
+no index (P1 does not require search), so the search view showed its "no index" state.
+
+
 ## Dry run is not a free estimate
 
 `finepdfs dry-run` curates in process through `CurateDocument`: it does not go through the CocoIndex
@@ -591,7 +632,7 @@ corpus.
   Spanish newsletter is `Latn` on every page, the same tag as English, so this Corpus does not
   demonstrate per-language tagging either.
 * **No real bad input in the pin.** The `not_a_pdf.pdf` rehearsal is controlled, and labelled so.
-* **No retrieval claim.** 18 Documents, one host, no browser; search here is the local SQLite FTS5
+* **No retrieval claim.** 18 Documents, one host, one engine; search here is the local SQLite FTS5
   fallback described above. The demo demonstrates the ingestion and citation architecture, not
   retrieval quality at corpus scale.
 * **One CPU host, one engine.** Only Docling was run live. PaddleOCR-VL and MinerU are tested against
