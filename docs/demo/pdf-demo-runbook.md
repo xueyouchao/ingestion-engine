@@ -100,7 +100,8 @@ What this Corpus does and does not demonstrate is stated in
 [`pdf-demo-corpus.md#what-this-does-and-does-not-demonstrate`](pdf-demo-corpus.md#what-this-does-and-does-not-demonstrate).
 In short: it demonstrates routing, real OCR, cleaning, duplicates, exclusions and incrementality on a
 small fixed input. It does **not** demonstrate retrieval quality or ranking at corpus scale; 18
-Documents is not a corpus-scale claim, and the browser/search stages are outside this runbook.
+Documents is not a corpus-scale claim. Search is covered below as the budget-driven local fallback; the
+browser stage is outside this runbook.
 
 ## Measured runs
 
@@ -283,6 +284,104 @@ own key, with no duplicate exclusion pointing at a record that is gone.
 In every case the summary shows the failure: `failed` in `exclusions.by_kind` and one fewer
 `routing.documents` than `corpus.documents`.
 
+## Search accepted evidence: the local fallback
+
+The source spec proposed a pinned single-node Elasticsearch for this stage and allowed exactly one
+cut: if it cannot be made stable inside the budget, index the *same record contract* in a local
+full-text store and ship one backend, never two. The check is `command -v elasticsearch` plus the
+configured endpoint; on the rehearsal host (2026-10-18) neither existed, and standing one up reliably
+did not fit the remaining budget. So the one shipped backend is **SQLite FTS5** (Python standard
+library), behind the shared
+contract, with **no embeddings**. This is the budget-driven fallback, not a second permanent design;
+if a real deployment is ever wanted it replaces this adapter rather than sitting beside it (see
+[ADR-0008](../adr/0008-one-local-search-backend.md)).
+
+### What the flow declares
+
+Every published Document already declared its accepted Page Texts under `out/pages/<key>.jsonl`. It now
+also declares deterministic chunks under `out/chunks/<key>.jsonl`, one JSON object per line:
+
+```json
+{"chunk_id": "0a1b2c3d4e5f60718293a4b5c6d7e8f9", "chunking_version": "chunking-v1",
+ "digest": "…", "doc_id": "5861c9f211cace9b", "end_offset": 342, "engine": "pymupdf@…",
+ "language": "Latn", "ordinal": 0, "page_number": 1, "source_url": "https://…",
+ "start_offset": 0, "text": "…"}
+```
+
+Chunking rules (`chunking-v1`; bumping `CHUNKING_VERSION` changes every `chunk_id`):
+
+* only accepted Page Texts are chunked, under the original 1-based page number;
+* a chunk never spans pages, so a citation is one page;
+* a page is split at blank lines and paragraphs are grouped up to 1,200 characters; an over-long
+  paragraph is split at whitespace;
+* `start_offset`/`end_offset` are character offsets into that page's exported text, and
+  `text == page_text[start_offset:end_offset]`;
+* `ordinal` runs over the Document's chunks in page order.
+
+Pages and Markdown are unchanged by this. Because chunks are declared target state like the pages, a
+replacement with fewer pages, a Document that becomes an exclusion or duplicate, or a Crawl Record that
+leaves the manifest retracts the obsolete chunk files on the next run -- the index never has to guess.
+
+### Commands
+
+```bash
+# rebuild the index from the current declared chunks (idempotent; deletes rows no longer declared)
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli index-search \
+  --out .demo/out --index .demo/out/search.db
+
+# query it; metadata filters and JSON output use the same contract the browser and agent read
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli search \
+  --index .demo/out/search.db "dropwindsonde"
+
+PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli search \
+  --index .demo/out/search.db --language Latn --engine pymupdf@… --top-k 5 --json "storm"
+```
+
+`index-search` prints how many chunks were stored and how many were retracted, and exits 1 if any
+chunk failed to store (each failure names the `chunk_id` and the reason). `search` exits 2 when the
+index does not exist and prints no matches rather than an error when a valid query finds nothing. The
+index itself is derived state: it is not declared by the flow, so after a run that changes evidence,
+re-run `index-search` before searching.
+
+### The contract
+
+`finepdfs/domain/search.py` is the shape; no backend name appears in it. A hit carries `doc_id`,
+`chunk_id`, source URL, PDF digest, original page number, chunk offsets/ordinal, Engine Identity,
+language, `text`, a highlighted `snippet` (`<mark>…</mark>`) and a BM25 `score` (larger is better; only
+the ordering is meaningful). `finepdfs/application/search.py` exposes `SearchAcceptedEvidence.search(...)`
+for the browser and `search_pdfs(index, query, filters, top_k)` for the agent; both validate a
+non-empty query, bound `top_k` to 100 and accept the same `SearchFilters(language, engine, doc_id)`.
+The SQLite adapter lives in `finepdfs/infrastructure/search/sqlite_fts.py` and satisfies the
+`SearchIndex` port. `interfaces/explorer.py` belongs to the browser ticket and is not touched here.
+
+### Add, replace and remove, seen through search
+
+* **Add:** run the pipeline, then `index-search`; the new Document's chunks are returned with its own
+  `doc_id`, digest and pages.
+* **Retry:** re-running `index-search` upserts by `chunk_id` and retracts nothing, so the same evidence
+  is not returned twice.
+* **Replace / fewer chunks:** the flow rewrites the Document's chunk file; `index-search` retracts every
+  old `chunk_id` and no hit names the old digest or a page that no longer exists.
+* **Chunking-version change:** bumping `CHUNKING_VERSION` produces new ids; the old ids are retracted,
+  so the same sentence is not found twice under two versions.
+* **Exclusion / removal:** a dropped, failed, duplicated or removed Document declares no chunk file, so
+  its rows are deleted and it cannot supply evidence.
+
+### Limitations
+
+* **One host, lexical only.** SQLite FTS5 gives BM25, filters and snippets; it does not give
+  Elasticsearch's analysis chains, scale-out or score comparability, and there are no embeddings or
+  reranking. This fallback is allowed by the spec for this demo, not a claim of parity.
+* **No retrieval-quality claim.** 18 Documents cannot demonstrate ranking quality at corpus scale; the
+  tests prove freshness, citations and the absence of stale duplicates, not relevance.
+* **Query terms are OR'd** (each quoted as a literal) so a multi-word question still returns evidence;
+  BM25 ranks chunks matching more terms higher. Punctuation is not FTS5 syntax, so it cannot break a
+  query.
+* **The index is derived and local.** It must be rebuilt after a run; deleting it costs one
+  `index-search`, no Extraction.
+* **Page reads are a separate gate.** `read_pdf_page(doc_id, page_number)` belongs to the agent ticket;
+  the contract here already carries the page number and offsets it needs.
+
 ## Dry run is not a free estimate
 
 `finepdfs dry-run` curates in process through `CurateDocument`: it does not go through the CocoIndex
@@ -304,8 +403,9 @@ corpus.
   Spanish newsletter is `Latn` on every page, the same tag as English, so this Corpus does not
   demonstrate per-language tagging either.
 * **No real bad input in the pin.** The `not_a_pdf.pdf` rehearsal is controlled, and labelled so.
-* **No retrieval claim.** 18 Documents, one host, no browser and no search here; the demo
-  demonstrates the ingestion architecture, not retrieval quality at corpus scale.
+* **No retrieval claim.** 18 Documents, one host, no browser; search here is the local SQLite FTS5
+  fallback described above. The demo demonstrates the ingestion and citation architecture, not
+  retrieval quality at corpus scale.
 * **One CPU host, one engine.** Only Docling was run live. PaddleOCR-VL and MinerU are tested against
   recorded shapes, not live weights. The cold timing is host- and model-specific and is not a
   benchmark; the 54.5 s / 73.0 s per-scan figures are single warm-cache observations.

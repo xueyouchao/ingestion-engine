@@ -1,16 +1,19 @@
-"""The command line: fetch a real Common Crawl corpus, inspect it, and curate it."""
+"""The command line: fetch a real Common Crawl corpus, inspect it, curate and search it."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
 from pathlib import Path
 
+from finepdfs.application.search import reindex_search, search_pdfs
 from finepdfs.domain.crawl import CrawlQuery
 from finepdfs.domain.dedup import PublishedDocumentView, exact_duplicate_keepers, plan_deduplication
 from finepdfs.domain.document import Document
+from finepdfs.domain.search import DEFAULT_TOP_K, SearchFilters
 from finepdfs.infrastructure.cocoindex.runtime import Runtime, runtime_from_environment
 from finepdfs.infrastructure.commoncrawl.source import CommonCrawlSource
 from finepdfs.infrastructure.compute.endpoint import (
@@ -35,11 +38,15 @@ from finepdfs.infrastructure.corpus.index import CorpusIndex
 from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifest
 from finepdfs.infrastructure.engines.registry import KNOWN_ENGINES
 from finepdfs.infrastructure.publishing.disk import PublishedCorpus
+from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
 from finepdfs.interfaces import explorer as explorer_module
 from finepdfs.interfaces.summary import format_run_summary
 
 DEFAULT_CORPUS = Path("corpus")
 DEFAULT_OUT = Path("out")
+SEARCH_INDEX_NAME = "search.db"
+DEFAULT_SEARCH_INDEX = DEFAULT_OUT / SEARCH_INDEX_NAME
+SEARCH_INDEX_VARIABLE = "FINEPDFS_SEARCH_INDEX"
 
 # Flag name to environment variable. "engine_command" is deliberately not called "command": a
 # subparser argument with that name would overwrite the name of the chosen subcommand. The names the GPU
@@ -94,6 +101,29 @@ def build_parser() -> argparse.ArgumentParser:
     explore.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
     explore.add_argument("--host", default=explorer_module.DEFAULT_HOST)
     explore.add_argument("--port", type=int, default=explorer_module.DEFAULT_PORT)
+
+    # The local full-text fallback (ADR-0008): rebuild the index from the declared chunk files, then
+    # read the same contract the browser and the agent use. Two commands, one backend.
+    index_search = commands.add_parser(
+        "index-search", help="rebuild the local lexical index from the declared chunk files"
+    )
+    index_search.add_argument(
+        "--out", type=Path, default=None, help="the published output directory the flow declared"
+    )
+    index_search.add_argument(
+        "--index", type=Path, default=None, help=f"the index to write; default is <out>/{SEARCH_INDEX_NAME}"
+    )
+
+    search = commands.add_parser("search", help="search accepted evidence in the local lexical index")
+    search.add_argument(
+        "--index", type=Path, default=None, help=f"the index to read; default is {DEFAULT_SEARCH_INDEX}"
+    )
+    search.add_argument("--top-k", dest="top_k", type=int, default=DEFAULT_TOP_K, help="maximum hits to return")
+    search.add_argument("--language", default=None, help="only chunks whose language tag is this")
+    search.add_argument("--engine", default=None, help="only chunks produced by this Engine Identity")
+    search.add_argument("--doc-id", dest="doc_id", default=None, help="only chunks of this source identity")
+    search.add_argument("--json", action="store_true", help="print the shared search contract as JSON")
+    search.add_argument("query", nargs="+", help="words to look for")
 
     return parser
 
@@ -190,7 +220,61 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _run(args)
     if args.command == "explore":
         return _explore(args)
+    if args.command == "index-search":
+        return _index_search(args)
+    if args.command == "search":
+        return _search(args)
     raise AssertionError(f"unhandled command {args.command}")
+
+
+def _search_index_path(args: argparse.Namespace) -> Path:
+    """Where the fallback index lives: the flag, else the output directory's own default, else the env."""
+    if args.index is not None:
+        return args.index
+    out_dir = getattr(args, "out", None)
+    if out_dir is not None:
+        return out_dir / SEARCH_INDEX_NAME
+    return Path(os.environ.get(SEARCH_INDEX_VARIABLE, DEFAULT_SEARCH_INDEX))
+
+
+def _index_search(args: argparse.Namespace) -> int:
+    """Rebuild the local index from the declared chunk files: store the current set, delete the rest."""
+    out_dir = args.out if args.out is not None else Path(os.environ.get("FINEPDFS_OUT", DEFAULT_OUT))
+    if not out_dir.is_dir():
+        print(f"no published output at {out_dir}; run the pipeline first", file=sys.stderr)
+        return 2
+    index_path = _search_index_path(args)
+    report = reindex_search(SqliteFtsSearchIndex(index_path), PublishedCorpus(out_dir).read_chunks())
+    print(f"indexed {report.upserted} of {report.chunks} chunks from {report.documents} documents into {index_path}")
+    if report.removed:
+        print(f"  retracted {report.removed} chunks that are no longer declared")
+    for failure in report.failures:
+        print(f"  failed: {failure.chunk_id} ({failure.reason})", file=sys.stderr)
+    return 0 if report.ok else 1
+
+
+def _search(args: argparse.Namespace) -> int:
+    """Read the shared contract from the terminal; the browser and the agent call the same reader."""
+    index_path = _search_index_path(args)
+    if not index_path.exists():
+        print(f"no search index at {index_path}; run finepdfs index-search first", file=sys.stderr)
+        return 2
+    query = " ".join(args.query)
+    filters = SearchFilters(language=args.language, engine=args.engine, doc_id=args.doc_id)
+    results = search_pdfs(SqliteFtsSearchIndex(index_path), query, filters, args.top_k)
+
+    if args.json:
+        print(json.dumps(results.as_json(), indent=2))
+        return 0
+    if not results.hits:
+        print(f"no matches for {query!r} in {index_path}")
+        return 0
+    for rank, hit in enumerate(results.hits, start=1):
+        # A hit is citable on one line: rank, score, source identity, original page and chunk.
+        print(f"{rank:>2}. {hit.score:>8.3f}  {hit.doc_id}  p.{hit.page_number}  {hit.chunk_id}")
+        print(f"    {hit.source_url}")
+        print(f"    {' '.join(hit.snippet.split())}")
+    return 0
 
 
 def _fetch_corpus(args: argparse.Namespace) -> int:

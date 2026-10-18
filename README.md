@@ -254,6 +254,7 @@ nothing was published, so an operator or a CI can tell "engine is down" from "no
 | `FINEPDFS_GPU_START_COMMAND` | -- | with `command`: starts a worker and prints its endpoint on stdout |
 | `FINEPDFS_GPU_STOP_COMMAND` | -- | with `command`: gives the worker back when the run ends |
 | `FINEPDFS_GPU_TIMEOUT` | `1800` | seconds allowed to start or stop a worker |
+| `FINEPDFS_SEARCH_INDEX` | `out/search.db` | the local full-text index `finepdfs search` reads |
 
 ## Output layout
 
@@ -263,6 +264,7 @@ out/
   docs/<key>.md          cleaned text of one published document
   records/<key>.json     url, digest, engine, routing decision, language, counts
   pages/<key>.jsonl      one accepted page per line: doc_id, source_url, digest, page_number, text, engine
+  chunks/<key>.jsonl     deterministic chunks of those pages, for local lexical search
   excluded/<key>.json    kind (exact-duplicate | near-duplicate | dropped | failed) and the reason
   dedupe/kept.jsonl      the URLs this run decided to publish
   dedupe/duplicates.jsonl  every duplicate, what it duplicates and how alike they are
@@ -271,12 +273,38 @@ out/
 `<key>` is the first 16 hex digits of the SHA-256 of the document URL, so a document never collides with
 another and two runs write the same names. The same key is the `doc_id` of that document's page records:
 it names the source, not the bytes, so replacing a Document's content rewrites `pages/<key>.jsonl` in
-place and a Document that stops being published loses it. Only published Documents export pages, and
-Markdown remains a projection of the same accepted pages -- a page record's number is the accepted
-page's original 1-based number in the PDF.
+place and a Document that stops being published loses it. Only published Documents export pages and
+chunks, and Markdown remains a projection of the same accepted pages -- a page record's number is the
+accepted page's original 1-based number in the PDF.
 
 The corpus directory holds `manifest.json` (URL, digest, WARC location) and `pdfs/<sha256>.pdf` -- bytes
 named by their own digest, which is also what makes exact duplicates free to spot.
+
+## Search over accepted evidence
+
+The search backend is deliberately one: a local SQLite FTS5 index, behind a record contract that
+carries no backend name. The spec's Elasticsearch deployment was cut for budget -- no single-node
+deployment could be made stable in time, and the source spec allows exactly this fallback -- and
+shipping both backends is not an option (ADR-0008). There are no embeddings.
+
+~~~~bash
+# rebuild the index from the currently declared chunk files (idempotent)
+.venv/bin/finepdfs index-search --out out --index out/search.db
+
+# read the same contract the browser and the agent consume
+.venv/bin/finepdfs search --index out/search.db "dropwindsonde"
+.venv/bin/finepdfs search --index out/search.db --language Latn --top-k 5 --json "storm"
+~~~~
+
+A hit carries `doc_id`, `chunk_id`, source URL, PDF digest, the original 1-based page number, chunk
+offsets/ordinal, Engine Identity, language, `text`, a highlighted `snippet` and a BM25 `score`. The
+application seam is `SearchAcceptedEvidence.search(...)` (browser) and
+`search_pdfs(index, query, filters, top_k)` (agent); the adapter is
+`infrastructure/search/sqlite_fts.py`. Chunks are page-local, versioned (`CHUNKING_VERSION`) and
+declared as target state, so a replacement, fewer pages, an exclusion or a removed Crawl Record
+retracts the obsolete chunks; re-running `index-search` retracts their rows. See
+[ADR-0008](docs/adr/0008-one-local-search-backend.md) and the
+[demo runbook](docs/demo/pdf-demo-runbook.md#search-accepted-evidence-the-local-fallback).
 
 ## Two things worth knowing before you run it
 

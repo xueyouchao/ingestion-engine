@@ -29,6 +29,24 @@ an engine.
 original 1-based page number, text and Engine Identity. A Published Document exports its accepted pages
 as page records; its Markdown is a projection of the same pages and is not the source of a citation.
 
+**Chunk** — a citable slice of one accepted Page Text, exported by a Published Document as declared
+target state (`out/chunks/<key>.jsonl`). A Chunk carries the Source Identity, source URL, PDF digest,
+original 1-based page number, Engine Identity and language of the page it came from, plus its own
+deterministic Chunk Identity, ordinal, character offsets and chunking version. A Chunk never spans
+pages, so its page number is exact.
+
+**Chunk Identity** — the stable `chunk_id` of a Chunk: a hash of the Source Identity, PDF digest,
+original page number, ordinal, offsets and chunking version. A replacement, a version bump or a changed
+slice moves it, so stale evidence can be retracted instead of duplicated.
+
+**Search Index** — the derived lexical index over currently declared Chunks: SQLite FTS5, the one
+shipped backend (ADR-0008). It stores, ranks and cites only what the flow declared; it is not a writer
+of accepted evidence and re-decides neither Deduplication nor Publish Policy.
+
+**Search Hit** — one Chunk returned for a query: the Chunk's citation fields, its text, a highlighted
+snippet and the BM25 score. The browser and the agent read this same shape, so a backend change cannot
+change what a citation means.
+
 **Extraction** — turning Document bytes into an Extracted Document (Page Texts plus Engine Identity).
 Extraction is the expensive step and is memoized.
 
