@@ -13,6 +13,7 @@ import re
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -20,12 +21,19 @@ from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument
 from finepdfs.infrastructure.engines.subprocess_support import CommandRunner, SubprocessRunner, require_success
 
 VERSION_PATTERN = re.compile(r"\d+\.\d+(?:\.\d+)?(?:[-+.\w]*)?")
-# A tool version is a property of the installed executable, so one probe per command is enough.
-_VERSION_CACHE: dict[str, str] = {}
 
 
 class DoclingError(RuntimeError):
     """Raised when Docling could not be run or wrote no readable DoclingDocument JSON."""
+
+
+class DoclingVersionError(RuntimeError):
+    """Raised when the Docling version probe could not name the installed tool's version.
+
+    ADR-0005 puts the tool version in the Engine Identity, which is part of the memo key. A probe that
+    could not answer must fail here rather than drop the version: an identity of ``cli:docling`` would
+    let an upgraded Docling reuse an Extraction the previous version produced.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,13 +49,12 @@ class DoclingEngine:
         """The installed tool's name and version, never the path it happens to live at.
 
         ADR-0005 makes the tool version an identity input: a Docling upgrade must re-read the corpus.
-        The probe is best effort -- a tool that cannot report a version still gets a stable name --
-        and its result is cached per command.
+        A probe that cannot report a version raises ``DoclingVersionError`` instead of quietly naming an
+        identity without one, and its answer is cached per command and runner.
         """
         command_name = Path(self.command).name or "docling"
         version = _tool_version(self.runner, self.command)
-        detail = f"cli:{command_name}" + (f":v{version}" if version else "")
-        return EngineIdentity(name="docling", detail=detail)
+        return EngineIdentity(name="docling", detail=f"cli:{command_name}:v{version}")
 
     def extract(self, document: Document) -> ExtractedDocument:
         identity = self.identity
@@ -82,21 +89,26 @@ class DoclingEngine:
         return ExtractedDocument(pages=pages, engine=identity)
 
 
+@lru_cache(maxsize=32)
 def _tool_version(runner: CommandRunner, command: str) -> str:
-    """The version Docling reports, or an empty string when the probe cannot answer."""
-    if command in _VERSION_CACHE:
-        return _VERSION_CACHE[command]
+    """The version Docling reports for this command, or a named error when it cannot report one.
+
+    A tool version is a property of the installed executable, so the probe runs once per command and
+    runner: the runner is part of the key because it is what answers the probe, and a cached answer
+    from another runner would be a version this engine never asked about.
+    """
     try:
         result = runner.run([command, "--version"])
-    except Exception:  # A missing tool is the conversion's failure to report, not this best-effort probe's.
-        return ""
+    except Exception as error:  # a missing tool or a runner failure is this probe's own failure
+        raise DoclingVersionError(f"docling version probe failed for {command!r}: {error}") from error
     if result.returncode != 0:
-        return ""
-    first_line = (result.stdout or result.stderr).strip().splitlines()
-    match = VERSION_PATTERN.search(first_line[0]) if first_line else None
+        raise DoclingVersionError(
+            f"docling version probe failed for {command!r}: it exited with {result.returncode}"
+        )
+    lines = (result.stdout or result.stderr).strip().splitlines()
+    match = VERSION_PATTERN.search(lines[0]) if lines else None
     if match is None:
-        return ""
-    _VERSION_CACHE[command] = match.group(0)
+        raise DoclingVersionError(f"docling version probe for {command!r} reported no version")
     return match.group(0)
 
 

@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import json
 import pathlib
-import re
 from collections.abc import Iterable, Sequence
 
-from finepdfs.application.page_reads import KEY_PATTERN
 from finepdfs.domain.chunks import Chunk, DeclaredChunkSet
 from finepdfs.domain.dedup import DedupPlan
 from finepdfs.domain.publishing import DocumentRecord, PageRecord
+from finepdfs.domain.source_identity import require_source_identity
 from finepdfs.infrastructure.corpus.index import document_key
 
 DOCS = "docs"
@@ -200,9 +199,7 @@ class DiskPageReader:
         return tuple(sorted(pages, key=lambda page: page.page_number))
 
     def _path(self, directory: str, doc_id: str, suffix: str) -> pathlib.Path:
-        if not isinstance(doc_id, str) or re.fullmatch(KEY_PATTERN, doc_id) is None:
-            raise ValueError(f"doc_id must be a 16-character source identity, not {doc_id!r}")
-        return self._root / directory / f"{doc_id}{suffix}"
+        return self._root / directory / f"{require_source_identity(doc_id)}{suffix}"
 
 
 def _read_object(path: pathlib.Path) -> dict:

@@ -16,7 +16,12 @@ import pymupdf
 import pytest
 
 from finepdfs.domain.document import Document
-from finepdfs.infrastructure.engines.docling_engine import DoclingEngine, DoclingError, pages_from_docling_json
+from finepdfs.infrastructure.engines.docling_engine import (
+    DoclingEngine,
+    DoclingError,
+    DoclingVersionError,
+    pages_from_docling_json,
+)
 from finepdfs.infrastructure.engines.mineru import (
     MineruEngine,
     MineruError,
@@ -302,9 +307,34 @@ def test_the_docling_engine_reads_the_page_aware_json_it_asked_for(tmp_path) -> 
     assert extracted.engine.detail == "cli:docling:v2.140.0"
 
 
+def test_a_docling_version_probe_that_cannot_answer_is_a_named_error(tmp_path) -> None:
+    """The version is part of the memo key, so a probe with no answer must not degrade to a bare name.
+
+    ADR-0005 keys Extraction on the Engine Identity; an identity that silently drops the tool version
+    would let an upgraded Docling reuse an Extraction the old one produced.
+    """
+    engine = DoclingEngine(
+        command=str(tmp_path / "docling"), runner=RecordingRunner(returncode=1, stderr="boom")
+    )
+
+    with pytest.raises(DoclingVersionError, match="version probe"):
+        assert engine.identity
+
+
+def test_repeated_identity_calls_probe_the_tool_once(tmp_path) -> None:
+    probes: list[list[str]] = []
+    runner = RecordingRunner(on_run=lambda argv: probes.append(argv), stdout="Docling version: 2.140.0\n")
+    engine = DoclingEngine(command=str(tmp_path / "docling"), runner=runner)
+
+    assert engine.identity.detail == "cli:docling:v2.140.0"
+    assert engine.identity.detail == "cli:docling:v2.140.0"
+    assert len(probes) == 1, "a tool version is a property of the installed executable"
+
+
 def test_the_docling_engine_fails_loudly_when_nothing_was_written(tmp_path) -> None:
+    runner = RecordingRunner(stdout="Docling version: 2.140.0\n")
     with pytest.raises(DoclingError):
-        DoclingEngine(work_dir=tmp_path, runner=RecordingRunner()).extract(Document(name="x", content=b"%PDF"))
+        DoclingEngine(work_dir=tmp_path, runner=runner).extract(Document(name="x", content=b"%PDF"))
 
 
 def test_the_docling_engine_refuses_json_it_cannot_parse(tmp_path) -> None:
@@ -315,7 +345,10 @@ def test_the_docling_engine_refuses_json_it_cannot_parse(tmp_path) -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "document.json").write_text("{not json")
 
-    engine = DoclingEngine(work_dir=tmp_path, runner=RecordingRunner(on_run=write_broken_json))
+    engine = DoclingEngine(
+        work_dir=tmp_path,
+        runner=RecordingRunner(on_run=write_broken_json, stdout="Docling version: 2.140.0\n"),
+    )
 
     with pytest.raises(DoclingError, match="invalid JSON"):
         engine.extract(Document(name="x", content=b"%PDF"))

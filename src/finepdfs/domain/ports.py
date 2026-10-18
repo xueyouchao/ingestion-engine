@@ -7,12 +7,14 @@ the same interface, which is why the pipeline can be exercised with no network, 
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
+from pathlib import Path
 from typing import Protocol
 
 from finepdfs.domain.chunks import Chunk
 from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, TextLayerQuality
 from finepdfs.domain.language import PageLanguage
+from finepdfs.domain.publishing import PageRecord
 from finepdfs.domain.search import IndexFailure, IndexState, SearchHit, SearchQuery
 
 
@@ -79,4 +81,31 @@ class SearchIndex(Protocol):
 
     def state(self) -> IndexState:
         """The fingerprint this index was built from and how many chunks it holds."""
+        ...
+
+
+class DeclaredPageReader(Protocol):
+    """Where one Document's declared record, exclusion and accepted pages are read from.
+
+    Every answer is declared state written by the flow, addressed by the Document's Source Identity: an
+    absent file is ``None``, never a guess, and nothing is reconstructed from a projection.
+    """
+
+    @property
+    def root(self) -> Path: ...
+
+    def has_output(self) -> bool:
+        """Whether a completed run declared anything at all."""
+        ...
+
+    def published_digest(self, doc_id: str) -> str | None:
+        """The digest of the Document's current published record, or None when it has none."""
+        ...
+
+    def exclusion(self, doc_id: str) -> tuple[str, str] | None:
+        """The exclusion kind and reason for a Document that was dropped, failed or duplicated."""
+        ...
+
+    def accepted_pages(self, doc_id: str) -> Sequence[PageRecord] | None:
+        """The accepted Page Texts in original page order, or None when no export is declared."""
         ...

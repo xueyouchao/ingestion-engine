@@ -348,8 +348,9 @@ def _search(args: argparse.Namespace) -> int:
         return 0
     for rank, hit in enumerate(results.hits, start=1):
         # A hit is citable on one line: rank, score, source identity, original page and chunk.
-        print(f"{rank:>2}. {hit.score:>8.3f}  {hit.doc_id}  p.{hit.page_number}  {hit.chunk_id}")
-        print(f"    {hit.source_url}")
+        chunk = hit.chunk
+        print(f"{rank:>2}. {hit.score:>8.3f}  {chunk.doc_id}  p.{chunk.page_number}  {chunk.chunk_id}")
+        print(f"    {chunk.source_url}")
         print(f"    {' '.join(hit.snippet.split())}")
     return 0
 

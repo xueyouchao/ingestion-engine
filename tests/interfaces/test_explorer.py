@@ -235,6 +235,35 @@ def test_an_exclusion_has_a_reason_but_no_pages(tmp_path) -> None:
     assert detail["routing_reason"] is None
 
 
+def test_the_table_text_is_the_accepted_pages_in_original_page_order(tmp_path) -> None:
+    """The export may be written in any order; one page parser puts both views in original page order.
+
+    The status table and the document detail read the same declared page export. Two parsers let the
+    table's text and the detail's pages disagree about which page is which, and only one of them keeps
+    the contract: accepted Page Texts in original page order.
+    """
+    out, corpus, _digest = _completed_output(tmp_path)
+
+    explorer = explorer_for(out, corpus)
+    published = {row["key"]: row for row in explorer.documents()}[document_key(URL)]
+    detail = explorer.document(document_key(URL))
+
+    assert published["text"] == "\n".join(page["text"] for page in detail["pages"])
+    assert detail["pages"][0]["page_number"] == 1
+
+
+def test_a_document_detail_and_its_status_row_agree(tmp_path) -> None:
+    """One row builder: the table's row and the detail are the same declared state, read once."""
+    out, corpus, _digest = _completed_output(tmp_path)
+
+    explorer = explorer_for(out, corpus)
+    for row in explorer.documents():
+        detail = explorer.document(row["key"])
+        shared = {name: value for name, value in row.items() if name in detail}
+
+        assert {name: detail[name] for name in shared} == shared
+
+
 def test_the_pdf_is_served_only_when_the_manifest_names_its_digest(tmp_path) -> None:
     out, corpus, digest = _completed_output(tmp_path)
     explorer = explorer_for(out, corpus)
@@ -324,6 +353,17 @@ def test_serving_the_explorer_writes_nothing(tmp_path) -> None:
 
     after = {root: _snapshot(root) for root in (out, corpus)}
     assert after == before
+
+
+def test_the_page_asset_is_its_own_module(tmp_path) -> None:
+    """The HTML/CSS/JS asset sits beside the explorer, not inside the export-reading code it is served by."""
+    from finepdfs.interfaces import explorer_page
+
+    out, corpus, _digest = _completed_output(tmp_path)
+
+    assert explorer_page.EXPLORER_HTML is explorer_module.EXPLORER_HTML
+    with _serving(explorer_for(out, corpus)) as base:
+        assert _get(base + "/").read().decode("utf-8") == explorer_page.EXPLORER_HTML
 
 
 def test_the_html_carries_the_filter_and_detail_contract(tmp_path) -> None:

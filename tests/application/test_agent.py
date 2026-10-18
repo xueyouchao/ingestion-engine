@@ -337,7 +337,46 @@ def test_the_loop_round_trips_tool_results_and_cites_only_returned_evidence(tmp_
     assert model.requests[0]["messages"][0]["role"] == "system"
 
 
-def test_citations_accept_a_quoted_doc_id_and_resolve_a_unique_page_only_tag(tmp_path) -> None:
+def test_a_quoted_doc_id_is_a_citation_and_a_page_only_tag_is_not(tmp_path) -> None:
+    out, key, _duplicate = _accepted_output(tmp_path)
+    tools = _tools(out)
+    placeholder_sentence = " and page <doc_id> p.1</doc_id>."
+    model = FakeChatModel(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_tool_call("call-1", "search_pdfs", {"query": "alpine"})],
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_tool_call("call-2", "read_pdf_page", {"doc_id": key, "page_number": 1})],
+            },
+            {
+                "role": "assistant",
+                "content": f'Quoted evidence <Cite doc_id "{key}" p.1></Cite>' + placeholder_sentence,
+            },
+            {
+                "role": "assistant",
+                "content": f'Quoted evidence <Cite doc_id "{key}" p.1></Cite>.',
+            },
+        ]
+    )
+
+    answer = run_agent("Cite it", model, tools)
+
+    assert [citation.citation for citation in answer.citations] == [f"{key} p.1"]
+    assert answer.citations[0].verified
+    assert "<doc_id>" not in answer.answer
+
+
+def test_a_page_only_tag_is_not_turned_into_a_citation(tmp_path) -> None:
+    """The one citation format carries a doc_id, so a page-only tag names no document.
+
+    Resolving ``<doc_id> p.1</doc_id>`` from the single page that happened to be read would credit the
+    model with a citation it never wrote and would hide that the claim is unverified.
+    """
     out, key, _duplicate = _accepted_output(tmp_path)
     tools = _tools(out)
     model = FakeChatModel(
@@ -354,21 +393,20 @@ def test_citations_accept_a_quoted_doc_id_and_resolve_a_unique_page_only_tag(tmp
             },
             {
                 "role": "assistant",
-                "content": (
-                    f'Quoted evidence <Cite doc_id "{key}" p.1></Cite> and page '
-                    "<doc_id> p.1</doc_id>."
-                ),
+                "content": "The observation was alpine meteorology <doc_id> p.1</doc_id>.",
             },
+            {"role": "assistant", "content": "INSUFFICIENT EVIDENCE: no page was cited."},
         ]
     )
 
     answer = run_agent("Cite it", model, tools)
 
-    assert [citation.citation for citation in answer.citations] == [f"{key} p.1"]
-    assert answer.citations[0].verified
+    assert answer.citations == ()
+    assert answer.insufficient_evidence
+    assert "<doc_id>" not in answer.answer
 
 
-def test_a_page_only_tag_only_resolves_to_a_page_that_was_read(tmp_path) -> None:
+def test_a_page_only_tag_for_an_unread_page_is_stripped_not_cited(tmp_path) -> None:
     out, key, _duplicate = _accepted_output(tmp_path)
     tools = _tools(out)
     unsupported = (

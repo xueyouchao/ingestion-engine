@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from finepdfs.infrastructure.engines.paddleocr_vl import PaddleOcrVlCliEngine, PaddleOcrVlEngine
@@ -63,11 +65,19 @@ def test_an_unknown_engine_is_rejected() -> None:
 
 
 def _reachable_config(name: str, *, page_dpi: int, detail: str = "") -> EngineConfig:
-    """A configuration that builds each engine without running anything: a URL for the HTTP ones."""
+    """A configuration that builds each engine without running anything: a URL for the HTTP ones.
+
+    Docling's identity is probed from its command, and a probe that cannot answer is an error rather
+    than an identity without a version (ADR-0005), so the adapter is pointed at an executable that is
+    certainly installed here. What it prints is irrelevant to this test: the question is whether a page
+    DPI moves the identity, and this engine does not render at one.
+    """
     if name == "paddleocr-vl":
         return EngineConfig(name=name, base_url="http://host:8000/v1", model="m", page_dpi=page_dpi, detail=detail)
     if name == "mineru":
         return EngineConfig(name=name, base_url="http://host:8001", page_dpi=page_dpi, detail=detail)
+    if name == "docling":
+        return EngineConfig(name=name, command=sys.executable, page_dpi=page_dpi, detail=detail)
     return EngineConfig(name=name, page_dpi=page_dpi, detail=detail)
 
 
