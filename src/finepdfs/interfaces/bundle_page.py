@@ -306,7 +306,8 @@ function drawBoxes(page) {
   if (!image || !image.clientWidth || !image.clientHeight) return;
   const sx = image.clientWidth / page.w, sy = image.clientHeight / page.h;
   for (const [x0, y0, x1, y1, word] of page.words) {
-    const lower = word.toLowerCase();
+    // Folded like the query, so a word the text marks is a word the image highlights.
+    const lower = fold(word).lower;
     if (!wanted.some((term) => lower.includes(term))) continue;
     const box = document.createElement("div");
     box.className = "box";
@@ -323,7 +324,7 @@ function counter(page) {
   if (!wanted.length) return "";
   const inText = spansOf(page.text, wanted).length;
   if (!page.words) return inText + " in text";
-  const onPage = page.words.filter((w) => wanted.some((term) => w[4].toLowerCase().includes(term))).length;
+  const onPage = page.words.filter((w) => wanted.some((term) => fold(w[4]).lower.includes(term))).length;
   return inText + " in text · " + onPage + " on page";
 }
 
