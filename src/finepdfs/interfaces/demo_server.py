@@ -91,9 +91,11 @@ PDF_MEDIA_TYPE = "application/pdf"
 UPLOAD_NAME_HEADER = "X-Upload-Name"
 DEFAULT_UPLOAD_NAME = "upload.pdf"
 
-# The refusals the handler raises before the use case ever sees the bytes. ``unreadable`` is the
-# RefusalKind that already means "this upload could not be read"; the reason says which rule found it.
-UNREADABLE = "unreadable"
+# The refusals the handler raises before the use case ever sees the bytes. ``upload`` is "this is not an
+# upload the demo accepts" -- the wrong media type, no declared length, over the byte cap, empty, or short
+# -- and ``unreadable`` stays the use case's own word for bytes a PDF reader could not open.
+UPLOAD = "upload"
+NO_CLIENT = ""
 
 
 class DemoLimitError(ValueError):
@@ -207,7 +209,7 @@ class DemoApp:
         Deliberately not the bearer, the base URL or the provider's own settings: a leaked bearer is a
         bill, and the address of a private worker is not a visitor's business (ADR-0012).
         """
-        usage = self._ledger.usage("")
+        usage = self._ledger.usage(NO_CLIENT)
         return {
             "limits": asdict(self._limits),
             "ocr_pages_remaining": max(self._limits.daily_ocr_page_budget - usage.ocr_pages_today, 0),
@@ -372,29 +374,29 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         if content_type != PDF_MEDIA_TYPE:
             self._refuse(
                 HTTPStatus.BAD_REQUEST,
-                UNREADABLE,
+                UPLOAD,
                 f"the demo reads {PDF_MEDIA_TYPE}, not {content_type}",
             )
             return
         length = self._declared_length()
         if length is None:
-            self._refuse(HTTPStatus.BAD_REQUEST, UNREADABLE, "the upload declared no Content-Length")
+            self._refuse(HTTPStatus.BAD_REQUEST, UPLOAD, "the upload declared no Content-Length")
             return
         if length > self.app.limits.upload_bytes:
             self._refuse(
                 HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                UNREADABLE,
+                UPLOAD,
                 f"this upload is {length} bytes; the demo reads at most {self.app.limits.upload_bytes}",
             )
             return
         if length == 0:
-            self._refuse(HTTPStatus.BAD_REQUEST, UNREADABLE, "the upload is empty")
+            self._refuse(HTTPStatus.BAD_REQUEST, UPLOAD, "the upload is empty")
             return
         content = self.rfile.read(length)
         if len(content) != length:
             self._refuse(
                 HTTPStatus.BAD_REQUEST,
-                UNREADABLE,
+                UPLOAD,
                 f"the upload was {len(content)} of the {length} bytes it declared",
             )
             return

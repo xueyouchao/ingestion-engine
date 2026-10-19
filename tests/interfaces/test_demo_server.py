@@ -451,7 +451,7 @@ def test_an_upload_over_the_byte_cap_is_a_413_before_the_body_is_read() -> None:
 
     assert status == 413
     assert answer["outcome"] == "refused"
-    assert answer["refusal"]["kind"] == "unreadable"
+    assert answer["refusal"]["kind"] == "upload"
     assert "64" in answer["refusal"]["reason"]
     assert reader.calls == [], "the upload is refused before a Reading is started"
 
@@ -464,10 +464,10 @@ def test_an_empty_upload_or_a_body_that_is_not_a_pdf_is_a_400() -> None:
         type_status, wrong_type = _post(base, b"%PDF-1.7", headers={"Content-Type": "text/plain"})
 
     assert empty_status == 400
-    assert empty["refusal"]["kind"] == "unreadable"
+    assert empty["refusal"]["kind"] == "upload"
     assert "empty" in empty["refusal"]["reason"]
     assert type_status == 400
-    assert wrong_type["refusal"]["kind"] == "unreadable"
+    assert wrong_type["refusal"]["kind"] == "upload"
     assert "text/plain" in wrong_type["refusal"]["reason"]
     assert reader.calls == [], "a body that is not a PDF never becomes a Reading"
 

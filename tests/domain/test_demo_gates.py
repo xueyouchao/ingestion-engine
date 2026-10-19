@@ -147,6 +147,7 @@ def test_the_refusal_kinds_and_the_reading_stages_are_the_page_s_vocabulary() ->
         "page-cap",
         "rate-limit",
         "daily-budget",
+        "upload",
         "unreadable",
         "busy",
         "unavailable",
