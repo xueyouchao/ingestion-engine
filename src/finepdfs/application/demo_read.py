@@ -211,8 +211,8 @@ class DemoRead:
         failed to read is a Failed Reading. A release that fails after the answer is the operator's log
         line, not the visitor's: the text is real either way (ADR-0007).
         """
-        lease = self._worker()  # a fresh context manager: a worker belongs to one Reading
         try:
+            lease = self._worker()  # a fresh context manager: a worker belongs to one Reading
             engine, endpoint = lease.__enter__()
         except Exception as error:  # a provider that cannot start one: nothing was read, nothing was spent
             return Refusal(
