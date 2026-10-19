@@ -1,0 +1,76 @@
+# 10. Make the GPU OCR calls overlap, and bound them
+
+Date: 2026-10-19
+
+## Status
+
+Proposed
+
+## Context
+
+The rented worker serves one page per `POST /v1/chat/completions`, and today those requests are sent
+strictly one after another -- not only within a document, but across the whole corpus. Measured against
+the real runtime (`coco.map` -> `use_mount` -> memoised extract body, 4 vCPU, 0.5 s of blocking work per
+item):
+
+| Body shape | N=8 total | Peak in flight |
+| --- | ---: | ---: |
+| `async def` body doing blocking I/O -- what `PaddleOcrVlEngine` does | 4.01 s | **1** |
+| plain `def` processor | 0.52 s | 8 |
+| `async def` body + `asyncio.to_thread` | 0.53 s | 8 |
+
+At N=32 (0.3 s each): `def` body 0.32 s / peak 32; `to_thread` 1.23 s / peak 32 (the default executor is
+`min(32, cpu+4)` = 8 threads, so four waves); blocking async body 9.64 s / peak 1.
+
+The cause is one line of shape. `extract_with_engine` is `async def` with nothing to await
+(`flow.py:81`), and the engine it calls is synchronous `urllib` (`paddleocr_vl.py:53-60`,
+`vlm_chat.py:49`). CocoIndex runs async component bodies on one shared event loop and sync bodies on a
+thread each, so a blocking body freezes every sibling task. ADR-0006 describes the reading pass as
+"concurrent: route + read"; for this engine it is not, and the rented GPU idles between requests.
+
+## Decision
+
+Fix the shape, and bound the result. Four changes, in this order.
+
+1. **A `def`, not an `async def`.** `extract_with_engine` becomes a synchronous processor and
+   `flow.py:145` drops its `await`. `OcrEngine.extract` is already sync (`ports.py:43`), so no engine,
+   port or memo key changes; the core gives each document its own thread.
+2. **Pages fan out inside one document.** `PaddleOcrVlEngine.extract` renders and reads pages through a
+   bounded `ThreadPoolExecutor` and reassembles by `PageText.number`, not completion order. The memo unit
+   stays one document (ADR-0005): no key change, no re-read, no per-page state.
+3. **One concurrency knob.** `FINEPDFS_ENGINE_CONCURRENCY` (default 6) caps in-flight engine calls for the
+   whole run -- a semaphore around both levels -- so a corpus of many scanned documents cannot open one
+   request per document against a single worker. Both the remote and the CLI engines read it.
+4. **Revisit two worker pins once requests overlap.** `--mm-processor-cache-gb 0` (`deploy/gpu/server.py:41`)
+   makes every concurrent request re-preprocess its image on the worker's CPU, which saturates before the
+   GPU does; `--max-num-batched-tokens 16384` (`:38`) is where a batch of page images gets split. Neither
+   number is changed blind: measure first.
+
+## Alternatives considered
+
+| Option | Cost | Payoff | Verdict |
+| --- | --- | --- | --- |
+| **A.** Sync processor body (steps 1, 3) | ~2 lines in `flow.py`; a test that a serial pass cannot return | Concurrency = OCR-routed documents; also fixes CPU Docling, which is serial for the same reason | **Take** |
+| **B.** Bounded page fan-out (step 2) | ~15 lines in one engine; one new knob | A long scan makes the difference -- 45 pages at 2 s serial is 90 s, at 6-way ~15 s | **Take**, it costs nothing once A exists |
+| **C.** `httpx.AsyncClient` + `asyncio.gather` | Rewrite `vlm_chat.py`, new dependency, async port | Same throughput as A+B on this workload; buys streaming and per-request backoff for later | Defer |
+| **D.** Memo per page | New key, every existing entry invalidated (full cold re-read), revises ADR-0003/0005 | Page-level incrementality and resumability of a long document | Not now |
+
+Rejected outright: several page images in one request (the answer interleaves and the page-to-text
+mapping ADR-0009 gates on is lost); two parallel workers (doubles the start/readiness floor and the leak
+surface, against ADR-0009's one-lease-per-run).
+
+## Consequences
+
+* **The pinned corpus does not move.** Its OCR branch is 3 pages across 2 documents, and the run's floor
+  is the sandbox's start and readiness (~126.5 s for a one-page run). This change buys seconds there and
+  matters only when the OCR share grows -- many scanned documents (A) or a long scan (B). It is worth
+  doing because it is nearly free, not because it is the current bottleneck.
+* **Rendering is CPU work on the driver.** Pages are rendered with pymupdf inside the same pool, on 4
+  vCPU; the knob's default is sized for that, not for the GPU.
+* **Determinism narrows.** vLLM's batching can shift a token or two even at `temperature: 0`, so "same
+  bytes, same identity" no longer promises byte-identical text across a memo reset. Keys and identity are
+  unaffected; the first read is still the one the memo remembers.
+* **Failure is still per document.** A page that fails fails its document, not its siblings -- the same
+  contract `read_document` already has.
+* **A regression guard, not a comment.** The test uses an engine with a barrier and asserts the reading
+  pass really overlaps, so the serialization cannot come back unnoticed.
