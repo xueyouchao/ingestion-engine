@@ -95,7 +95,7 @@ class SpendGatePolicy:
                 open=False,
                 gate="rate-limit",
                 reason=(
-                    f"you have read {usage.reads_in_window} documents in the last "
+                    f"you have read {_count(usage.reads_in_window, 'document')} in the last "
                     f"{_window_phrase(self.limits.rate_limit_window_seconds)}; "
                     f"the demo allows {self.limits.rate_limit_reads}"
                 ),
@@ -115,6 +115,11 @@ class SpendGatePolicy:
 def _window_phrase(seconds: float) -> str:
     """The rate-limit window as a visitor reads it: whole minutes when it is one, seconds otherwise."""
     if seconds >= 60 and seconds % 60 == 0:
-        return f"{seconds / 60:.0f} minutes"
-    return f"{seconds:g} seconds"
+        return _count(seconds / 60, "minute")
+    return _count(seconds, "second")
+
+
+def _count(value: float, noun: str) -> str:
+    """A number and its noun, singular when the number is one: "1 document", "10 minutes"."""
+    return f"{value:g} {noun}" if value == 1 else f"{value:g} {noun}s"
 

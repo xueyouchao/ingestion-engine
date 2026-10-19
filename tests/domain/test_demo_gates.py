@@ -92,7 +92,15 @@ def test_a_window_that_is_not_whole_minutes_is_stated_in_seconds() -> None:
 
     decision = policy.decide(10, UsageSnapshot(reads_in_window=1))
 
-    assert decision.reason == "you have read 1 documents in the last 90 seconds; the demo allows 1"
+    assert decision.reason == "you have read 1 document in the last 90 seconds; the demo allows 1"
+
+
+def test_a_one_minute_window_and_one_read_are_both_singular() -> None:
+    policy = SpendGatePolicy(DemoLimits(rate_limit_reads=1, rate_limit_window_seconds=60))
+
+    decision = policy.decide(10, UsageSnapshot(reads_in_window=1))
+
+    assert decision.reason == "you have read 1 document in the last 1 minute; the demo allows 1"
 
 
 def test_the_page_cap_closes_before_the_rate_limit() -> None:
