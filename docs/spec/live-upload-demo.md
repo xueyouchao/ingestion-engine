@@ -1,10 +1,14 @@
 # The live upload demo: a visitor's PDF, its OCR Decision, and the deployed worker that reads it
 
-- **Status:** planned. Implements [ADR-0012](../adr/0012-serve-the-upload-demos-ocr-from-a-deployed-modal-app.md).
+- **Status:** implemented on `feature/live-upload-demo` -- the demo server, the deployed app and the Warm
+  Control, tested offline. Not deployed and not measured; the operator's record is
+  [the live demo runbook](../deploy/live-demo-runbook.md). Implements
+  [ADR-0012](../adr/0012-serve-the-upload-demos-ocr-from-a-deployed-modal-app.md).
 - **Planning date:** 2026-10-19.
 - **Reviewed baseline:** `fa0286e` (the ADR's own branch, `docs/adr-0012-modal-ocr-for-the-live-demo`).
 - **Related:** [FinePDFs integration](finepdfs-integration.md), [PDF workflow demo](pdf-workflow-demo.md),
-  [glossary](../GLOSSARY.md), [Modal worker runbook](../deploy/modal-worker-runbook.md).
+  [glossary](../GLOSSARY.md), [live demo runbook](../deploy/live-demo-runbook.md),
+  [Modal worker runbook](../deploy/modal-worker-runbook.md).
 
 ## Problem Statement
 
@@ -101,16 +105,21 @@ keeps nothing: no uploaded PDF, no extracted text, no page image survives the re
   client identity into one Reading. It reuses `ExtractionStep.route`/`extract_with` from
   `application/curate.py` -- routing is *the* policy and the demo must not have its own copy -- and it
   never cleans, language-tags, publishes or deduplicates.
-- **Interface** (`interfaces/demo_server.py` + `interfaces/demo_page.py`): the Reading Queue, the HTTP
-  server, the job protocol, and the page asset. This is the composition root: it reads `FINEPDFS_*`,
-  leases the GPU through `leased_environment`, builds the engine and the endpoint probe, and owns the
-  Gate Ledger for the life of the process.
+- **Interface** (`interfaces/demo_server.py` + `interfaces/demo_jobs.py` + `interfaces/demo_page.py`): the
+  Reading Queue, the HTTP server, the job protocol, and the page asset. This is the composition root: it
+  reads `FINEPDFS_*`, leases the GPU through `leased_environment`, builds the engine and the endpoint
+  probe, and owns the Gate Ledger for the life of the process.
+
+The entry point is the console script `finepdfs-live-demo` (`finepdfs.interfaces.demo_server:main`;
+`python -m finepdfs.interfaces.demo_server` is the module fallback), binding `127.0.0.1:8766` by default. Its
+HTTP surface is `GET /` (the page), `GET /api/status`, `POST /api/read` (the PDF as the body,
+`Content-Type: application/pdf`, answering `202 {"job": ...}`) and `GET /api/read/<id>` (the job JSON).
 
 Nothing under `src/` imports Modal, and nothing under `src/` imports `deploy/`.
 
 ### A Reading is an outcome, not a bool
 
-`DemoRead.read(content, client, on_stage)` returns exactly one of three outcomes, all carrying the
+`DemoRead.read(content, client, on_stage, name)` returns exactly one of three outcomes, all carrying the
 Routing Decision when one was made:
 
 - **read** -- the lane was chosen, the lane read it, and the outcome carries the per-page text, the
@@ -200,14 +209,25 @@ the only names it owns are the demo's limits.
 
 ### The demo server's own limits
 
-Every limit is a default with an environment override, so the spend posture is a setting:
+Every limit is a default with an environment override, so the spend posture is a setting. The defaults live
+in `domain/demo.py` and the variables are read by `interfaces/demo_server.py`; the operator's copy of this
+table, with the checks, is [the live demo runbook](../deploy/live-demo-runbook.md):
 
-- upload size (default 20 MiB) -- refused in the handler, before the body is fully read;
-- page cap per upload (default 25 pages) -- refused from the probe's page count;
-- rate limit (default 5 reads per 600 s per client) -- refused per client;
-- daily OCR page budget (default 300 pages, UTC day) -- refused when the OCR lane would exceed it;
-- Reading Queue depth (default 3 waiting) -- refused when full;
-- warm timeout (default 900 s) and poll interval (default 2 s) -- a read that never warms fails.
+- upload size (`FINEPDFS_DEMO_UPLOAD_BYTES`, default 20 MiB) -- refused in the handler, before the body is
+  fully read;
+- page cap per upload (`FINEPDFS_DEMO_PAGE_CAP`, default 25 pages) -- refused from the probe's page count;
+- rate limit (`FINEPDFS_DEMO_RATE_LIMIT_READS` per `FINEPDFS_DEMO_RATE_LIMIT_WINDOW_SECONDS`, default 5 reads
+  per 600 s per client) -- refused per client;
+- daily OCR page budget (`FINEPDFS_DEMO_DAILY_OCR_PAGES`, default 300 pages, UTC day) -- refused when the OCR
+  lane would exceed it;
+- Reading Queue depth (`FINEPDFS_DEMO_QUEUE_DEPTH`, default 3 waiting) -- refused when full;
+- warm timeout (`FINEPDFS_DEMO_WARM_TIMEOUT_SECONDS`, default 900 s) and poll interval
+  (`FINEPDFS_DEMO_POLL_INTERVAL_SECONDS`, default 2 s) -- a read that never warms fails.
+
+The console script takes one flag per limit (`--page-cap`, `--rate-limit-reads`,
+`--rate-limit-window-seconds`, `--daily-ocr-pages`, `--upload-bytes`, `--queue-depth`, `--warm-timeout`,
+`--poll-interval`), each overriding the matching variable for that run and replacing no other. An exported
+variable with an empty value means the default.
 
 A client is the left-most `X-Forwarded-For` hop when a proxy set one, else the peer address. This is a
 spend brake and not an identity: a public deployment must sit behind a proxy that sets the header, and
@@ -268,7 +288,9 @@ accepted ADR.
   cold corpus run) and that readiness alone was never timed and the deployed app has never been cold. The
   runbook therefore carries the *command* that measures it and a slot for the number, and the page states
   the number it measured for the visitor in front of it. Neither document may claim a latency nobody
-  observed.
+  observed. That slot is in [the live demo runbook](../deploy/live-demo-runbook.md#9-the-cold-start-slot-measuring-the-first-ocr-after-idle),
+  which is also where the deploy, the bearer Secret, the Warm Control's price and the counters' known limits
+  are checked rather than asserted.
 - The demo deliberately shows the deployed app's `/v1` base URL as configured, not as embedded: an
   operator pastes it from the Warm Control's output, which is the only place that knows how to turn a
   bare Modal host into an OpenAI base URL.

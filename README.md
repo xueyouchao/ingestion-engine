@@ -56,6 +56,11 @@ third changes only the publish decision. Read
 the real Docling page evidence and the honest failures, and
 [`docs/demo/pdf-demo-corpus.md`](docs/demo/pdf-demo-corpus.md) for the pin.
 
+The live upload demo is the other shape: a visitor uploads a PDF and sees the routing decision and the text
+the chosen lane read (`finepdfs-live-demo`, `127.0.0.1:8766`), with its OCR worker deployed on Modal and its
+spend bounded by three gates. [`docs/deploy/live-demo-runbook.md`](docs/deploy/live-demo-runbook.md) is the
+operator's procedure, including the slot for a cold start that nobody has measured yet.
+
 ## Browser explorer (P1, read-only)
 
 After a run has declared its outputs, a small local explorer shows the status table, filters it by
@@ -484,6 +489,7 @@ this pipeline is aimed at corpora of thousands of documents rather than the whol
 * [`docs/demo/agent-questions.md`](docs/demo/agent-questions.md) -- the five answerable questions with their known pages and the one unanswerable control
 * [`docs/deploy/modal-worker-runbook.md`](docs/deploy/modal-worker-runbook.md) -- the rented Modal GPU worker: per-run Sandbox, per-lease state, budget gate, and the GPU validation gates
 * [`docs/deploy/modal-worker-evidence.md`](docs/deploy/modal-worker-evidence.md) -- what the four real L4 runs on 2026-10-18 observed, and what remains unverified (failure teardown, OCR quality, RunPod, cost)
+* [`docs/deploy/live-demo-runbook.md`](docs/deploy/live-demo-runbook.md) -- the live upload demo's deployed, scale-to-zero OCR worker: deploy, bearer Secret, Warm Control and its price, the three Spend Gates, the demo host, and the slot for a cold start nobody has measured
 * `docs/GLOSSARY.md` -- the vocabulary, kept deliberately small
 * `docs/adr/0001..0012` -- the decisions, with the alternatives that lost
 * `research/` -- the research behind the design, including `paddleocr-vl-mineru-adapters.md`
