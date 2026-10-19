@@ -25,3 +25,11 @@ bench/md_real/
 
 # Local-only working notes: the PR draft and the ticket slices. Kept on disk on purpose, never committed.
 /.scratch/
+
+# The GPU demo state and its rehearsal root, and the pinned Modal deploy environment. Regenerable.
+/.demo-gpu/
+/.demo-gpu-smoke/
+/.venv-deploy/
+
+# The static reader bundle is a derived artifact; build it with `finepdfs bundle`.
+/dist/

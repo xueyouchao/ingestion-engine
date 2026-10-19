@@ -47,6 +47,7 @@ from finepdfs.infrastructure.engines.registry import KNOWN_ENGINES
 from finepdfs.infrastructure.llm.chat_completions import ChatCompletionsClient, ChatCompletionsError
 from finepdfs.infrastructure.publishing.disk import DiskPageReader, PublishedCorpus
 from finepdfs.infrastructure.search.sqlite_fts import SqliteFtsSearchIndex
+from finepdfs.interfaces import bundle as bundle_module
 from finepdfs.interfaces import explorer as explorer_module
 from finepdfs.interfaces import search_paths
 from finepdfs.interfaces.restore import restore_pinned_corpus
@@ -132,6 +133,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     explore.add_argument("--host", default=explorer_module.DEFAULT_HOST)
     explore.add_argument("--port", type=int, default=explorer_module.DEFAULT_PORT)
+
+    bundle = commands.add_parser(
+        "bundle", help="export a static reader bundle from completed runs' declared outputs"
+    )
+    bundle.add_argument(
+        "--state",
+        action="append",
+        default=[],
+        metavar="LABEL=PATH",
+        help="a completed run's output directory, labelled; repeat for a second engine reading",
+    )
+    bundle.add_argument("--out", type=Path, default=Path("bundle"), help="the directory to write the bundle to")
+    bundle.add_argument(
+        "--corpus",
+        type=Path,
+        default=None,
+        help="the corpus the states were run on; default is the first state's sibling corpus/",
+    )
+    bundle.add_argument("--dpi", type=int, default=bundle_module.DEFAULT_DPI)
+    bundle.add_argument("--max-bytes", type=int, default=bundle_module.DEFAULT_MAX_BYTES)
+    bundle.add_argument(
+        "--inline",
+        action="store_true",
+        help="bake page renders into the page as data URIs, producing one large self-contained file",
+    )
+    bundle.add_argument(
+        "--link",
+        default=None,
+        metavar="URL",
+        help="where this bundle is served; the page offers it when its own images/ folder is unreachable",
+    )
+    bundle.add_argument(
+        "--check",
+        action="store_true",
+        help="verify the bundle still mirrors the declared outputs instead of writing one",
+    )
 
     # The local full-text fallback (ADR-0008): rebuild the index from the declared chunk files, then
     # read the same contract the browser and the agent use. Two commands, one backend.
@@ -312,6 +349,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _run(args)
     if args.command == "explore":
         return _explore(args)
+    if args.command == "bundle":
+        return _bundle(args)
     if args.command == "index-search":
         return _index_search(args)
     if args.command == "search":
@@ -319,6 +358,44 @@ def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "ask":
         return _ask(args)
     raise AssertionError(f"unhandled command {args.command}")
+
+
+def _bundle(args: argparse.Namespace) -> int:
+    """Write (or check) the static reader bundle. Derived only: it never writes into a state."""
+    try:
+        runs = [bundle_module.read_state(*_parse_state(spec)) for spec in args.state]
+        if not runs:
+            print("bundle needs at least one --state LABEL=PATH", file=sys.stderr)
+            return 2
+        if args.check:
+            stale = bundle_module.check_bundle(args.out, runs)
+            if stale:
+                print(f"the bundle at {args.out} no longer mirrors: {', '.join(stale)}", file=sys.stderr)
+                return 1
+            print(f"bundle at {args.out} still mirrors every state")
+            return 0
+        corpus = args.corpus if args.corpus is not None else runs[0].out.parent / "corpus"
+        contract = bundle_module.build_bundle(
+            args.out, runs, corpus, dpi=args.dpi, max_bytes=args.max_bytes, inline=args.inline,
+            link=args.link,
+        )
+    except bundle_module.BundleError as error:
+        print(error, file=sys.stderr)
+        return 2
+    print(
+        f"bundle: {contract['documents']} documents / {contract['pages']} pages / "
+        f"{contract['chunks']} chunks | {contract['total_bytes'] / 1024 / 1024:.1f} MiB at "
+        f"{contract['dpi']} dpi -> {args.out / bundle_module.INDEX_NAME}"
+    )
+    return 0
+
+
+def _parse_state(spec: str) -> tuple[str, Path]:
+    """SLICE=path from the command line: a label is required so two readings stay distinguishable."""
+    label, separator, path = spec.partition("=")
+    if not separator or not label.strip() or not path.strip():
+        raise bundle_module.BundleError(f"--state needs LABEL=PATH, got {spec!r}")
+    return label.strip(), Path(path.strip())
 
 
 def _search_index_path(args: argparse.Namespace) -> Path:
