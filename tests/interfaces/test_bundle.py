@@ -395,3 +395,26 @@ def test_a_rebuild_retires_renders_named_before_names_carried_a_hash(tmp_path) -
 
     assert not legacy.exists()
     assert len(list((bundle / "images").glob("*.jpg"))) == 2
+
+
+def test_the_fingerprint_ignores_files_the_bundle_never_reads(tmp_path) -> None:
+    """A stray file in a declared directory is not evidence the page shows."""
+    out = _write_run(tmp_path, "out", pages=(1,), engine="pymupdf@1.28.2")
+    bundle = tmp_path / "bundle"
+    build_bundle(bundle, [read_state("pymupdf", out)], tmp_path / "corpus")
+
+    (out / "pages" / "a-scratch-note.txt").write_text("not declared evidence\n", encoding="utf-8")
+
+    assert check_bundle(bundle, [read_state("pymupdf", out)]) == []
+
+
+def test_a_contract_from_another_schema_is_not_checked(tmp_path) -> None:
+    out = _write_run(tmp_path, "out", pages=(1,), engine="pymupdf@1.28.2")
+    bundle = tmp_path / "bundle"
+    build_bundle(bundle, [read_state("pymupdf", out)], tmp_path / "corpus")
+    contract = json.loads((bundle / "bundle.json").read_text(encoding="utf-8"))
+    contract["schema_version"] = 99
+    (bundle / "bundle.json").write_text(json.dumps(contract), encoding="utf-8")
+
+    with pytest.raises(BundleError, match="schema version"):
+        check_bundle(bundle, [read_state("pymupdf", out)])

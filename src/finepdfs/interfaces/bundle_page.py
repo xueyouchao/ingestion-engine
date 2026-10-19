@@ -135,10 +135,15 @@ footer code { color:var(--ink); }
 const DATA = __DATA__;
 const state = { label: DATA.default_state, doc: null, page: null, find: "", corpus: "", hits: [], index: [] };
 const $ = (sel) => document.querySelector(sel);
-const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 const docOf = (key) => key.split(":")[0];
 const pageNo = (key) => Number(key.split(":")[1]);
-const nameOf = (id) => decodeURIComponent(DATA.documents[id].url.split("/").pop() || DATA.documents[id].url);
+function nameOf(id) {
+  const url = DATA.documents[id].url;
+  const tail = url.split("/").pop() || url;
+  try { return decodeURIComponent(tail); } catch (error) { return tail; }
+}
 const pagesOf = (id) => Object.keys(DATA.pages).filter((key) => docOf(key) === id)
   .sort((a, b) => pageNo(a) - pageNo(b));
 const terms = (q) => q.toLowerCase().split(/\\s+/).filter(Boolean);
@@ -208,16 +213,21 @@ function corpusSearch(query) {
     for (const term of wanted) if (hay.includes(term)) score += 1;
     if (score === wanted.length) hits.push({ ...entry, score });
   }
-  return hits.slice(0, 60);
+  return hits;
 }
 
-function markIn(text, wanted) {
-  if (!wanted.length) return esc(text);
-  const lower = text.toLowerCase();
+// The strip shows the nearest matches; the count above it still reports every match.
+const HIT_LIMIT = 60;
+
+function spansOf(text, wanted) {
+  // Matched case-insensitively on the text itself: `toLowerCase()` can change a string's length, and a
+  // boundary found in the lowered copy would then mark the wrong characters in the original.
   const spans = [];
   for (const term of wanted) {
-    let at = lower.indexOf(term);
-    while (at !== -1) { spans.push([at, at + term.length]); at = lower.indexOf(term, at + term.length); }
+        const needle = term.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
+    for (const match of text.matchAll(new RegExp(needle, "gi"))) {
+      spans.push([match.index, match.index + match[0].length]);
+    }
   }
   spans.sort((a, b) => a[0] - b[0]);
   const merged = [];
@@ -226,6 +236,12 @@ function markIn(text, wanted) {
     if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
     else merged.push([span[0], span[1]]);
   }
+  return merged;
+}
+
+function markIn(text, wanted) {
+  const merged = spansOf(text, wanted);
+  if (!merged.length) return esc(text);
   let out = "", cursor = 0;
   for (const [a, b] of merged) {
     out += esc(text.slice(cursor, a)) + "<mark>" + esc(text.slice(a, b)) + "</mark>";
@@ -235,10 +251,8 @@ function markIn(text, wanted) {
 }
 
 function snippet(text, wanted) {
-  const lower = text.toLowerCase();
-  let at = -1;
-  for (const term of wanted) { const i = lower.indexOf(term); if (i !== -1 && (at === -1 || i < at)) at = i; }
-  const start = Math.max(0, (at === -1 ? 0 : at) - 40);
+  const first = spansOf(text, wanted)[0];
+  const start = Math.max(0, (first ? first[0] : 0) - 40);
   const piece = text.slice(start, start + 140);
   return (start > 0 ? "…" : "") + markIn(piece, wanted) + (start + 140 < text.length ? "…" : "");
 }
@@ -291,12 +305,7 @@ function drawBoxes(page) {
 function counter(page) {
   const wanted = terms(state.find);
   if (!wanted.length) return "";
-  const hay = page.text.toLowerCase();
-  let inText = 0;
-  for (const term of wanted) {
-    let at = hay.indexOf(term);
-    while (at !== -1) { inText += 1; at = hay.indexOf(term, at + term.length); }
-  }
+  const inText = spansOf(page.text, wanted).length;
   if (!page.words) return inText + " in text";
   const onPage = page.words.filter((w) => wanted.some((term) => w[4].toLowerCase().includes(term))).length;
   return inText + " in text · " + onPage + " on page";
@@ -306,7 +315,7 @@ function renderNav() {
   const nav = $("#pages");
   nav.textContent = "";
   if (state.corpus && state.hits.length) {
-    state.hits.forEach((hit) => {
+    state.hits.slice(0, HIT_LIMIT).forEach((hit) => {
       const button = document.createElement("button");
       button.type = "button";
       button.innerHTML = "<span>" + esc(nameOf(docOf(hit.key))) + "</span><small>page " + pageNo(hit.key)
@@ -318,6 +327,14 @@ function renderNav() {
       });
       nav.appendChild(button);
     });
+    if (state.hits.length > HIT_LIMIT) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.disabled = true;
+      more.innerHTML = "<span>" + (state.hits.length - HIT_LIMIT) + " more matches</span><small>narrow the "
+        + "query to see them</small>";
+      nav.appendChild(more);
+    }
     return;
   }
   if (state.corpus) {
@@ -429,7 +446,8 @@ function hitCount() {
   if (!state.corpus) return "";
   const docs = new Set(state.hits.map((hit) => docOf(hit.key))).size;
   return state.hits.length + (state.hits.length === 1 ? " chunk" : " chunks") + " in " + docs
-    + (docs === 1 ? " document" : " documents");
+    + (docs === 1 ? " document" : " documents")
+    + (state.hits.length > HIT_LIMIT ? " (nearest " + HIT_LIMIT + " listed)" : "");
 }
 
 function renderHint() {
@@ -482,13 +500,6 @@ function renderDocuments() {
     }
     select.appendChild(group);
   }
-  select.addEventListener("change", () => {
-    state.corpus = "";
-    $("#q").value = "";
-    $("#hits").textContent = "";
-    state.hits = [];
-    openPage(pagesOf(select.value)[0]);
-  });
 }
 
 function applyCorpus(query) {
@@ -510,6 +521,13 @@ function boot() {
   buildIndex();
   renderDocuments();
   renderStates();
+  $("#doc").addEventListener("change", () => {
+    state.corpus = "";
+    $("#q").value = "";
+    $("#hits").textContent = "";
+    state.hits = [];
+    openPage(pagesOf($("#doc").value)[0]);
+  });
   $("#corpus").addEventListener("submit", (event) => {
     event.preventDefault();
     applyCorpus($("#q").value.trim());

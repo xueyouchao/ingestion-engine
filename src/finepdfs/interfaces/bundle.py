@@ -49,7 +49,7 @@ INDEX_NAME = "index.html"
 CONTRACT_NAME = "bundle.json"
 SUMMARY_NAME = "run-summary.json"
 # Every declared directory whose files the page copies a fact from, so the fingerprint covers them.
-DECLARED_DIRECTORIES = ("records", "pages", "chunks", "excluded")
+DECLARED_GLOBS = ("records/*.json", "pages/*.jsonl", "chunks/*.jsonl", "excluded/*.json")
 # What this exporter names its renders: only files matching it are ever deleted by a rebuild.
 # Both shapes this exporter has written: `<digest>-p<n>-<hash>.jpg`, and the older `<digest>-p<n>.jpg`
 # that a rebuild has to be able to retire.
@@ -132,9 +132,9 @@ def declared_fingerprint(run: StateRun) -> str:
     digest = hashlib.sha256()
     digest.update(SUMMARY_NAME.encode("utf-8"))
     digest.update((run.out / SUMMARY_NAME).read_bytes())
-    for directory in DECLARED_DIRECTORIES:
-        for path in sorted((run.out / directory).glob("*.*")):
-            digest.update(f"{directory}/{path.name}".encode())
+    for pattern in DECLARED_GLOBS:
+        for path in sorted(run.out.glob(pattern)):
+            digest.update(str(path.relative_to(run.out)).encode())
             digest.update(path.read_bytes())
     return digest.hexdigest()
 
@@ -399,5 +399,10 @@ def build_bundle(
 def check_bundle(out: Path | str, runs: list[StateRun]) -> list[str]:
     """Labels whose declared evidence the bundle no longer mirrors; empty means fresh."""
     contract = _read_json(Path(out) / CONTRACT_NAME)
+    if contract.get("schema_version") != BUNDLE_VERSION:
+        raise BundleError(
+            f"{Path(out) / CONTRACT_NAME} is schema version {contract.get('schema_version')!r}, not "
+            f"{BUNDLE_VERSION}; rebuild the bundle before checking it"
+        )
     recorded = {state["label"]: state["declared_fingerprint"] for state in contract.get("states", [])}
     return [run.label for run in runs if recorded.get(run.label) != declared_fingerprint(run)]
