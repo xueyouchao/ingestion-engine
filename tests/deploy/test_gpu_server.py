@@ -15,6 +15,7 @@ import pytest
 
 from deploy.gpu.contract import MODEL_ID, MODEL_REVISION, WORKER_MODEL, WORKER_PORT
 from deploy.gpu.server import (
+    API_KEY_VARIABLE,
     MODEL_VARIABLE,
     PORT_VARIABLE,
     REVISION_VARIABLE,
@@ -88,3 +89,32 @@ def test_serving_becomes_the_command_with_the_configured_environment() -> None:
 
 def test_an_unexpected_argument_is_a_usage_error() -> None:
     assert main(["--serve-now"], _environment(), lambda *_: None) == 2
+
+
+def test_the_launcher_passes_the_bearer_to_vllm_when_one_is_set() -> None:
+    argv = serve_argv(_environment(**{API_KEY_VARIABLE: "s3cret-bearer"}))
+
+    assert argv[argv.index("--api-key") + 1] == "s3cret-bearer"
+
+
+def test_the_launcher_sends_no_bearer_when_none_is_set() -> None:
+    assert "--api-key" not in serve_argv(_environment())
+
+
+def test_the_printed_command_masks_the_bearer() -> None:
+    """An operator pasting ``--print-command`` must not paste the token into a shell history."""
+    stream = io.StringIO()
+    launched: list[str] = []
+
+    def never_launch(program: str, argv: list[str]) -> None:
+        launched.append(program)
+
+    code = main(["--print-command"], _environment(**{API_KEY_VARIABLE: "s3cret-bearer"}), never_launch, stream)
+
+    assert code == 0
+    assert launched == []
+    printed = stream.getvalue()
+    assert "s3cret-bearer" not in printed
+    argv = json.loads(printed)
+    assert argv[argv.index("--api-key") + 1] == "***"
+    assert argv[argv.index("--served-model-name") + 1] == WORKER_MODEL
