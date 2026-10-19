@@ -55,6 +55,26 @@ class EngineConfig:
     # ``EngineIdentity`` both call ``detail``: the name is the engine's, the detail is the deployment's.
 
 
+def engine_endpoint(config: EngineConfig) -> str | None:
+    """The address this engine is reached at, or ``None`` when it runs on this host.
+
+    ``_build_engine`` picks the kind from the same facts -- a command means a process here, an address
+    means a server -- so readiness asks this rather than guessing: an engine this host runs itself has no
+    endpoint to wait for, and one that is reached over HTTP has no command to have started it.
+
+    An HTTP engine with no address configured answers ``""``, which is not "local": its probe names the
+    missing address instead of pretending the worker is ready.
+    """
+    if config.name == MINERU_ENGINE:
+        # The address picks the backend: with one it is a server, without one a subprocess here.
+        return config.base_url or None
+    if config.name == PADDLEOCR_VL_ENGINE:
+        # A command picks the CLI; otherwise the chat endpoint, at whatever address it has -- which may be
+        # none, and then the probe names the missing address instead of calling a worker that is not there.
+        return None if config.command else config.base_url
+    return None
+
+
 def build_engine(config: EngineConfig) -> OcrEngine:
     """One engine, whichever kind it is. Imported lazily so unused engines cost nothing."""
     engine = _build_engine(config)

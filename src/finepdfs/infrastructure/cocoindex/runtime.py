@@ -16,16 +16,9 @@ from finepdfs.application.metrics import RunMetrics
 from finepdfs.domain.language import LanguagePolicy
 from finepdfs.domain.ports import OcrEngine
 from finepdfs.domain.publishing import PublishPolicy
-from finepdfs.infrastructure.compute.endpoint import (
-    ENGINE_API_KEY,
-    ENGINE_BASE_URL,
-    ENGINE_DETAIL,
-    ENGINE_MODEL,
-)
 from finepdfs.infrastructure.corpus.index import CorpusIndex
-from finepdfs.infrastructure.engines.concurrency import ENGINE_CONCURRENCY, engine_concurrency
-from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextLayerProbe
-from finepdfs.infrastructure.engines.registry import EngineConfig, build_engines
+from finepdfs.infrastructure.engines.environment import engine_adapters
+from finepdfs.infrastructure.engines.registry import NATIVE_ENGINE
 from finepdfs.infrastructure.language.registry import (
     DEFAULT_LANGUAGE_MODE,
     LanguageConfig,
@@ -79,43 +72,32 @@ def runtime_from_environment(environ: Mapping[str, str] | None = None) -> Runtim
     values = environ if environ is not None else os.environ
     corpus_dir = pathlib.Path(values.get("FINEPDFS_CORPUS", DEFAULT_CORPUS_DIR))
     out_dir = pathlib.Path(values.get("FINEPDFS_OUT", DEFAULT_OUT_DIR))
-    engine_name = values.get("FINEPDFS_ENGINE", "pymupdf")
+    # Blank means unset here too: a run with no engine named stays on the free text layer.
+    engine_name = values.get("FINEPDFS_ENGINE", "").strip() or NATIVE_ENGINE
     language_config = LanguageConfig(
         mode=values.get("FINEPDFS_LANGUAGE", DEFAULT_LANGUAGE_MODE),
         model_path=values.get("FINEPDFS_LANGUAGE_MODEL", ""),
     )
 
-    engine_config = EngineConfig(
-        name=engine_name,
-        command=values.get("FINEPDFS_ENGINE_COMMAND", ""),
-        # The seam's four names come from where they are written (compute.endpoint), not from a literal
-        # spelled again here: one owner, so a rename does not have to be found in this file too.
-        base_url=values.get(ENGINE_BASE_URL, ""),
-        model=values.get(ENGINE_MODEL, ""),
-        api_key=values.get(ENGINE_API_KEY, ""),
-        page_dpi=int(values.get("FINEPDFS_ENGINE_DPI", "200")),
-        concurrency=engine_concurrency(values.get(ENGINE_CONCURRENCY, "")),
-        work_dir=pathlib.Path(values["FINEPDFS_ENGINE_WORK_DIR"]) if values.get("FINEPDFS_ENGINE_WORK_DIR") else None,
-        timeout_seconds=float(values.get("FINEPDFS_ENGINE_TIMEOUT", "300")),
-        detail=values.get(ENGINE_DETAIL, ""),
-    )
-    engines = build_engines([] if engine_name == "pymupdf" else [engine_config])
+    # One reader owns the engine's environment and the adapters it assembles
+    # (infrastructure.engines.environment), and the demo server calls the same one, so the two
+    # consumers cannot drift into different engines (ADR-0012).
+    adapters = engine_adapters(values, engine_name)
 
     policy = CurationPolicy(
         engine_name=engine_name,
-        routing=_routing_policy(values),
+        routing=adapters.routing,
         language=LanguagePolicy(min_confidence=float(values.get("FINEPDFS_LANGUAGE_CONFIDENCE", "0.65"))),
         publish=PublishPolicy(
             min_characters=int(values.get("FINEPDFS_MIN_CHARACTERS", "200")),
             required_languages=_languages(values),
         ),
     )
-    probe = PymupdfTextLayerProbe()
     return Runtime(
         corpus_dir=corpus_dir,
         out_dir=out_dir,
         policy=policy,
-        extraction=ExtractionStep(probe, engines, policy),
+        extraction=ExtractionStep(adapters.probe, adapters.engines, policy),
         curation=CurationStep(build_language_identifier(language_config), policy),
         similarity_threshold=float(values.get("FINEPDFS_SIMILARITY_THRESHOLD", "0.8")),
         search_enabled=_enabled(values.get("FINEPDFS_SEARCH", "")),
@@ -130,13 +112,3 @@ def _enabled(value: str) -> bool:
 def _languages(values: Mapping[str, str]) -> tuple[str, ...]:
     """FINEPDFS_LANGUAGES is a comma-separated allow-list; empty means no restriction."""
     return tuple(part.strip() for part in values.get("FINEPDFS_LANGUAGES", "").split(",") if part.strip())
-
-
-def _routing_policy(values: Mapping[str, str]):
-    from finepdfs.domain.ocr import OcrRoutingPolicy
-
-    return OcrRoutingPolicy(
-        min_characters_per_page=float(values.get("FINEPDFS_MIN_CHARACTERS_PER_PAGE", "200")),
-        min_text_coverage=float(values.get("FINEPDFS_MIN_TEXT_COVERAGE", "0.5")),
-        max_garbled_ratio=float(values.get("FINEPDFS_MAX_GARBLED_RATIO", "0.05")),
-    )

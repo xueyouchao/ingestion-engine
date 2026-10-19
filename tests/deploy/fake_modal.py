@@ -254,3 +254,200 @@ class ScriptRunner:
 
 def worker_environment(lease_dir: Path, **values: str) -> dict[str, str]:
     return {"FINEPDFS_GPU_STATE_DIR": str(lease_dir), **values}
+
+
+class FakeProcess:
+    """A spawned worker process: enough to observe the start hook and the exit hook."""
+
+    def __init__(self) -> None:
+        self.terminated = False
+        self.killed = False
+        self.waits: list[float | None] = []
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.waits.append(timeout)
+        return 0
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+class FakePopen:
+    """Stands in for ``subprocess.Popen``: records the command, hands back one fake process."""
+
+    def __init__(self, process: FakeProcess | None = None, error: Exception | None = None) -> None:
+        self.process = process if process is not None else FakeProcess()
+        self.error = error
+        self.commands: list[list[str]] = []
+        self.environments: list[dict[str, str]] = []
+
+    def __call__(self, command: Sequence[str], *, env: Mapping[str, str]) -> FakeProcess:
+        self.commands.append(list(command))
+        self.environments.append(dict(env))
+        if self.error is not None:
+            raise self.error
+        return self.process
+
+
+class FakeClock:
+    """A monotonic clock a test can steer, so a readiness timeout needs no wall time."""
+
+    def __init__(self, *times: float) -> None:
+        self.times = list(times)
+        self.last = times[-1] if times else 0.0
+
+    def __call__(self) -> float:
+        return self.times.pop(0) if self.times else self.last
+
+
+class ModelsOpener:
+    """Answers the worker's own ``/v1/models`` after N failures, and records every attempt."""
+
+    def __init__(self, failures: int = 0, model: str = WORKER_MODEL) -> None:
+        self.failures = failures
+        self.model = model
+        self.urls: list[str] = []
+        self.timeouts: list[float] = []
+        self.api_keys: list[str] = []
+
+    def __call__(self, url: str, timeout: float, api_key: str) -> FakeResponse:
+        self.urls.append(url)
+        self.timeouts.append(timeout)
+        self.api_keys.append(api_key)
+        if self.failures:
+            self.failures -= 1
+            raise ConnectionError("the worker is still loading")
+        return FakeResponse({"object": "list", "data": [{"id": self.model, "object": "model"}]})
+
+
+class FakeServerRegistration:
+    """What ``@app.server(...)`` hands back: the decorated class and every pin it was given."""
+
+    def __init__(self, user_cls: type, options: Mapping[str, Any]) -> None:
+        self.user_cls = user_cls
+        self.options = dict(options)
+
+
+class FakeSecret:
+    def __init__(self, name: str, required_keys: Sequence[str]) -> None:
+        self.name = name
+        self.required_keys = list(required_keys)
+
+
+class FakeDeployApp:
+    """One fake Modal App: records the decorators and the server class that carries them."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.servers: dict[str, FakeServerRegistration] = {}
+
+    def server(self, **options: Any) -> Any:
+        def register(user_cls: type) -> FakeServerRegistration:
+            registration = FakeServerRegistration(user_cls, options)
+            self.servers[options.get("name", "")] = registration
+            return registration
+
+        return register
+
+
+class FakeDeployModal:
+    """A module-like stand-in for ``import modal``: the deployed app's whole SDK surface."""
+
+    def __init__(self) -> None:
+        self.apps: list[FakeDeployApp] = []
+        self.image = FakeImage()
+        self.volumes: list[tuple[str, bool]] = []
+        self.secrets: list[FakeSecret] = []
+        self.enters: list[str] = []
+        self.exits: list[str] = []
+        self.App = self._app
+        self.Image = SimpleNamespace(from_registry=self._from_registry)
+        self.Volume = SimpleNamespace(from_name=self._from_name)
+        self.Secret = SimpleNamespace(from_name=self._secret)
+        self.enter = self._enter
+        self.exit = self._exit
+        self.exception = SimpleNamespace(NotFoundError=NotFoundError)
+
+    def _app(self, name: str) -> FakeDeployApp:
+        app = FakeDeployApp(name)
+        self.apps.append(app)
+        return app
+
+    def _from_registry(self, tag: str, add_python: str | None = None) -> FakeImage:
+        return self.image
+
+    def _from_name(self, name: str, *, create_if_missing: bool) -> str:
+        self.volumes.append((name, create_if_missing))
+        return f"volume-{name}"
+
+    def _secret(self, name: str, *, required_keys: Sequence[str] = ()) -> FakeSecret:
+        secret = FakeSecret(name, required_keys)
+        self.secrets.append(secret)
+        return secret
+
+    def _enter(self) -> Any:
+        def decorate(function: Any) -> Any:
+            self.enters.append(getattr(function, "__name__", ""))
+            function.modal_enter = True
+            return function
+
+        return decorate
+
+    def _exit(self) -> Any:
+        def decorate(function: Any) -> Any:
+            self.exits.append(getattr(function, "__name__", ""))
+            function.modal_exit = True
+            return function
+
+        return decorate
+
+
+class FakeAutoscalerSettings:
+    def __init__(self, min_containers: int | None, scaledown_window: int | None) -> None:
+        self.min_containers = min_containers
+        self.max_containers = 1
+        self.target_concurrency = None
+        self.buffer_containers = 0
+        self.scaleup_window = None
+        self.scaledown_window = scaledown_window
+
+
+class FakeWarmServer:
+    """One deployed Server as the Warm Control sees it: a URL and an autoscaler behind one call."""
+
+    def __init__(self, url: str | None, floor: int, scaledown_window: int) -> None:
+        self.url = url
+        self.floor = floor
+        self.scaledown_window = scaledown_window
+        self.updates: list[dict[str, int]] = []
+
+    def get_url(self) -> str | None:
+        return self.url
+
+    def update_autoscaler(self, **options: int) -> FakeAutoscalerSettings:
+        self.updates.append(dict(options))
+        if "min_containers" in options:
+            self.floor = options["min_containers"]
+        return FakeAutoscalerSettings(self.floor, self.scaledown_window)
+
+
+class FakeWarmModal:
+    """A module-like stand-in for ``import modal`` on the Warm Control's path."""
+
+    def __init__(
+        self,
+        url: str | None = TUNNEL_URL,
+        floor: int = 0,
+        scaledown_window: int = 180,
+    ) -> None:
+        self.server = FakeWarmServer(url, floor, scaledown_window)
+        self.looked_up: list[tuple[str, str]] = []
+        self.Server = SimpleNamespace(from_name=self._from_name)
+        self.exception = SimpleNamespace(NotFoundError=NotFoundError)
+
+    def _from_name(self, app_name: str, server_name: str) -> FakeWarmServer:
+        self.looked_up.append((app_name, server_name))
+        return self.server

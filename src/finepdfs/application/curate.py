@@ -41,6 +41,15 @@ class RoutingPlan:
     decision: RoutingDecision
     engine_name: str
 
+    @property
+    def lane(self) -> str:
+        """Which lane read the document -- ``"ocr"`` or ``"text-layer"`` -- in a record's own words.
+
+        A published record, the demo's Reading and its job answer all name the lane, and they mean the
+        same fact, so the word is derived here once (CODING STANDARDS: one concept, one source of truth).
+        """
+        return "ocr" if self.decision.needs_ocr else "text-layer"
+
 
 @dataclass(frozen=True, slots=True)
 class ExtractionResult:
@@ -145,7 +154,7 @@ class CurationStep:
             url=url,
             digest=digest,
             engine=str(engine),
-            routing_decision="ocr" if extraction.plan.decision.needs_ocr else "text-layer",
+            routing_decision=extraction.plan.lane,
             routing_reason=extraction.plan.decision.reason,
             language=language.language,
             page_count=extraction.document.page_count,
