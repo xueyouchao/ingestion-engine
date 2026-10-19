@@ -153,7 +153,6 @@ def _state_block(run: StateRun) -> dict[str, Any]:
         "exclusions": exclusions.get("total"),
         "chunks": len(run.chunks),
         "declared_fingerprint": declared_fingerprint(run),
-        "path": str(run.out),
     }
 
 
@@ -260,6 +259,10 @@ def build_bundle(
     """Write the bundle and return its contract. Refuses rather than shrinks when over budget."""
     if not runs:
         raise BundleError("the bundle needs at least one state")
+    if not 1 <= dpi <= 1200:
+        raise BundleError(f"--dpi must be between 1 and 1200, got {dpi}")
+    if max_bytes < 1:
+        raise BundleError(f"--max-bytes must be positive, got {max_bytes}")
     _refuse_what_cannot_be_honest(runs)
     target = Path(out)
     corpus_root = Path(corpus)

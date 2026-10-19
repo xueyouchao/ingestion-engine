@@ -451,3 +451,11 @@ def test_a_contract_from_another_schema_is_not_checked(tmp_path) -> None:
 
     with pytest.raises(BundleError, match="schema version"):
         check_bundle(bundle, [read_state("pymupdf", out)])
+
+
+@pytest.mark.parametrize(("kwargs", "message"), [({"dpi": 0}, "--dpi"), ({"max_bytes": 0}, "--max-bytes")])
+def test_impossible_numbers_are_refused_before_anything_is_rendered(tmp_path, kwargs, message) -> None:
+    out = _write_run(tmp_path, "out", pages=(1,), engine="pymupdf@1.28.2")
+
+    with pytest.raises(BundleError, match=message):
+        build_bundle(tmp_path / "bundle", [read_state("pymupdf", out)], tmp_path / "corpus", **kwargs)

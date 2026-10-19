@@ -151,8 +151,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="the corpus the states were run on; default is the first state's sibling corpus/",
     )
-    bundle.add_argument("--dpi", type=int, default=bundle_module.DEFAULT_DPI)
-    bundle.add_argument("--max-bytes", type=int, default=bundle_module.DEFAULT_MAX_BYTES)
+    bundle.add_argument("--dpi", type=int, default=bundle_module.DEFAULT_DPI,
+                        help="resolution of the page renders; 72 keeps a page readable and the bundle small")
+    bundle.add_argument("--max-bytes", type=int, default=bundle_module.DEFAULT_MAX_BYTES,
+                        help="refuse to write a bundle heavier than this; never shrinks silently")
     bundle.add_argument(
         "--inline",
         action="store_true",
