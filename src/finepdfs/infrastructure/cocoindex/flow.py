@@ -81,12 +81,14 @@ def coco_lifespan(builder: coco.EnvironmentBuilder):
 def extract_with_engine(digest: str, engine_name: str, engine_identity: str) -> ExtractedDocument:
     """Read one document with one engine.
 
-    Memoised on the content digest, the engine name and the engine identity, and on nothing else: not
-    on where the corpus happens to live, so moving a corpus re-reads nothing (ADR-0003), and not on
-    where the document came from. The identity is an argument for the key's sake alone -- a different
-    model, base URL, page DPI or tool version changes it, so memoised text cannot outlive the engine
-    that produced it (ADR-0005). The bytes are checked against the digest they are named after, so a
-    file that no longer holds what its name says fails visibly instead of serving stale text.
+    Memoised on those three arguments -- the content digest, the engine name and the engine identity --
+    plus this body's own AST (CocoIndex hashes the function it runs), and on nothing the body reads from
+    around itself: not on where the corpus happens to live, so moving a corpus re-reads nothing
+    (ADR-0003), not on where the document came from, and not on a threshold read from configuration.
+    The identity is an argument for the key's sake alone -- a different model, base URL, page DPI or tool
+    version changes it, so memoised text cannot outlive the engine that produced it (ADR-0005). The
+    bytes are checked against the digest they are named after, so a file that no longer holds what its
+    name says fails visibly instead of serving stale text.
 
     A plain ``def`` on purpose: `OcrEngine.extract` is synchronous and blocks for a whole remote page
     request, and CocoIndex runs a synchronous body on a thread of its own while an ``async def`` body

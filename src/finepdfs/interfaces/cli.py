@@ -249,7 +249,7 @@ def _add_engine_arguments(parser: argparse.ArgumentParser, *, out: bool) -> None
         "--concurrency",
         type=int,
         default=argparse.SUPPRESS,
-        help="engine calls in flight for the whole run: one page request, or one local command",
+        help="engine calls in flight for the whole run: one remote page request, or one local command",
     )
     parser.add_argument(
         "--similarity-threshold",

@@ -4,13 +4,12 @@ Date: 2026-10-19
 
 ## Status
 
-Accepted. Amended 2026-10-19, on the day it was accepted: **step 4 was not taken.** The machine this
-landed from has no GPU, so neither worker pin was measured or changed. `--mm-processor-cache-gb 0` and
-`--max-num-batched-tokens 16384` stay exactly as they are, and this ADR does not claim they were
-revisited. Step 4 stands as a measurement still to be taken; the
+Accepted. Amended 2026-10-19, on the day it was accepted: **the step-4 measurement has not been taken.**
+`--mm-processor-cache-gb 0` and `--max-num-batched-tokens 16384` are both unchanged, and this ADR does
+not claim they were revisited. Step 4 stands as a measurement still to be taken, and the
 [deploy runbook](../deploy/modal-worker-runbook.md#assumptions-and-what-the-first-paid-runs-did-and-did-not-settle)
-now carries the check an operator runs on a real worker and what each answer would mean. What the repo
-owns is that instruction, not a number it did not measure.
+carries the check an operator runs on a real worker and what each answer would mean. What the repo owns
+is that instruction, not a number it did not measure.
 
 ## Context
 
@@ -56,10 +55,12 @@ the measurement was taken.
    with it, not one document's failure. A page rendered on this thread is what keeps the memo unit one
    document.
 3. **One concurrency knob, at the leaf.** `FINEPDFS_ENGINE_CONCURRENCY` (default 6) bounds in-flight
-   **engine calls** -- one remote page request, or one local CLI invocation -- and nothing above them. It
-   is deliberately *not* a permit a document body takes before waiting for its own pages: with N
-   documents holding all N permits and each waiting on work that needs one, the run deadlocks. Both the
-   remote and the CLI engines read it.
+   **engine calls** -- one remote page request, or one local command, for every engine that makes one --
+   and nothing above them. It is deliberately *not* a permit a document body takes before waiting for its
+   own pages: with N documents holding all N permits and each waiting on work that needs one, the run
+   deadlocks. Every adapter that makes a call takes its permit from that one bound and holds it for the
+   call alone: PaddleOCR-VL both ways, Docling's command (and its one-off version probe), and MinerU's
+   command or its HTTP request. Rendering, scratch directories and parsing stay outside it.
 4. **Revisit two worker pins once requests overlap.** *Not taken: see Status.*
    `--mm-processor-cache-gb 0` (`deploy/gpu/server.py:41`) makes every concurrent request re-preprocess
    its image on the worker's CPU, which saturates before the GPU does; `--max-num-batched-tokens 16384`
@@ -102,6 +103,8 @@ surface, against ADR-0009's one-lease-per-run).
   bytes, same identity" no longer promises byte-identical text across a memo reset. Keys and identity are
   unaffected; the first read is still the one the memo remembers.
 * **Failure is still per document.** A page that fails fails its document, not its siblings -- the same
-  contract `read_document` already has.
+  contract `read_document` already has -- and the run's bound carries on: the permits that read held are
+  free again (and the pool slots it was queued on), while a request a worker has already started is not
+  recalled.
 * **A regression guard, not a comment.** The test uses an engine with a barrier and asserts the reading
   pass really overlaps, so the serialization cannot come back unnoticed.
