@@ -208,10 +208,7 @@ function corpusSearch(query) {
   if (!wanted.length) return [];
   const hits = [];
   for (const entry of state.index) {
-    const hay = entry.text.toLowerCase();
-    let score = 0;
-    for (const term of wanted) if (hay.includes(term)) score += 1;
-    if (score === wanted.length) hits.push({ ...entry, score });
+    if (wanted.every((term) => spansOf(entry.text, [term]).length)) hits.push(entry);
   }
   return hits;
 }
@@ -219,14 +216,30 @@ function corpusSearch(query) {
 // The strip shows the nearest matches; the count above it still reports every match.
 const HIT_LIMIT = 60;
 
+function fold(text) {
+  // A lowercased copy plus, for each character in it, the index of the original character it came from.
+  // Lowering can expand one character into several (the Turkish dotted capital I becomes i plus a
+  // combining dot), so this mapping is what lets a match in the lowered text be marked in the original.
+  let lower = "";
+  const map = [];
+  Array.from(text).forEach((part, index) => {
+    const small = part.toLowerCase();
+    lower += small;
+    for (let i = 0; i < small.length; i += 1) map.push(index);
+  });
+  return { lower, map };
+}
+
 function spansOf(text, wanted) {
-  // Matched case-insensitively on the text itself: `toLowerCase()` can change a string's length, and a
-  // boundary found in the lowered copy would then mark the wrong characters in the original.
+  // The one matcher: search, marks and the counter all go through it, so a page cannot be found by one
+  // rule and then marked by another.
+  const { lower, map } = fold(text);
   const spans = [];
   for (const term of wanted) {
-        const needle = term.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
-    for (const match of text.matchAll(new RegExp(needle, "gi"))) {
-      spans.push([match.index, match.index + match[0].length]);
+    let at = lower.indexOf(term);
+    while (at !== -1) {
+      spans.push([map[at], map[at + term.length - 1] + 1]);
+      at = lower.indexOf(term, at + term.length);
     }
   }
   spans.sort((a, b) => a[0] - b[0]);
