@@ -10,6 +10,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 NAME="${NAME:-ingestion-reader}"
 HOST="${HOST:-pdf-ingestion.srv1567269.hstgr.cloud}"
+# Pinned by digest: the site is one container of static files, so the image should not drift under it.
+IMAGE="${IMAGE:-nginx:alpine@sha256:892bb2152464f0c5d8972593a5f5afaf8054552580b699d95f8ff4af08c2d33d}"
 
 if [ ! -f "$ROOT/dist/bundle/index.html" ]; then
   echo "no bundle at $ROOT/dist/bundle; build it first:" >&2
@@ -18,6 +20,10 @@ if [ ! -f "$ROOT/dist/bundle/index.html" ]; then
   echo "    --corpus .demo-gpu/corpus" >&2
   exit 1
 fi
+
+# Prove the config before taking the site down: a rejected config in a throwaway container costs nothing,
+# while starting the real one with it would leave the host unrouted.
+docker run --rm -v "$ROOT/deploy/bundle/nginx.conf:/etc/nginx/conf.d/default.conf:ro" "$IMAGE" nginx -t >/dev/null
 
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" --restart unless-stopped \
@@ -30,8 +36,11 @@ docker run -d --name "$NAME" --restart unless-stopped \
   --label "traefik.http.routers.$NAME.tls.certresolver=letsencrypt" \
   --label "traefik.http.routers.$NAME.service=$NAME" \
   --label "traefik.http.services.$NAME.loadbalancer.server.port=80" \
-  nginx:alpine >/dev/null
+  "$IMAGE" >/dev/null
 
 sleep 2
-docker exec "$NAME" nginx -t >/dev/null 2>&1 || { echo "nginx rejected its config" >&2; exit 1; }
+if ! docker exec "$NAME" nginx -t >/dev/null 2>&1; then
+  echo "the new container rejected its config; the previous one is gone, so rerun this script" >&2
+  exit 1
+fi
 echo "serving $ROOT/dist/bundle at https://$HOST/"
