@@ -27,7 +27,9 @@ DEFAULT_POLL_INTERVAL_SECONDS = 2
 # The gate that closed, what the page refuses with, and where a Reading stands. These are the page's
 # vocabulary: the kinds and stage names are the exact strings the demo server and the page exchange.
 SpendGate = Literal["page-cap", "rate-limit", "daily-budget"]
-RefusalKind = Literal["page-cap", "rate-limit", "daily-budget", "unreadable", "busy", "unavailable", "failed"]
+RefusalKind = Literal[
+    "page-cap", "rate-limit", "daily-budget", "upload", "unreadable", "busy", "unavailable", "failed"
+]
 ReadingStage = Literal["queued", "routing", "warming", "reading", "done"]
 
 
