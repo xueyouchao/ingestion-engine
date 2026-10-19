@@ -108,6 +108,28 @@ class GateLedger(Protocol):
         ...
 
 
+class OcrEndpointUnavailable(Exception):
+    """Raised by an endpoint probe that cannot ask the endpoint at all, and the fault that stopped it.
+
+    A worker that is merely cold is not this: that is "not ready yet", the demo's warming stage. This is
+    the endpoint that cannot come -- no address configured, an address that is not one, or a bearer the
+    endpoint refuses -- so no amount of waiting helps and the caller fails the read instead of waiting.
+    The message names the fault and never the credentials or the address, both of which are a leak, not
+    a diagnosis: a token in a log or a page is a bill.
+    """
+
+
+class OcrEndpointProbe(Protocol):
+    """Whether the demo's OCR endpoint answers right now: the question behind a cold worker's warming.
+
+    ``ready`` answers ``False`` for anything that may resolve with time -- a connection error, a timeout,
+    a 5xx while the worker is still loading -- so the caller can poll, and raises
+    ``OcrEndpointUnavailable`` for a fault that waiting cannot fix.
+    """
+
+    def ready(self) -> bool: ...
+
+
 class DeclaredPageReader(Protocol):
     """Where one Document's declared record, exclusion and accepted pages are read from.
 
