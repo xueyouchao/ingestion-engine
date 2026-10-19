@@ -20,7 +20,7 @@ DEMO_HTML = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:,">
-<title>Read your own PDF</title>
+<title>Read your own document</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -123,14 +123,15 @@ DEMO_HTML = """<!doctype html>
 </head>
 <body>
 <header>
-  <h1>Read your own PDF</h1>
-  <p>Upload a document and watch the pipeline decide how to read it, then read it.</p>
+  <h1>Read your own document</h1>
+  <p>Upload a document &mdash; a PDF, or a scan as PNG, JPEG or TIFF &mdash; and watch the pipeline decide
+  how to read it, then read it.</p>
 </header>
 
 <section class="statements" id="statements">
-  <p><strong>Where your bytes go:</strong> the PDF is sent to a rented GPU to be read when the decision
-  chooses the OCR lane.</p>
-  <p><strong>What is kept:</strong> nothing is kept after the response &mdash; no uploaded PDF, no page
+  <p><strong>Where your bytes go:</strong> when the decision chooses the OCR lane, the page images are
+  sent to a rented GPU to be read.</p>
+  <p><strong>What is kept:</strong> nothing is kept after the response &mdash; no uploaded file, no page
   image, no extracted text and no job state across a restart.</p>
 </section>
 
@@ -150,10 +151,12 @@ DEMO_HTML = """<!doctype html>
 <section>
   <h2>Upload</h2>
   <form class="upload" id="upload-form">
-    <input type="file" id="upload-file" accept="application/pdf" required>
-    <button type="submit" id="upload-button">Read this PDF</button>
+    <input type="file" id="upload-file" accept="application/pdf,image/png,image/jpeg,image/tiff" required>
+    <button type="submit" id="upload-button">Read this document</button>
   </form>
-  <p class="note" id="upload-note">One PDF at a time. The server answers a job and this page polls it.</p>
+  <p class="note" id="upload-note">One document at a time. A scan is read as a page, so it goes to the OCR
+  lane &mdash; a three-page TIFF is three pages, and the page cap counts them. The server answers a job and
+  this page polls it.</p>
 </section>
 
 <section id="timeline">
@@ -406,6 +409,16 @@ function poll(jobId) {
   ask();
 }
 
+function guessType(name) {
+  // A browser sets ``file.type`` for the formats the input accepts, but an empty one is better answered
+  // with the right name than with a refusal: the extension is what a dropped file still carries.
+  const lower = (name || "").toLowerCase();
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".tif") || lower.endsWith(".tiff")) return "image/tiff";
+  return "application/pdf";
+}
+
 async function upload(file) {
   hideResults();
   state.seen = new Set();
@@ -414,7 +427,7 @@ async function upload(file) {
   try {
     const response = await fetch("/api/read", {
       method: "POST",
-      headers: { "Content-Type": "application/pdf", "X-Upload-Name": file.name || "upload.pdf" },
+      headers: { "Content-Type": file.type || guessType(file.name), "X-Upload-Name": file.name || "upload" },
       body: file,
     });
     const payload = await response.json();
@@ -435,7 +448,7 @@ byId("upload-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const file = byId("upload-file").files[0];
   if (!file) {
-    showError("choose a PDF first");
+    showError("choose a document first");
     return;
   }
   upload(file);

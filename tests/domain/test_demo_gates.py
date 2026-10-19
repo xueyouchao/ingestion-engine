@@ -62,13 +62,13 @@ def test_a_document_one_page_over_the_cap_is_refused_in_the_visitor_s_terms() ->
 
     assert decision.refused is True
     assert decision.gate == "page-cap"
-    assert decision.reason == "this PDF has 26 pages; the demo reads up to 25"
+    assert decision.reason == "this document has 26 pages; the demo reads up to 25"
 
 
 def test_the_page_cap_quotes_the_document_and_the_limit_that_closed() -> None:
     decision = SpendGatePolicy(DemoLimits(page_cap=25)).decide(84, UsageSnapshot())
 
-    assert decision.reason == "this PDF has 84 pages; the demo reads up to 25"
+    assert decision.reason == "this document has 84 pages; the demo reads up to 25"
 
 
 @pytest.mark.parametrize("reads_in_window", [0, 4])
@@ -131,7 +131,7 @@ def test_an_ocr_read_that_would_exceed_the_budget_is_refused_in_the_visitor_s_te
     assert decision.refused is True
     assert decision.gate == "daily-budget"
     assert decision.reason == (
-        f"the OCR budget for today is spent: {ocr_pages_today} of 300 pages used and this PDF needs 25 more"
+        f"the OCR budget for today is spent: {ocr_pages_today} of 300 pages used and this document needs 25 more"
     )
 
 

@@ -733,3 +733,63 @@ def test_a_failure_reason_never_carries_the_worker_address_or_the_bearer() -> No
 def test_the_engine_is_named_by_the_run_variable_not_by_a_demo_copy() -> None:
     assert demo_server.configured_engine({"FINEPDFS_ENGINE": "docling"}) == "docling"
     assert demo_server.configured_engine({"FINEPDFS_ENGINE": ""}) == OCR_ENGINE
+
+
+def test_a_scan_is_a_document_the_page_accepts() -> None:
+    """A scanned page is a document: the page offers the formats, and the reason for a refusal names them."""
+    html = demo_page.DEMO_HTML
+
+    assert 'accept="application/pdf,image/png,image/jpeg,image/tiff"' in html
+    assert "a PDF, or a scan as PNG, JPEG or TIFF" in html
+
+
+@pytest.mark.parametrize(
+    ("media_type", "name"),
+    [("image/png", "scan.png"), ("image/jpeg", "scan.jpg"), ("image/tiff", "scan-3-pages.tiff")],
+)
+def test_an_uploaded_scan_is_accepted_and_goes_to_the_ocr_lane(media_type: str, name: str) -> None:
+    """The real composition, the real reader: an image has no text layer, so the demo routes it to OCR.
+
+    No OCR worker is configured here, so the read fails in the OCR lane -- which is the point: the image
+    was admitted, measured as pages, routed, and charged as OCR pages, exactly like a scanned PDF.
+    """
+    settings = DemoLimits()
+    app = DemoApp(limits=settings, environ={})
+    content = (FIXTURES / name).read_bytes()
+    try:
+        with _serving(app) as base:
+            status, answer = _post(base, content, headers={"Content-Type": media_type})
+            assert status == 202, answer
+            job = _wait_for_job(base, answer["job"])
+            budget = _json(base + "/api/status")["ocr_pages_remaining"]
+    finally:
+        app.close()
+
+    pages = 3 if name.endswith(".tiff") else 1
+    assert job["outcome"] == "failed", "no worker is wired here, so the OCR lane is where it stops"
+    assert job["failure"]["lane"] == "ocr"
+    assert budget == settings.daily_ocr_page_budget - pages, "a scan is charged by the frames it has"
+
+
+def test_a_multi_frame_scan_is_counted_page_by_page() -> None:
+    """A three-frame TIFF is three pages, so the page cap sees three and refuses it like any other three."""
+    app = DemoApp(limits=DemoLimits(page_cap=1), environ={})
+    content = (FIXTURES / "scan-3-pages.tiff").read_bytes()
+    try:
+        with _serving(app) as base:
+            job = _upload(base, content, **{"Content-Type": "image/tiff"})
+    finally:
+        app.close()
+
+    assert job["outcome"] == "refused"
+    assert job["refusal"]["kind"] == "page-cap"
+    assert "3 pages" in job["refusal"]["reason"]
+
+
+def test_a_format_the_reader_cannot_open_is_refused_at_the_edge() -> None:
+    with _serving(_app(FakeProbe(HEALTHY), FakeEndpoint(), environ={})) as base:
+        status, answer = _post(base, b"RIFF....WEBP", headers={"Content-Type": "image/webp"})
+
+    assert status == 400
+    assert answer["refusal"]["kind"] == "upload"
+    assert "a PDF or a PNG, JPEG or TIFF image" in answer["refusal"]["reason"]

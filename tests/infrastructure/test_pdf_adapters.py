@@ -9,7 +9,7 @@ import pytest
 
 from finepdfs.domain.document import Document
 from finepdfs.domain.ocr import OcrRoutingPolicy
-from finepdfs.infrastructure.engines.pdf_document import PdfDocument, PdfReadError, pymupdf_version
+from finepdfs.infrastructure.engines.pdf_document import DocumentReadError, MuPDFDocument, pymupdf_version
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextEngine, PymupdfTextLayerProbe
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -51,7 +51,7 @@ def test_the_native_engine_returns_one_page_of_text_per_pdf_page(real_pdf_bytes)
 
     extracted = engine.extract(Document(name="real.pdf", content=real_pdf_bytes))
 
-    with PdfDocument(real_pdf_bytes) as pdf:
+    with MuPDFDocument(real_pdf_bytes) as pdf:
         assert extracted.page_count == pdf.page_count
     assert [page.number for page in extracted.pages] == list(range(1, extracted.page_count + 1))
     assert any(page.text.strip() for page in extracted.pages)
@@ -77,7 +77,7 @@ def test_a_page_that_is_only_an_image_is_measured_as_image_dominated() -> None:
 
 
 def test_rendering_a_page_gives_a_png_a_vision_model_can_read(real_pdf_bytes) -> None:
-    with PdfDocument(real_pdf_bytes) as pdf:
+    with MuPDFDocument(real_pdf_bytes) as pdf:
         image = pdf.render_page_png(1, dpi=100)
 
     assert image.startswith(b"\x89PNG\r\n")
@@ -85,5 +85,45 @@ def test_rendering_a_page_gives_a_png_a_vision_model_can_read(real_pdf_bytes) ->
 
 
 def test_bytes_that_are_not_a_pdf_are_rejected_with_a_clear_error() -> None:
-    with pytest.raises(PdfReadError), PdfDocument(b"this is not a pdf"):
+    with pytest.raises(DocumentReadError), MuPDFDocument(b"this is not a pdf"):
+        pass
+
+
+def _fixture(name: str) -> bytes:
+    return (FIXTURES / name).read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("name", "pages"),
+    [
+        ("scan.png", 1),
+        ("scan.jpg", 1),
+        ("scan-3-pages.tiff", 3),
+    ],
+)
+def test_a_scanned_image_is_a_page_with_no_text_layer(name: str, pages: int) -> None:
+    """A picture of a page is a page: the reader takes one page per frame, and the page has no text.
+
+    That is the whole reason the demo can take a scan at all -- and why the Routing Decision sends one to
+    the OCR lane without any special case. A multi-frame TIFF counts one page per frame, so the page cap
+    and the OCR budget count what the reader really found.
+    """
+    content = _fixture(name)
+
+    with MuPDFDocument(content) as document:
+        assert document.page_count == pages
+        assert [page.number for page in document.page_texts()] == list(range(1, pages + 1))
+        assert all(page.text == "" for page in document.page_texts())
+        assert len(document.render_page_png(1, dpi=100)) > 0, "the OCR lane needs a render of the frame"
+
+    quality = PymupdfTextLayerProbe().measure(content)
+
+    assert quality.page_count == pages
+    assert quality.character_count == 0, "a picture of a page carries no characters at all"
+    assert quality.text_coverage == 0.0
+    assert OcrRoutingPolicy().decide(quality).needs_ocr is True
+
+
+def test_bytes_that_are_neither_a_pdf_nor_an_image_are_unreadable() -> None:
+    with pytest.raises(DocumentReadError, match="not a readable PDF or image"), MuPDFDocument(b"neither"):
         pass

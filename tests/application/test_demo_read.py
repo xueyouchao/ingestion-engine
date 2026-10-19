@@ -313,7 +313,7 @@ def test_an_upload_over_the_page_cap_is_refused_before_anything_is_spent() -> No
 
     assert isinstance(outcome, Refusal)
     assert outcome.kind == "page-cap"
-    assert outcome.reason == "this PDF has 2 pages; the demo reads up to 1"
+    assert outcome.reason == "this document has 2 pages; the demo reads up to 1"
     assert outcome.plan is not None and outcome.plan.decision.needs_ocr is False
     assert seen == ["routing"]
     assert fakes.ledger.reads == []
@@ -347,7 +347,7 @@ def test_the_daily_ocr_budget_closes_only_the_ocr_lane_and_charges_nothing() -> 
 
     assert isinstance(outcome, Refusal)
     assert outcome.kind == "daily-budget"
-    assert outcome.reason == "the OCR budget for today is spent: 299 of 300 pages used and this PDF needs 2 more"
+    assert outcome.reason == "the OCR budget for today is spent: 299 of 300 pages used and this document needs 2 more"
     assert outcome.plan is not None and outcome.plan.decision.needs_ocr is True
     assert "warming" not in seen and "reading" not in seen
     # A refusal spends nothing at all: not a page against the day, and not a read against the visitor's

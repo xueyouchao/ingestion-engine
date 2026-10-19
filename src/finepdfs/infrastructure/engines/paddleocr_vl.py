@@ -14,7 +14,7 @@ from pathlib import Path
 
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText
 from finepdfs.infrastructure.engines.concurrency import DEFAULT_ENGINE_CONCURRENCY, EngineCalls
-from finepdfs.infrastructure.engines.pdf_document import PdfDocument
+from finepdfs.infrastructure.engines.pdf_document import MuPDFDocument
 from finepdfs.infrastructure.engines.subprocess_support import CommandRunner, SubprocessRunner, require_success
 from finepdfs.infrastructure.engines.vlm_chat import VlmChatTransport, strip_model_preamble
 
@@ -89,7 +89,7 @@ class PaddleOcrVlEngine:
             answer = future.result()
             pages[page_number] = PageText(number=page_number, text=strip_model_preamble(answer, OCR_PROMPT))
 
-        with PdfDocument(document.content) as pdf:
+        with MuPDFDocument(document.content) as pdf:
             try:
                 for page_number in range(1, pdf.page_count + 1):
                     while len(in_flight) >= self.calls.limit:  # bound the images held for in-flight requests
@@ -148,7 +148,7 @@ class PaddleOcrVlCliEngine:
             output_dir = scratch_dir / "results"
             images_dir.mkdir()
 
-            with PdfDocument(document.content) as pdf:
+            with MuPDFDocument(document.content) as pdf:
                 page_count = pdf.page_count
                 for page_number in range(1, page_count + 1):
                     rendered = pdf.render_page_png(page_number, dpi=self.dpi)

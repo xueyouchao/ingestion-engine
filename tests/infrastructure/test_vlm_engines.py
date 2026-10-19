@@ -40,7 +40,7 @@ from finepdfs.infrastructure.engines.paddleocr_vl import (
     page_from_paddle_result,
     pages_from_paddle_output,
 )
-from finepdfs.infrastructure.engines.pdf_document import PdfDocument
+from finepdfs.infrastructure.engines.pdf_document import MuPDFDocument
 from finepdfs.infrastructure.engines.subprocess_support import CommandResult
 from finepdfs.infrastructure.engines.vlm_chat import (
     ChatEndpoint,
@@ -133,7 +133,7 @@ def _page_images(content: bytes, dpi: int = 72) -> list[bytes]:
 
     Rendering is deterministic, so the image a read sends is byte-for-byte the one rendered here.
     """
-    with PdfDocument(content) as pdf:
+    with MuPDFDocument(content) as pdf:
         return [pdf.render_page_png(number, dpi=dpi) for number in range(1, pdf.page_count + 1)]
 
 
@@ -160,14 +160,14 @@ def renders(monkeypatch) -> list[RenderRecord]:
     is a rule of ADR-0010 that no test may negotiate: PyMuPDF is not thread-safe.
     """
     record: list[RenderRecord] = []
-    original = PdfDocument.render_page_png
+    original = MuPDFDocument.render_page_png
 
-    def recording_render(pdf: PdfDocument, page_number: int, dpi: int = 200) -> bytes:
+    def recording_render(pdf: MuPDFDocument, page_number: int, dpi: int = 200) -> bytes:
         image = original(pdf, page_number, dpi=dpi)
         record.append(RenderRecord(threading.current_thread(), page_number, image))
         return image
 
-    monkeypatch.setattr(PdfDocument, "render_page_png", recording_render)
+    monkeypatch.setattr(MuPDFDocument, "render_page_png", recording_render)
     return record
 
 
