@@ -594,6 +594,23 @@ def test_the_console_script_takes_host_port_and_the_limit_overrides(monkeypatch)
     assert limits.rate_limit_reads == DEFAULT_RATE_LIMIT_READS, "a flag only changes the limit it names"
 
 
+def test_every_limit_flag_reaches_the_limit_it_names() -> None:
+    # Written as a loop on purpose: three of the eight flags do not spell their field's name
+    # (--daily-ocr-pages sets daily_ocr_page_budget), and a hand-written list of flags is exactly how one
+    # of them went dead while the parser still accepted it.
+    for field, flag in demo_server._FLAGS.items():
+        args = demo_server.build_parser().parse_args([flag, "3"])
+        values = demo_server._environment_from_args(args)
+
+        assert float(values[demo_server._LIMITS[field].variable]) == 3, f"{flag} did not reach {field}"
+        changed = [
+            other
+            for other in demo_server._LIMITS
+            if other != field and getattr(demo_server.demo_limits(values), other) != getattr(DemoLimits(), other)
+        ]
+        assert changed == [], f"{flag} also changed {changed}"
+
+
 def test_the_limit_overrides_beat_the_environment(monkeypatch) -> None:
     served: list[tuple[str, int, dict]] = []
     monkeypatch.setattr(demo_server, "serve", lambda host, port, values: served.append((host, port, dict(values))))

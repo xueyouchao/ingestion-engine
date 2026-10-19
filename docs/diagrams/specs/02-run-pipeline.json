@@ -1,0 +1,332 @@
+{
+  "schema_version": 1,
+  "mode": "data-flow",
+  "template_type": "data-flow",
+  "style": 1,
+  "motion_scene": "memory-weave",
+  "quality_profile": "showcase",
+  "text_policy": "strict",
+  "width": 1200,
+  "height": 790,
+  "title": "One Run, Two Passes",
+  "subtitle": "read every keeper once, then decide the whole corpus in memory",
+  "containers": [
+    {
+      "id": "read-pass",
+      "x": 40,
+      "y": 100,
+      "width": 1120,
+      "height": 310,
+      "label": "PASS 1 \u00b7 READ CONCURRENTLY",
+      "subtitle": "per Document \u00b7 the only memoised work",
+      "header_height": 30
+    },
+    {
+      "id": "decide-pass",
+      "x": 40,
+      "y": 430,
+      "width": 1120,
+      "height": 260,
+      "label": "PASS 2 \u00b7 DECIDE ONCE",
+      "subtitle": "whole corpus in memory \u00b7 target state declared",
+      "header_height": 30
+    }
+  ],
+  "nodes": [
+    {
+      "id": "corpus",
+      "kind": "cylinder",
+      "x": 70,
+      "y": 200,
+      "width": 180,
+      "height": 80,
+      "label": "Corpus",
+      "sublabel": "manifest + PDFs by digest",
+      "fill": "#f0fdf4",
+      "stroke": "#16a34a",
+      "flat": true
+    },
+    {
+      "id": "route",
+      "kind": "double_rect",
+      "x": 370,
+      "y": 200,
+      "width": 170,
+      "height": 80,
+      "label": "Route keeper",
+      "sublabel": "probe the text layer",
+      "fill": "#eff6ff",
+      "stroke": "#2563eb",
+      "flat": true
+    },
+    {
+      "id": "native",
+      "kind": "rect",
+      "x": 630,
+      "y": 200,
+      "width": 160,
+      "height": 80,
+      "label": "Native text",
+      "sublabel": "PyMuPDF layer",
+      "fill": "#ffffff",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "ocr",
+      "kind": "rect",
+      "x": 630,
+      "y": 320,
+      "width": 160,
+      "height": 70,
+      "label": "OCR engine",
+      "sublabel": "Docling \u00b7 VLM \u00b7 MinerU",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "extracted",
+      "kind": "rect",
+      "x": 850,
+      "y": 200,
+      "width": 220,
+      "height": 80,
+      "label": "Extracted pages",
+      "sublabel": "memo: digest + engine",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "clean",
+      "kind": "rect",
+      "x": 60,
+      "y": 520,
+      "width": 120,
+      "height": 100,
+      "label": "Clean",
+      "sublabel": "native / OCR",
+      "fill": "#ffffff",
+      "stroke": "#cbd5e1",
+      "flat": true
+    },
+    {
+      "id": "language",
+      "kind": "rect",
+      "x": 260,
+      "y": 520,
+      "width": 120,
+      "height": 100,
+      "label": "Language",
+      "sublabel": "page \u2192 Document",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "judge",
+      "kind": "rect",
+      "x": 460,
+      "y": 520,
+      "width": 120,
+      "height": 100,
+      "label": "Judge",
+      "sublabel": "pages \u00b7 chars",
+      "fill": "#eff6ff",
+      "stroke": "#2563eb",
+      "flat": true
+    },
+    {
+      "id": "dedup",
+      "kind": "double_rect",
+      "x": 660,
+      "y": 520,
+      "width": 120,
+      "height": 100,
+      "label": "Dedup",
+      "sublabel": "exact + near",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "outputs",
+      "kind": "rect",
+      "x": 860,
+      "y": 520,
+      "width": 240,
+      "height": 100,
+      "label": "Declared fates",
+      "sublabel": "docs + records OR exclusion",
+      "fill": "#ecfdf5",
+      "stroke": "#10b981",
+      "flat": true
+    }
+  ],
+  "arrows": [
+    {
+      "id": "bytes",
+      "source": "corpus",
+      "target": "route",
+      "source_port": "right",
+      "target_port": "left",
+      "flow": "read",
+      "motion_role": "ingress",
+      "motion_stage": 1,
+      "motion_order": 0,
+      "label": "PDF bytes"
+    },
+    {
+      "id": "healthy",
+      "source": "route",
+      "target": "native",
+      "source_port": "right",
+      "target_port": "left",
+      "flow": "data",
+      "motion_role": "reason",
+      "motion_stage": 2,
+      "motion_order": 0,
+      "label": "healthy"
+    },
+    {
+      "id": "needs-ocr",
+      "source": "route",
+      "target": "ocr",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "data",
+      "motion_role": "reason",
+      "motion_stage": 2,
+      "motion_order": 1,
+      "label": "OCR"
+    },
+    {
+      "id": "native-pages",
+      "source": "native",
+      "target": "extracted",
+      "source_port": "right",
+      "target_port": "top-left",
+      "flow": "write",
+      "motion_role": "extract",
+      "motion_stage": 3,
+      "motion_order": 0,
+      "route_points": [
+        [
+          820,
+          240
+        ],
+        [
+          820,
+          200
+        ]
+      ]
+    },
+    {
+      "id": "ocr-pages",
+      "source": "ocr",
+      "target": "extracted",
+      "source_port": "right",
+      "target_port": "bottom-left",
+      "flow": "write",
+      "motion_role": "extract",
+      "motion_stage": 3,
+      "motion_order": 1,
+      "route_points": [
+        [
+          820,
+          355
+        ],
+        [
+          820,
+          280
+        ]
+      ]
+    },
+    {
+      "id": "handoff",
+      "source": "extracted",
+      "target": "clean",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "control",
+      "motion_role": "transform",
+      "motion_stage": 4,
+      "motion_order": 0,
+      "label": "every text, in memory"
+    },
+    {
+      "id": "cleaned",
+      "source": "clean",
+      "target": "language",
+      "source_port": "right",
+      "target_port": "left",
+      "flow": "data",
+      "motion_role": "transform",
+      "motion_stage": 5,
+      "motion_order": 0,
+      "label": "pages"
+    },
+    {
+      "id": "tagged",
+      "source": "language",
+      "target": "judge",
+      "source_port": "right",
+      "target_port": "left",
+      "flow": "data",
+      "motion_role": "transform",
+      "motion_stage": 6,
+      "motion_order": 0,
+      "label": "tagged"
+    },
+    {
+      "id": "accepted",
+      "source": "judge",
+      "target": "dedup",
+      "source_port": "right",
+      "target_port": "left",
+      "flow": "control",
+      "motion_role": "resolve",
+      "motion_stage": 7,
+      "motion_order": 0,
+      "label": "accepted"
+    },
+    {
+      "id": "declare",
+      "source": "dedup",
+      "target": "outputs",
+      "source_port": "right",
+      "target_port": "left",
+      "flow": "write",
+      "motion_role": "memory-write",
+      "motion_stage": 8,
+      "motion_order": 0,
+      "label": "keepers"
+    }
+  ],
+  "legend_orientation": "horizontal",
+  "legend_x": 48,
+  "legend_y": 720,
+  "legend_locked": false,
+  "legend": [
+    {
+      "flow": "read",
+      "label": "read"
+    },
+    {
+      "flow": "control",
+      "label": "control"
+    },
+    {
+      "flow": "data",
+      "label": "transform"
+    },
+    {
+      "flow": "write",
+      "label": "declare"
+    }
+  ],
+  "footer": "Style 1 \u00b7 Flat Icon \u00b7 flow: src/finepdfs/infrastructure/cocoindex/flow.py",
+  "footer_x": 48,
+  "footer_y": 765
+}
