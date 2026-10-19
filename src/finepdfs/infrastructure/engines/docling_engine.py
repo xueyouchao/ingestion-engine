@@ -12,12 +12,13 @@ import json
 import re
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText
+from finepdfs.infrastructure.engines.concurrency import DEFAULT_ENGINE_CONCURRENCY, EngineCalls
 from finepdfs.infrastructure.engines.subprocess_support import CommandRunner, SubprocessRunner, require_success
 
 VERSION_PATTERN = re.compile(r"\d+\.\d+(?:\.\d+)?(?:[-+.\w]*)?")
@@ -42,7 +43,17 @@ class DoclingEngine:
 
     command: str = "docling"
     work_dir: Path | None = None
+    # How many engine calls the run may keep in flight (ADR-0010 step 3). An InitVar, not a field: the
+    # number is not kept here, it lives in the one EngineCalls every command takes its permit from, so no
+    # second copy of it can disagree with the bound the command actually waits on.
+    concurrency: InitVar[int] = DEFAULT_ENGINE_CONCURRENCY
     runner: CommandRunner = field(default_factory=SubprocessRunner)
+    # The run's one bound, held around the command and nothing else: the temp directory, the JSON read
+    # back and the parse all stay outside it, so a Document that waits for a permit holds nothing else.
+    calls: EngineCalls = field(init=False, compare=False, repr=False)
+
+    def __post_init__(self, concurrency: int) -> None:
+        object.__setattr__(self, "calls", EngineCalls(concurrency))
 
     @property
     def identity(self) -> EngineIdentity:
@@ -53,7 +64,7 @@ class DoclingEngine:
         identity without one, and its answer is cached per command and runner.
         """
         command_name = Path(self.command).name or "docling"
-        version = _tool_version(self.runner, self.command)
+        version = _tool_version(self.runner, self.command, self.calls)
         return EngineIdentity(name="docling", detail=f"cli:{command_name}:v{version}")
 
     def extract(self, document: Document) -> ExtractedDocument:
@@ -63,8 +74,8 @@ class DoclingEngine:
             pdf_path = scratch_dir / "document.pdf"
             pdf_path.write_bytes(document.content)
             output_dir = scratch_dir / "out"
-            require_success(
-                self.runner.run(
+            with self.calls.permit():
+                result = self.runner.run(
                     [
                         self.command,
                         "convert",
@@ -77,7 +88,7 @@ class DoclingEngine:
                         str(pdf_path),
                     ]
                 )
-            )
+            require_success(result)
             json_files = sorted(output_dir.rglob("*.json"))
             if not json_files:
                 raise DoclingError(f"docling wrote no DoclingDocument JSON under {output_dir}")
@@ -90,15 +101,19 @@ class DoclingEngine:
 
 
 @lru_cache(maxsize=32)
-def _tool_version(runner: CommandRunner, command: str) -> str:
+def _tool_version(runner: CommandRunner, command: str, calls: EngineCalls) -> str:
     """The version Docling reports for this command, or a named error when it cannot report one.
 
     A tool version is a property of the installed executable, so the probe runs once per command and
     runner: the runner is part of the key because it is what answers the probe, and a cached answer
-    from another runner would be a version this engine never asked about.
+    from another runner would be a version this engine never asked about. The probe is a local command
+    like any other, so it takes the run's bound while it runs: after ADR-0010's ``def`` body every
+    Document is read on a thread of its own, and several first Documents probing at once would be
+    exactly the unbounded commands the knob exists to prevent.
     """
     try:
-        result = runner.run([command, "--version"])
+        with calls.permit():
+            result = runner.run([command, "--version"])
     except Exception as error:  # a missing tool or a runner failure is this probe's own failure
         raise DoclingVersionError(f"docling version probe failed for {command!r}: {error}") from error
     if result.returncode != 0:

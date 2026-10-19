@@ -39,9 +39,10 @@ class EngineConfig:
     model: str = ""
     api_key: str = ""
     page_dpi: int = 200
-    # How many engine calls this run may keep in flight at once (ADR-0010 step 3): one page request for
-    # a served engine, one command for a local one. It sizes the bound on the one Engine instance the run
-    # shares across Documents, so it says something about the worker, never about render capacity.
+    # How many engine calls this run may keep in flight at once (ADR-0010 step 3): one remote page
+    # request, or one local command, for every engine that makes one. It sizes the bound on the one
+    # Engine instance the run shares across Documents, so it says something about the worker, never
+    # about render capacity.
     concurrency: int = DEFAULT_ENGINE_CONCURRENCY
     timeout_seconds: float = 300.0
     work_dir: Path | None = None
@@ -90,6 +91,7 @@ def _build_engine(config: EngineConfig) -> OcrEngine:
         return DoclingEngine(
             command=config.command or "docling",
             work_dir=config.work_dir,
+            concurrency=config.concurrency,
             runner=SubprocessRunner(config.timeout_seconds),
         )
     if config.name == PADDLEOCR_VL_ENGINE:
@@ -119,12 +121,16 @@ def _build_engine(config: EngineConfig) -> OcrEngine:
 
         if config.base_url:
             backend = MineruHttpBackend(
-                base_url=config.base_url, api_key=config.api_key, timeout_seconds=config.timeout_seconds
+                base_url=config.base_url,
+                api_key=config.api_key,
+                timeout_seconds=config.timeout_seconds,
+                concurrency=config.concurrency,
             )
         else:
             backend = MineruSubprocessBackend(
                 command=config.command or "mineru",
                 work_dir=config.work_dir,
+                concurrency=config.concurrency,
                 runner=SubprocessRunner(config.timeout_seconds),
             )
         return MineruEngine(backend=backend)

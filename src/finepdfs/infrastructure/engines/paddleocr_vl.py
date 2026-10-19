@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import Future
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText
@@ -51,9 +51,10 @@ class PaddleOcrVlEngine:
     ) -> None:
         self._transport = transport
         self._dpi = dpi
-        self.concurrency = concurrency
         # The run's one bound, not this read's: the Engine instance is shared by every Document the run
-        # reads, so the pool it may fill lives on the instance and outlives any one Document.
+        # reads, so the pool it may fill lives on the instance and outlives any one Document. The number
+        # lives here and nowhere else (``EngineCalls.limit``), so the window below and the pool cannot
+        # be sized by two copies of it that disagree.
         self.calls = EngineCalls(concurrency)
         self._identity = EngineIdentity(
             name="paddleocr-vl", detail=paddleocr_detail(detail or transport.endpoint.describe(), dpi)
@@ -85,7 +86,7 @@ class PaddleOcrVlEngine:
 
         with PdfDocument(document.content) as pdf:
             for page_number in range(1, pdf.page_count + 1):
-                while len(in_flight) >= self.concurrency:  # bound the images held for in-flight requests
+                while len(in_flight) >= self.calls.limit:  # bound the images held for in-flight requests
                     collect(in_flight.popleft())
                 image = pdf.render_page_png(page_number, dpi=self._dpi)
                 in_flight.append(
@@ -107,14 +108,17 @@ class PaddleOcrVlCliEngine:
     command: str = "paddleocr"
     work_dir: Path | None = None
     dpi: int = 200
-    concurrency: int = DEFAULT_ENGINE_CONCURRENCY
+    # How many engine calls the run may keep in flight (ADR-0010 step 3). An InitVar, not a field: the
+    # number is not kept here, it lives in the one EngineCalls the read takes its permit from, so no
+    # second copy of it can disagree with the bound the command actually waits on.
+    concurrency: InitVar[int] = DEFAULT_ENGINE_CONCURRENCY
     runner: CommandRunner = field(default_factory=SubprocessRunner)
     # The run's one bound, held around the command and nothing else: rendering stays outside it, so a
     # Document that waits for a slot is not holding one while it works.
     calls: EngineCalls = field(init=False, compare=False, repr=False)
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "calls", EngineCalls(self.concurrency))
+    def __post_init__(self, concurrency: int) -> None:
+        object.__setattr__(self, "calls", EngineCalls(concurrency))
 
     @property
     def identity(self) -> EngineIdentity:
