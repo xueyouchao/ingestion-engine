@@ -3,9 +3,9 @@
 ADR-0012 lets a session hold the OCR worker warm by setting ``min_containers``, which Modal's autoscaler
 update changes without a redeploy. This command is the operator-facing half:
 
-    python3 deploy/modal/warm.py status   # the URL, model, detail, floor and price of that floor
-    python3 deploy/modal/warm.py on       # hold one container warm, and say what it costs
-    python3 deploy/modal/warm.py off      # return to the resting zero
+    python3 -m deploy.modal.warm status   # the URL, model, detail, floor and price of that floor
+    python3 -m deploy.modal.warm on       # hold one container warm, and say what it costs
+    python3 -m deploy.modal.warm off      # return to the resting zero
 
 ``status`` prints the serving URL already carrying the ``/v1`` base path, so an operator pastes it into a
 ``ChatEndpoint`` unchanged. It prints the pinned Engine Identity detail *without* a page-DPI suffix: the
@@ -38,7 +38,7 @@ from deploy.gpu.contract import (
 )
 
 COMMANDS = ("status", "on", "off")
-USAGE = "usage: warm.py status|on|off"
+USAGE = "usage: python -m deploy.modal.warm status|on|off"
 
 
 class WarmControlError(RuntimeError):
