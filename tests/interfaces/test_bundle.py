@@ -248,3 +248,150 @@ def test_bundling_writes_nothing_into_a_state(tmp_path) -> None:
     build_bundle(tmp_path / "bundle", [read_state("pymupdf", out)], tmp_path / "corpus")
 
     assert _snapshot(out) == before
+
+
+def _data(bundle: Path) -> dict:
+    page = (bundle / "index.html").read_text(encoding="utf-8")
+    start = page.index("const DATA = ") + len("const DATA = ")
+    return json.loads(page[start:page.index(";\n", start)])
+
+
+def test_a_refused_rebuild_leaves_the_served_bundle_alone(tmp_path) -> None:
+    """The served directory is live: an over-budget rebuild must not publish half of itself."""
+    out = _write_run(tmp_path, "out", pages=(1, 2), engine="pymupdf@1.28.2")
+    runs = [read_state("pymupdf", out)]
+    bundle = tmp_path / "bundle"
+    build_bundle(bundle, runs, tmp_path / "corpus")
+    before = _snapshot(bundle)
+
+    with pytest.raises(BundleError, match="ceiling"):
+        build_bundle(bundle, runs, tmp_path / "corpus", max_bytes=1024)
+
+    assert _snapshot(bundle) == before
+
+
+def test_the_fingerprint_covers_records_pages_and_exclusions(tmp_path) -> None:
+    out = _write_run(
+        tmp_path, "out", pages=(1,), engine="pymupdf@1.28.2",
+        excluded=({"url": "https://a.example/other.pdf", "kind": "dropped", "reason": "0 pages"},),
+    )
+    bundle = tmp_path / "bundle"
+    build_bundle(bundle, [read_state("pymupdf", out)], tmp_path / "corpus")
+    assert check_bundle(bundle, [read_state("pymupdf", out)]) == []
+
+    excluded_file = next((out / "excluded").glob("*.json"))
+    excluded_file.write_text(
+        json.dumps({"url": "https://a.example/other.pdf", "kind": "dropped", "reason": "a different reason"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert check_bundle(bundle, [read_state("pymupdf", out)]) == ["pymupdf"]
+
+
+def test_two_states_cannot_share_a_label(tmp_path) -> None:
+    out = _write_run(tmp_path, "out", pages=(1,), engine="pymupdf@1.28.2")
+
+    with pytest.raises(BundleError, match="share the label"):
+        build_bundle(tmp_path / "bundle", [read_state("cpu", out), read_state("cpu", out)], tmp_path / "corpus")
+
+
+def test_a_state_that_published_nothing_sits_beside_one_that_did(tmp_path) -> None:
+    published = _write_run(tmp_path, "gpu", pages=(1, 2), engine="paddleocr-vl@x")
+    empty = _write_run(
+        tmp_path, "cpu", pages=(), engine="pymupdf@1.28.2",
+        excluded=({"url": URL, "kind": "dropped", "reason": "0 pages is fewer than the 1 page minimum"},),
+    )
+    runs = [read_state("gpu", published), read_state("cpu", empty)]
+
+    contract = build_bundle(tmp_path / "bundle", runs, tmp_path / "corpus")
+
+    assert contract["pages"] == 2
+    assert [state["pages"] for state in contract["states"]] == [2, 0]
+    assert [state["exclusions"] for state in contract["states"]] == [0, 1]
+
+    with pytest.raises(BundleError, match="no supplied state publishes a page"):
+        build_bundle(tmp_path / "nothing", [read_state("cpu", empty)], tmp_path / "corpus")
+
+
+def test_a_rebuild_removes_the_renders_it_no_longer_references(tmp_path) -> None:
+    out = _write_run(tmp_path, "out", pages=(1, 2, 3), engine="pymupdf@1.28.2")
+    bundle = tmp_path / "bundle"
+    build_bundle(bundle, [read_state("pymupdf", out)], tmp_path / "corpus")
+    assert len(list((bundle / "images").glob("*.jpg"))) == 3
+
+    out = _write_run(tmp_path, "out", pages=(1,), engine="pymupdf@1.28.2")
+    build_bundle(bundle, [read_state("pymupdf", out)], tmp_path / "corpus")
+
+    assert len(list((bundle / "images").glob("*.jpg"))) == 1
+
+
+def test_a_render_name_carries_its_own_bytes(tmp_path) -> None:
+    """The page is cached immutable, so another dpi has to be another URL."""
+    out = _write_run(tmp_path, "out", pages=(1,), engine="pymupdf@1.28.2")
+    runs = [read_state("pymupdf", out)]
+
+    first = build_bundle(tmp_path / "bundle", runs, tmp_path / "corpus")["images"][0]["path"]
+    second = build_bundle(tmp_path / "bundle", runs, tmp_path / "corpus", dpi=144)["images"][0]["path"]
+
+    assert first != second
+    assert len(list((tmp_path / "bundle" / "images").glob("*.jpg"))) == 1
+
+
+def test_states_reading_different_pdfs_for_one_url_are_refused(tmp_path) -> None:
+    gpu = _write_run(tmp_path, "gpu", pages=(1,), engine="paddleocr-vl@x")
+    cpu = _write_run(tmp_path, "cpu", pages=(1,), engine="pymupdf@1.28.2")
+    digest = _corpus_digest(tmp_path)
+    other = hashlib.sha256(_body() + b"\n% a different fetch of the same URL\n").hexdigest()
+    (tmp_path / "corpus" / "pdfs" / f"{other}.pdf").write_bytes(
+        _body() + b"\n% a different fetch of the same URL\n"
+    )
+    for path in sorted(cpu.rglob("*")):
+        if path.is_file():
+            path.write_text(path.read_text(encoding="utf-8").replace(digest, other), encoding="utf-8")
+
+    with pytest.raises(BundleError, match="different PDFs for the same source URL"):
+        build_bundle(
+            tmp_path / "bundle", [read_state("gpu", gpu), read_state("cpu", cpu)], tmp_path / "corpus"
+        )
+
+
+def test_chunk_offsets_are_what_javascript_counts(tmp_path) -> None:
+    """Declared offsets count Python characters; `String.prototype.slice` counts UTF-16 units."""
+    out = _write_run(tmp_path, "out", pages=(1,), engine="pymupdf@1.28.2")
+    text = "\U0001d518nicode ordering. Second sentence."
+    start = text.index("Second")
+    (out / "pages" / f"{KEY}.jsonl").write_text(
+        json.dumps({"doc_id": KEY, "source_url": URL, "digest": _corpus_digest(tmp_path), "page_number": 1,
+                    "text": text, "engine": "pymupdf@1.28.2"}) + "\n",
+        encoding="utf-8",
+    )
+    chunks = json.loads((out / "chunks" / f"{KEY}.jsonl").read_text(encoding="utf-8").strip())
+    chunks["start_offset"], chunks["end_offset"] = start, len(text)
+    (out / "chunks" / f"{KEY}.jsonl").write_text(json.dumps(chunks) + "\n", encoding="utf-8")
+
+    bundle = tmp_path / "bundle"
+    build_bundle(bundle, [read_state("pymupdf", out)], tmp_path / "corpus")
+
+    reading = _data(bundle)["pages"][f"{KEY}:1"]["readings"]["pymupdf"]
+    units = reading["text"].encode("utf-16-le")
+    chunk = reading["chunks"][0]
+    # The astral character before the chunk is two UTF-16 units, so a JavaScript slice from these
+    # offsets still lands on "Second"; the declared Python offsets would have been one short.
+    assert chunk["start"] == start + 1
+    assert chunk["end"] == len(units) // 2
+    assert units[chunk["start"] * 2:chunk["end"] * 2].decode("utf-16-le") == "Second sentence."
+
+
+def test_a_rebuild_retires_renders_named_before_names_carried_a_hash(tmp_path) -> None:
+    """The name changed once already; the older shape is still this exporter's to delete."""
+    out = _write_run(tmp_path, "out", pages=(1, 2), engine="pymupdf@1.28.2")
+    bundle = tmp_path / "bundle"
+    build_bundle(bundle, [read_state("pymupdf", out)], tmp_path / "corpus")
+    legacy = bundle / "images" / f"{_corpus_digest(tmp_path)}-p9.jpg"
+    legacy.write_bytes(b"a render from the previous naming")
+
+    build_bundle(bundle, [read_state("pymupdf", out)], tmp_path / "corpus")
+
+    assert not legacy.exists()
+    assert len(list((bundle / "images").glob("*.jpg"))) == 2

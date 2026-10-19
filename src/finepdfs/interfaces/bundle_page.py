@@ -273,6 +273,7 @@ function drawBoxes(page) {
   if (!wanted.length || !page.words) return;
   const figure = $(".figure");
   const image = figure.querySelector("img");
+  if (!image || !image.clientWidth || !image.clientHeight) return;
   const sx = image.clientWidth / page.w, sy = image.clientHeight / page.h;
   for (const [x0, y0, x1, y1, word] of page.words) {
     const lower = word.toLowerCase();
@@ -311,7 +312,10 @@ function renderNav() {
       button.innerHTML = "<span>" + esc(nameOf(docOf(hit.key))) + "</span><small>page " + pageNo(hit.key)
         + " · " + snippet(hit.text, terms(state.corpus)) + "</small>";
       if (hit.key === state.page) button.setAttribute("aria-current", "true");
-      button.addEventListener("click", () => { openPage(hit.key); });
+      button.addEventListener("click", () => {
+        if (state.corpus) { state.find = state.corpus; $("#find").value = state.corpus; }
+        openPage(hit.key);
+      });
       nav.appendChild(button);
     });
     return;
@@ -389,7 +393,11 @@ function renderReader() {
     : "<strong>No text boxes on this page.</strong> The engine returns text alone, so a match can be marked "
       + "in the text but never placed on the page.";
   const figureImg = $(".stage img");
-  if (figureImg) figureImg.addEventListener("error", () => { figureImg.parentNode.innerHTML = imageMissing(view); });
+  if (figureImg) {
+    figureImg.addEventListener("error", () => { figureImg.parentNode.innerHTML = imageMissing(view); });
+    if (figureImg.complete && figureImg.naturalWidth) drawBoxes(view);
+    else figureImg.addEventListener("load", () => drawBoxes(view));
+  }
   $(".text").innerHTML = textPane(view);
   $("#count").textContent = counter(view);
   $("#engine-short").textContent = state.label;
@@ -404,7 +412,6 @@ function renderReader() {
     ? "this document was routed to the " + laneName(view.routing) + " lane: " + view.engine
     : "this document is not in the " + state.label + " reading";
   renderLaneNote();
-  drawBoxes(view);
 }
 
 function render() {

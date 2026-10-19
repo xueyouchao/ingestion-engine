@@ -4,16 +4,21 @@ The bundle is a **derived artifact**, never declared state. It reads `run-summar
 `pages/`, `chunks/` and the pinned corpus, and writes one directory a browser can open straight from
 `file://`:
 
-    index.html                    the page and the manifest (no fetch: everything but images is inlined)
-    images/<digest>-p<page>.jpg   page renders, shared by every state -- an image is a render of the PDF,
-                                  not of the engine -- loaded per page, so first paint is one page
-    bundle.json                   the machine-readable contract: schema version, states, fingerprints
+    index.html                            the page and the manifest (everything but images is inlined)
+    images/<digest>-p<page>-<hash>.jpg    page renders, shared by every state -- an image is a render of
+                                          the PDF, not of the engine -- loaded per page, so first paint is
+                                          one page. The hash is of the render's own bytes, so rebuilding
+                                          with another dpi or quality produces new URLs instead of
+                                          repainting a URL the host told browsers to keep for a year.
+    bundle.json                           the machine-readable contract: schema version, states, fingerprint
 
 The images stay separate on purpose: inlining them makes one 28 MiB file, which a browser preview pane
 or a mail attachment will not take. `--inline` does it anyway for a single-file copy.
 
 It never curates, deduplicates, routes or publishes, it never writes into a state directory, and it does
-not carry a timing sidecar: the page shows declared facts only.
+not carry a timing sidecar: the page shows declared facts only. It also writes nothing into the served
+directory until every render succeeded and the budget check passed, so a refused rebuild leaves the
+previous bundle serving.
 
     PYTHONPATH=src python -m finepdfs.interfaces.cli bundle --out bundle \
         --state gpu=.demo-gpu/out --state pymupdf=.demo/out --corpus .demo-gpu/corpus
@@ -24,6 +29,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
+import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,6 +48,12 @@ IMAGES = "images"
 INDEX_NAME = "index.html"
 CONTRACT_NAME = "bundle.json"
 SUMMARY_NAME = "run-summary.json"
+# Every declared directory whose files the page copies a fact from, so the fingerprint covers them.
+DECLARED_DIRECTORIES = ("records", "pages", "chunks", "excluded")
+# What this exporter names its renders: only files matching it are ever deleted by a rebuild.
+# Both shapes this exporter has written: `<digest>-p<n>-<hash>.jpg`, and the older `<digest>-p<n>.jpg`
+# that a rebuild has to be able to retire.
+_IMAGE_NAME = re.compile(r"^[0-9a-f]{64}-p\d+(-[0-9a-f]{12})?\.jpg$")
 
 
 class BundleError(RuntimeError):
@@ -81,7 +94,12 @@ def _read_jsonl(directory: Path) -> tuple[dict[str, Any], ...]:
 
 
 def read_state(label: str, out: Path | str) -> StateRun:
-    """Read one completed run. A state without a summary is refused, never guessed at."""
+    """Read one completed run. A state without a summary or records is refused, never guessed at.
+
+    A state that published **no page** is not refused here: one engine can exclude every document, and
+    reading it beside the engine that published is exactly what the comparison is for. `build_bundle`
+    refuses when no supplied state publishes anything.
+    """
     root = Path(out)
     summary_path = root / SUMMARY_NAME
     if not summary_path.is_file():
@@ -97,20 +115,27 @@ def read_state(label: str, out: Path | str) -> StateRun:
     excluded = tuple(
         _read_json(path) for path in sorted((root / "excluded").glob("*.json"))
     )
-    if not records or not pages:
-        raise BundleError(f"{root} declares no records or no pages; there is nothing to bundle")
+    if not records:
+        raise BundleError(f"{root} declares no records; there is nothing to bundle")
     return StateRun(
         label=label, out=root, summary=summary, records=records, pages=pages, chunks=chunks, excluded=excluded
     )
 
 
 def declared_fingerprint(run: StateRun) -> str:
-    """What the bundle mirrors: the declared summary and the sorted chunk files, like the index does."""
+    """Every declared file the bundle copies: summary, records, pages, chunks and exclusions.
+
+    The page shows each of them -- a record's routing reason, a page's text, an exclusion's verbatim
+    reason -- so a fingerprint over only the summary and the chunks would call a rewritten exclusion
+    reason, or another page text, fresh evidence.
+    """
     digest = hashlib.sha256()
+    digest.update(SUMMARY_NAME.encode("utf-8"))
     digest.update((run.out / SUMMARY_NAME).read_bytes())
-    for path in sorted((run.out / "chunks").glob("*.jsonl")):
-        digest.update(path.name.encode("utf-8"))
-        digest.update(path.read_bytes())
+    for directory in DECLARED_DIRECTORIES:
+        for path in sorted((run.out / directory).glob("*.*")):
+            digest.update(f"{directory}/{path.name}".encode())
+            digest.update(path.read_bytes())
     return digest.hexdigest()
 
 
@@ -147,14 +172,11 @@ def _words(page: pymupdf.Page, dpi: int) -> list[list[Any]] | None:
     return boxes or None
 
 
-def _render(
-    out: Path, corpus: Path, digest: str, page_number: int, dpi: int, quality: int, *, inline: bool
-) -> dict[str, Any]:
-    """Render one page once.
+def _render_page(corpus: Path, digest: str, page_number: int, dpi: int, quality: int) -> dict[str, Any]:
+    """Render one page once, in memory.
 
-    Separate files are the default: a page plus an `images/` directory travels together, loads one page
-    at a time, and stays small enough to preview. `inline` bakes each render into the page as a data URI
-    for a single-file copy -- at the cost of one large file.
+    In memory on purpose: the served directory is only touched after every render succeeded and the
+    budget check passed, so a refused or failed rebuild leaves the previous bundle serving visitors.
     """
     source = corpus / "pdfs" / f"{digest}.pdf"
     if not source.is_file():
@@ -167,14 +189,57 @@ def _render(
         jpeg = pixmap.tobytes("jpeg", jpg_quality=quality)
         boxes = _words(page, dpi)
         width, height = pixmap.width, pixmap.height
-    if inline:
-        image = "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
-    else:
-        image = f"{IMAGES}/{digest}-p{page_number}.jpg"
-        target = out / image
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(jpeg)
-    return {"image": image, "w": width, "h": height, "words": boxes, "bytes": len(jpeg)}
+    return {"jpeg": jpeg, "w": width, "h": height, "words": boxes}
+
+
+def _image_name(digest: str, page_number: int, jpeg: bytes) -> str:
+    """A render's file name carries the hash of its own bytes.
+
+    The page is served with immutable caching, so a name that outlived its bytes would pin a returning
+    visitor to the old picture for a year after a `--dpi` change.
+    """
+    return f"{digest}-p{page_number}-{hashlib.sha256(jpeg).hexdigest()[:12]}.jpg"
+
+
+def _utf16_offset(text: str, index: int) -> int:
+    """The same offset counted in UTF-16 code units, which is what a JavaScript string index counts."""
+    return len(text[:index].encode("utf-16-le")) // 2
+
+
+def _prune_images(directory: Path, keep: set[str]) -> None:
+    """Delete renders this build no longer references -- and only files this exporter names."""
+    for path in directory.iterdir():
+        if path.is_file() and path.name not in keep and _IMAGE_NAME.match(path.name):
+            path.unlink()
+
+
+def _refuse_what_cannot_be_honest(runs: list[StateRun]) -> None:
+    """Labels identify readings, and a page image must belong to the PDF its reading came from."""
+    labels = [run.label for run in runs]
+    duplicates = sorted({label for label in labels if labels.count(label) > 1})
+    if duplicates:
+        raise BundleError(
+            f"two states share the label {', '.join(duplicates)}; readings are keyed by label, so their "
+            "pages, chunks and exclusions would silently merge -- give each state its own label"
+        )
+    if not any(run.pages for run in runs):
+        raise BundleError("no supplied state publishes a page; there is nothing to show")
+
+
+def _refuse_conflicting_digests(seen: dict[str, dict[str, set[str]]]) -> None:
+    conflicts = {doc: digests for doc, digests in seen.items() if len(digests) > 1}
+    if not conflicts:
+        return
+    detail = "; ".join(
+        f"{doc}: " + ", ".join(
+            f"{digest[:12]}… read by {' and '.join(sorted(labels))}" for digest, labels in sorted(digests.items())
+        )
+        for doc, digests in sorted(conflicts.items())
+    )
+    raise BundleError(
+        "these states read different PDFs for the same source URL, so one page image cannot be honest for "
+        f"both ({detail}); bundle one state at a time"
+    )
 
 
 def build_bundle(
@@ -190,8 +255,8 @@ def build_bundle(
     """Write the bundle and return its contract. Refuses rather than shrinks when over budget."""
     if not runs:
         raise BundleError("the bundle needs at least one state")
+    _refuse_what_cannot_be_honest(runs)
     target = Path(out)
-    target.mkdir(parents=True, exist_ok=True)
     corpus_root = Path(corpus)
     manifest: dict[str, Any] = {
         "schema_version": BUNDLE_VERSION,
@@ -212,6 +277,8 @@ def build_bundle(
 
     readings: dict[tuple[str, int], dict[str, Any]] = {}
     pages_by_document: dict[str, set[int]] = {}
+    page_digests: dict[tuple[str, int], str] = {}
+    digests_by_document: dict[str, dict[str, set[str]]] = {}
     for run in runs:
         for page in run.pages:
             doc_id = page["doc_id"]
@@ -219,6 +286,8 @@ def build_bundle(
             document = manifest["documents"].setdefault(
                 doc_id, {"url": page["source_url"], "digest": digest, "reads": {}}
             )
+            digests_by_document.setdefault(doc_id, {}).setdefault(digest, set()).add(run.label)
+            page_digests[(doc_id, page["page_number"])] = digest
             record = run.records.get(digest, {})
             document["reads"][run.label] = {
                 "engine": page.get("engine", ""),
@@ -231,37 +300,46 @@ def build_bundle(
             entry = readings.setdefault((doc_id, page["page_number"]), {"readings": {}})
             entry["readings"][run.label] = {"text": page["text"], "chunks": []}
 
+    _refuse_conflicting_digests(digests_by_document)
+
     for run in runs:
         for chunk in run.chunks:
             key = (chunk["doc_id"], chunk["page_number"])
             reading = readings.get(key, {}).get("readings", {}).get(run.label)
-            if reading is not None:
-                reading["chunks"].append({
-                    "id": chunk["chunk_id"],
-                    "start": chunk["start_offset"],
-                    "end": chunk["end_offset"],
-                    "ordinal": chunk["ordinal"],
-                })
-
-    needed = sorted({(page["digest"], page["page_number"]) for run in runs for page in run.pages})
-    if inline and (target / IMAGES).is_dir():
-        for stale in (target / IMAGES).iterdir():
-            stale.unlink()
-        (target / IMAGES).rmdir()
+            if reading is None:
+                continue
+            # The declared offsets count Python characters; the page slices JavaScript strings, so they
+            # are converted here, once, rather than every reader having to remember.
+            reading["chunks"].append({
+                "id": chunk["chunk_id"],
+                "start": _utf16_offset(reading["text"], chunk["start_offset"]),
+                "end": _utf16_offset(reading["text"], chunk["end_offset"]),
+                "ordinal": chunk["ordinal"],
+            })
 
     rendered: dict[tuple[str, int], dict[str, Any]] = {}
-    for digest, page_number in needed:
-        rendered[(digest, page_number)] = _render(
-            target, corpus_root, digest, page_number, dpi, quality, inline=inline
+    for key in sorted(readings):
+        digest = page_digests[key]
+        rendered[key] = _render_page(corpus_root, digest, key[1], dpi, quality)
+
+    for key, item in rendered.items():
+        item["image"] = (
+            "data:image/jpeg;base64," + base64.b64encode(item["jpeg"]).decode("ascii")
+            if inline
+            else f"{IMAGES}/{_image_name(page_digests[key], key[1], item['jpeg'])}"
         )
+        item["bytes"] = len(item["jpeg"])
 
     for (doc_id, page_number), entry in sorted(readings.items()):
         for reading in entry["readings"].values():
             reading["chunks"].sort(key=lambda chunk: chunk["start"])
+        item = rendered[(doc_id, page_number)]
         manifest["pages"][_page_key(doc_id, page_number)] = {
             "readings": entry["readings"],
-            **{k: v for k, v in rendered[(manifest["documents"][doc_id]["digest"], page_number)].items()
-               if k != "bytes"},
+            "image": item["image"],
+            "w": item["w"],
+            "h": item["h"],
+            "words": item["words"],
         }
 
     for doc_id, numbers in pages_by_document.items():
@@ -269,7 +347,6 @@ def build_bundle(
 
     payload = json.dumps(manifest, separators=(",", ":"), ensure_ascii=False).replace("</", "<\\/")
     html = BUNDLE_HTML.replace("__DATA__", payload)
-    (target / INDEX_NAME).write_text(html, encoding="utf-8")
 
     image_bytes = sum(item["bytes"] for item in rendered.values())
     # Inline images live inside the html already, so the page's own bytes are the whole weight.
@@ -301,6 +378,20 @@ def build_bundle(
             f"the bundle weighs {total / 1024 / 1024:.1f} MiB, over the {max_bytes / 1024 / 1024:.0f} MiB "
             "ceiling; lower --dpi or --max-bytes rather than shipping a silent shrink"
         )
+
+    # Nothing above this line wrote to the served directory: a refused rebuild leaves the old bundle up.
+    target.mkdir(parents=True, exist_ok=True)
+    images = target / IMAGES
+    if inline:
+        if images.is_dir():
+            shutil.rmtree(images)
+    else:
+        images.mkdir(exist_ok=True)
+        for item in rendered.values():
+            (target / item["image"]).write_bytes(item["jpeg"])
+    (target / INDEX_NAME).write_text(html, encoding="utf-8")
+    if not inline:
+        _prune_images(images, {Path(item["image"]).name for item in rendered.values()})
     (target / CONTRACT_NAME).write_text(json.dumps(contract, indent=2) + "\n", encoding="utf-8")
     return contract
 
