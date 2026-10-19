@@ -85,6 +85,30 @@ are reachable, and document keys and PDF digests are validated before any file i
 cannot name an arbitrary path. The default page is static HTML/CSS/JS served by Python's standard
 library; no extra dependency is needed.
 
+## The static bundle (the demo link)
+
+`finepdfs bundle` turns completed runs into a directory a static host can serve: the page image beside
+the engine's reading, the page strip, the corpus search, and both readings' account of the same page. It
+reads declared outputs and the corpus PDFs; it never writes into a state.
+
+~~~~bash
+.venv/bin/finepdfs bundle --out dist/bundle \
+  --state paddleocr-vl=.demo-gpu/out --state pymupdf=.demo/out \
+  --corpus .demo-gpu/corpus --link https://example.org/
+~~~~
+
+- Writes `index.html`, `bundle.json` and `images/` -- one render per PDF digest and page number, shared
+  by every reading, because a render is of the PDF and not of the engine. The pinned corpus is 313
+  renders / 18.19 MiB of JPEG at 72 dpi beside a 3.84 MiB page.
+- `--inline` bakes those renders into the page instead, producing one self-contained file (~28 MiB here).
+- `--check` reports whether the bundle still mirrors what the flow declared, per state, from a sha256
+  over every declared file the page copies a fact from: the run summary, records, pages, chunks and
+  exclusions. A bundle from another schema version is refused rather than called fresh.
+- `--link` names where the bundle is served; the page offers it whenever a page image cannot load, which
+  is exactly what a sandboxed preview pane does with a sibling `images/` directory.
+- The bundle is gitignored and rebuilt, never committed: it is a copy of evidence, and `--check` is what
+  keeps the copy honest. ADR-0011 records the decision; `deploy/bundle/` serves it behind Traefik.
+
 ## What one document goes through
 
 1. **Fetch** -- the Common Crawl index API gives a WARC file, a byte offset and a length; one HTTP
