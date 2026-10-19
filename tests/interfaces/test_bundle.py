@@ -314,13 +314,17 @@ def test_a_state_that_published_nothing_sits_beside_one_that_did(tmp_path) -> No
         build_bundle(tmp_path / "nothing", [read_state("cpu", empty)], tmp_path / "corpus")
 
 
-def test_a_rebuild_removes_the_renders_it_no_longer_references(tmp_path) -> None:
+def test_a_rebuild_replaces_the_generation_it_retired_on_the_next_build(tmp_path) -> None:
+    """The generation being replaced survives one build: a tab that has not reloaded still asks for it."""
     out = _write_run(tmp_path, "out", pages=(1, 2, 3), engine="pymupdf@1.28.2")
     bundle = tmp_path / "bundle"
     build_bundle(bundle, [read_state("pymupdf", out)], tmp_path / "corpus")
     assert len(list((bundle / "images").glob("*.jpg"))) == 3
 
     out = _write_run(tmp_path, "out", pages=(1,), engine="pymupdf@1.28.2")
+    build_bundle(bundle, [read_state("pymupdf", out)], tmp_path / "corpus")
+    assert len(list((bundle / "images").glob("*.jpg"))) == 3
+
     build_bundle(bundle, [read_state("pymupdf", out)], tmp_path / "corpus")
 
     assert len(list((bundle / "images").glob("*.jpg"))) == 1
@@ -330,12 +334,41 @@ def test_a_render_name_carries_its_own_bytes(tmp_path) -> None:
     """The page is cached immutable, so another dpi has to be another URL."""
     out = _write_run(tmp_path, "out", pages=(1,), engine="pymupdf@1.28.2")
     runs = [read_state("pymupdf", out)]
+    bundle = tmp_path / "bundle"
 
-    first = build_bundle(tmp_path / "bundle", runs, tmp_path / "corpus")["images"][0]["path"]
-    second = build_bundle(tmp_path / "bundle", runs, tmp_path / "corpus", dpi=144)["images"][0]["path"]
-
+    first = build_bundle(bundle, runs, tmp_path / "corpus")["images"][0]["path"]
+    second = build_bundle(bundle, runs, tmp_path / "corpus", dpi=144)["images"][0]["path"]
     assert first != second
-    assert len(list((tmp_path / "bundle" / "images").glob("*.jpg"))) == 1
+    # both generations: the dpi=72 render is what an open tab would still ask for
+    assert len(list((bundle / "images").glob("*.jpg"))) == 2
+
+    build_bundle(bundle, runs, tmp_path / "corpus", dpi=144)
+
+    assert len(list((bundle / "images").glob("*.jpg"))) == 1
+
+
+def test_one_pdf_reached_by_two_urls_is_rendered_and_counted_once(tmp_path) -> None:
+    """A render belongs to a PDF, not to a document: sharing it must not double the reported weight."""
+    out = _write_run(tmp_path, "out", pages=(1,), engine="pymupdf@1.28.2")
+    other = "https://b.example/wp-content/uploads/2025/03/Resolution-XXVI-6-mirror.pdf"
+    mirror = document_key(other)
+    for name in ("pages", "chunks"):
+        source = (out / name / f"{KEY}.jsonl").read_text(encoding="utf-8")
+        (out / name / f"{mirror}.jsonl").write_text(
+            source.replace(URL, other).replace(KEY, mirror), encoding="utf-8"
+        )
+    record = json.loads((out / "records" / f"{KEY}.json").read_text(encoding="utf-8"))
+    record["url"] = other
+    (out / "records" / f"{mirror}.json").write_text(json.dumps(record), encoding="utf-8")
+
+    bundle = tmp_path / "bundle"
+    contract = build_bundle(bundle, [read_state("pymupdf", out)], tmp_path / "corpus")
+
+    assert contract["documents"] == 2
+    assert contract["pages"] == 2
+    assert len(contract["images"]) == 1
+    assert contract["image_bytes"] == contract["images"][0]["bytes"]
+    assert len(list((bundle / "images").glob("*.jpg"))) == 1
 
 
 def test_states_reading_different_pdfs_for_one_url_are_refused(tmp_path) -> None:

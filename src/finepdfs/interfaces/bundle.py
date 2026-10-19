@@ -207,7 +207,12 @@ def _utf16_offset(text: str, index: int) -> int:
 
 
 def _prune_images(directory: Path, keep: set[str]) -> None:
-    """Delete renders this build no longer references -- and only files this exporter names."""
+    """Delete renders neither this build nor the one it replaced references.
+
+    The previous generation is kept deliberately: a reader that has not reloaded still holds the old
+    manifest and asks for those images only when a page is opened, so deleting them on the first build
+    would break every open tab. The next build retires them.
+    """
     for path in directory.iterdir():
         if path.is_file() and path.name not in keep and _IMAGE_NAME.match(path.name):
             path.unlink()
@@ -317,23 +322,25 @@ def build_bundle(
                 "ordinal": chunk["ordinal"],
             })
 
-    rendered: dict[tuple[str, int], dict[str, Any]] = {}
+    # Keyed by PDF and page: two source URLs can name the same PDF, and one render serves both.
+    renders: dict[tuple[str, int], dict[str, Any]] = {}
     for key in sorted(readings):
         digest = page_digests[key]
-        rendered[key] = _render_page(corpus_root, digest, key[1], dpi, quality)
+        if (digest, key[1]) not in renders:
+            renders[(digest, key[1])] = _render_page(corpus_root, digest, key[1], dpi, quality)
 
-    for key, item in rendered.items():
+    for (digest, page_number), item in renders.items():
         item["image"] = (
             "data:image/jpeg;base64," + base64.b64encode(item["jpeg"]).decode("ascii")
             if inline
-            else f"{IMAGES}/{_image_name(page_digests[key], key[1], item['jpeg'])}"
+            else f"{IMAGES}/{_image_name(digest, page_number, item['jpeg'])}"
         )
         item["bytes"] = len(item["jpeg"])
 
     for (doc_id, page_number), entry in sorted(readings.items()):
         for reading in entry["readings"].values():
             reading["chunks"].sort(key=lambda chunk: chunk["start"])
-        item = rendered[(doc_id, page_number)]
+        item = renders[(page_digests[(doc_id, page_number)], page_number)]
         manifest["pages"][_page_key(doc_id, page_number)] = {
             "readings": entry["readings"],
             "image": item["image"],
@@ -348,7 +355,7 @@ def build_bundle(
     payload = json.dumps(manifest, separators=(",", ":"), ensure_ascii=False).replace("</", "<\\/")
     html = BUNDLE_HTML.replace("__DATA__", payload)
 
-    image_bytes = sum(item["bytes"] for item in rendered.values())
+    image_bytes = sum(item["bytes"] for item in renders.values())
     # Inline images live inside the html already, so the page's own bytes are the whole weight.
     total = len(html.encode("utf-8")) if inline else image_bytes + len(html.encode("utf-8"))
     contract = {
@@ -368,7 +375,7 @@ def build_bundle(
             for chunk in reading["chunks"]
         }),
         "images": [] if inline else [{"path": item["image"], "bytes": item["bytes"]} for item in sorted(
-            rendered.values(), key=lambda item: item["image"])],
+            renders.values(), key=lambda item: item["image"])],
         "image_bytes": image_bytes,
         "total_bytes": total,
         "max_bytes": max_bytes,
@@ -379,6 +386,7 @@ def build_bundle(
             "ceiling; lower --dpi or --max-bytes rather than shipping a silent shrink"
         )
 
+    previous = _previous_image_names(target)
     # Nothing above this line wrote to the served directory: a refused rebuild leaves the old bundle up.
     target.mkdir(parents=True, exist_ok=True)
     images = target / IMAGES
@@ -387,13 +395,29 @@ def build_bundle(
             shutil.rmtree(images)
     else:
         images.mkdir(exist_ok=True)
-        for item in rendered.values():
+        for item in renders.values():
             (target / item["image"]).write_bytes(item["jpeg"])
     (target / INDEX_NAME).write_text(html, encoding="utf-8")
     if not inline:
-        _prune_images(images, {Path(item["image"]).name for item in rendered.values()})
+        _prune_images(images, {Path(item["image"]).name for item in renders.values()} | previous)
     (target / CONTRACT_NAME).write_text(json.dumps(contract, indent=2) + "\n", encoding="utf-8")
     return contract
+
+
+def _previous_image_names(target: Path) -> set[str]:
+    """The renders the contract now on disk references, if it can be read."""
+    contract_path = target / CONTRACT_NAME
+    if not contract_path.is_file():
+        return set()
+    try:
+        contract = _read_json(contract_path)
+    except BundleError:
+        return set()
+    return {
+        Path(entry["path"]).name
+        for entry in contract.get("images", [])
+        if isinstance(entry, dict) and entry.get("path")
+    }
 
 
 def check_bundle(out: Path | str, runs: list[StateRun]) -> list[str]:
