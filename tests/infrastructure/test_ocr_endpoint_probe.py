@@ -139,6 +139,36 @@ def test_a_refused_bearer_names_the_fault_and_leaks_neither_the_token_nor_the_ad
     assert f":{port}" not in message
 
 
+def test_a_route_the_endpoint_does_not_serve_is_a_fault_not_a_wait() -> None:
+    # The mistake the runbook warns about: a base URL pasted without ``/v1`` answers 404 for ever, so a
+    # probe that treated it as "not ready yet" would spend the whole warm timeout and report the wrong
+    # failure. A 4xx is the configuration, and it is named as one, without the address.
+    stub = _Stub(status=404, body=b"not found")
+    base_url, stop = _serving(stub)
+    port = base_url.rsplit(":", 1)[-1].split("/")[0]
+    try:
+        with pytest.raises(OcrEndpointUnavailable) as caught:
+            HttpOcrEndpointProbe(base_url).ready()
+    finally:
+        stop()
+
+    message = str(caught.value)
+    assert message == "the OCR endpoint answered HTTP 404; it does not serve a model list at this base URL"
+    assert base_url not in message
+    assert f":{port}" not in message
+
+
+def test_a_429_asking_for_less_is_not_ready_yet() -> None:
+    stub = _Stub(status=429, body=b'{"error": "slow down"}')
+    base_url, stop = _serving(stub)
+    try:
+        ready = HttpOcrEndpointProbe(base_url).ready()
+    finally:
+        stop()
+
+    assert ready is False
+
+
 def test_an_empty_base_url_names_the_fault() -> None:
     with pytest.raises(OcrEndpointUnavailable) as caught:
         HttpOcrEndpointProbe("  ").ready()

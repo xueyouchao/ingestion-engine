@@ -87,8 +87,10 @@ def main(argv: list[str] | None = None, sdk: Any = None, stream: TextIO | None =
 def _current_floor(server: Any) -> int:
     """The floor Modal reports for this Server, read through an update that requests no change.
 
-    ``Server.update_autoscaler`` is the only public read of the current floor in the installed SDK; with
-    every field unset it retains the current values and returns them, so status changes nothing.
+    ``Server.update_autoscaler`` with every field unset is the only public read of the current floor the
+    installed SDK exposes, and its docstring says an unspecified parameter retains its current value -- so
+    status requests a change to nothing. The runbook prints that docstring rather than asking a reader to
+    trust this sentence, and this call was never made against a deployed app.
     """
     return _floor_of(server.update_autoscaler())
 

@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from typing import Literal
 
 # The demo's own limits, each a default the composition root may override from the environment. The last
-# three are not spend at all -- they shape the Reading Queue and a warm read -- but they are the demo's
-# settings and they live beside the rest so one module answers "what does the demo allow?".
+# four are not spend at all -- they shape the upload, the Reading Queue and a warm read -- but they are the
+# demo's settings and they live beside the rest so one module answers "what does the demo allow?".
 DEFAULT_PAGE_CAP = 25
 DEFAULT_RATE_LIMIT_READS = 5
 DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 600

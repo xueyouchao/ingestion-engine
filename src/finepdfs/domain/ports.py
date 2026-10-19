@@ -123,8 +123,9 @@ class OcrEndpointProbe(Protocol):
     """Whether the demo's OCR endpoint answers right now: the question behind a cold worker's warming.
 
     ``ready`` answers ``False`` for anything that may resolve with time -- a connection error, a timeout,
-    a 5xx while the worker is still loading -- so the caller can poll, and raises
-    ``OcrEndpointUnavailable`` for a fault that waiting cannot fix.
+    a 5xx while the worker is still loading, a 429 asking for less -- so the caller can poll, and raises
+    ``OcrEndpointUnavailable`` for a fault that waiting cannot fix: no address configured, an address that
+    is not one, a bearer the endpoint refuses, or a route it does not serve.
     """
 
     def ready(self) -> bool: ...

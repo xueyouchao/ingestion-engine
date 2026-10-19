@@ -9,9 +9,12 @@ OCR engine.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+import pymupdf
 
 from finepdfs.application.curate import NATIVE_TEXT_ENGINE, CurationPolicy, RoutingPlan
 from finepdfs.application.demo_read import DemoRead, FailedReading, Reading, Refusal
@@ -19,6 +22,9 @@ from finepdfs.domain.demo import DemoLimits, SpendGatePolicy, UsageSnapshot
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText, TextLayerQuality
 from finepdfs.domain.ocr import OcrRoutingPolicy
 from finepdfs.domain.ports import OcrEndpointUnavailable
+from finepdfs.infrastructure.engines.paddleocr_vl import PaddleOcrVlCliEngine
+from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextLayerProbe
+from finepdfs.infrastructure.engines.subprocess_support import CommandResult
 
 OCR_ENGINE = "paddleocr-vl"
 
@@ -424,4 +430,91 @@ def test_a_successful_read_writes_no_file(tmp_path: Path, monkeypatch: Any) -> N
 
     assert isinstance(outcome, Reading)
     assert list(tmp_path.rglob("*")) == []
+
+class _WritingRunner:
+    """A stand-in for the ``paddleocr`` CLI: one result per rendered page, written where the CLI writes.
+
+    It writes only into the ``--save_path`` it is handed, and remembers which page images it could see,
+    so a test can tell the engine's own scratch directory from a file the read left behind.
+    """
+
+    def __init__(self) -> None:
+        self.argv: list[str] = []
+        self.images: list[Path] = []
+        self.output: Path | None = None
+
+    def run(self, argv: list[str], cwd: Path | None = None) -> CommandResult:
+        self.argv = list(argv)
+        images_dir = Path(argv[argv.index("-i") + 1])
+        self.output = Path(argv[argv.index("--save_path") + 1])
+        self.images = sorted(images_dir.glob("*.png"))
+        self.output.mkdir(parents=True, exist_ok=True)  # the CLI creates its save directory, so this does too
+        for number, image in enumerate(self.images, start=1):
+            payload = {
+                "res": {
+                    "page_index": number - 1,
+                    "parsing_res_list": [
+                        {"block_content": f"read from page {number}", "block_label": "text", "block_order": 0}
+                    ],
+                }
+            }
+            (self.output / f"{image.stem}_res.json").write_text(json.dumps(payload), encoding="utf-8")
+        return CommandResult(argv=tuple(argv), returncode=0, stdout="", stderr="")
+
+
+def _image_only_pdf(pages: int = 1) -> bytes:
+    """A PDF with no text layer at all, which is what routes a document to the OCR lane."""
+    document = pymupdf.open()
+    for _ in range(pages):
+        page = document.new_page(width=595, height=842)
+        pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 40), 0)
+        page.insert_image(pymupdf.Rect(60, 60, 500, 700), pixmap=pixmap)
+    content = document.tobytes()
+    document.close()
+    return content
+
+
+def _tree(root: Path) -> list[str]:
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+
+
+def test_an_ocr_read_writes_only_into_a_scratch_directory_it_removes(tmp_path: Path, monkeypatch: Any) -> None:
+    """The retention promise on the lane that writes at all: page images exist during the read, then nothing.
+
+    The CLI engine renders every page to a PNG so each page keeps its own result file, which is the one
+    way a Reading touches a disk. So the images are a scratch directory's contents -- they must be there
+    while the command runs and gone when the Reading answers, or "the demo keeps nothing" is false.
+    """
+    work = tmp_path / "work"
+    spool = tmp_path / "tmp"
+    work.mkdir()
+    spool.mkdir()
+    monkeypatch.setenv("TMPDIR", str(spool))
+    monkeypatch.chdir(work)
+    runner = _WritingRunner()
+    engine = PaddleOcrVlCliEngine(command="paddleocr", work_dir=work, runner=runner)
+    demo = DemoRead(
+        probe=PymupdfTextLayerProbe(),
+        engines={OCR_ENGINE: engine},
+        policy=CurationPolicy(engine_name=OCR_ENGINE, routing=OcrRoutingPolicy()),
+        gates=SpendGatePolicy(DemoLimits()),
+        ledger=FakeLedger(),
+        endpoint=FakeEndpoint(),
+        clock=FakeTime().clock,
+        sleep=FakeTime().sleep,
+    )
+    before = {root: _tree(root) for root in (work, spool)}
+
+    outcome = demo.read(_image_only_pdf(), "10.0.0.1", lambda stage: None)
+
+    assert isinstance(outcome, Reading)
+    assert outcome.plan.lane == "ocr"
+    assert [page.number for page in outcome.pages] == [1]
+    assert [page.text for page in outcome.pages] == ["read from page 1"]
+    # The command saw one rendered page image, and both the image and the result it wrote are gone.
+    assert [image.name for image in runner.images] == ["page-0001.png"]
+    assert not runner.images[0].exists()
+    assert runner.output is not None and not runner.output.exists()
+    assert {root: _tree(root) for root in (work, spool)} == before, "the demo kept a page image or a result"
+
 

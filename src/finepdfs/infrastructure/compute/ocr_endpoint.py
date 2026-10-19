@@ -3,9 +3,9 @@
 ADR-0012 makes a cold worker a stage of the demo's page and not an error, and the question behind that
 stage is one GET: does ``{base_url}/models`` list a model? vLLM answers it as soon as it is serving, so it
 is a readiness check that needs no vendor and no second protocol -- the same base URL and bearer the chat
-adapter already sends. A worker that is still loading is "not ready yet" (a 5xx, a connection error or a
-timeout the next poll may find gone); a bearer the endpoint refuses or an address that is not one is a
-fault that waiting cannot fix.
+adapter already sends. A worker that is still loading is "not ready yet" (a 5xx, a 429, a connection error
+or a timeout the next poll may find gone); a bearer the endpoint refuses, a route it does not serve, or an
+address that is not one is a fault that waiting cannot fix, and is raised as one.
 """
 
 from __future__ import annotations
@@ -65,7 +65,14 @@ class HttpOcrEndpointProbe:
         except urllib.error.HTTPError as error:
             if error.code in (401, 403):
                 raise OcrEndpointUnavailable(f"the OCR endpoint refused the bearer (HTTP {error.code})") from None
-            # A 5xx is the worker still starting, and any other status may change on the next poll.
+            if 400 <= error.code < 500 and error.code != 429:
+                # A 4xx is the caller's own configuration: a route the worker does not serve (a base URL
+                # pasted without ``/v1``), a path that no longer exists. Polling cannot fix it, and a
+                # fifteen-minute warm-up would only hide it. 429 is the worker saying "not now".
+                raise OcrEndpointUnavailable(
+                    f"the OCR endpoint answered HTTP {error.code}; it does not serve a model list at this base URL"
+                ) from None
+            # A 5xx is the worker still starting, and a 429 may pass, so both may change on the next poll.
             return False
         except (urllib.error.URLError, OSError, TimeoutError):
             return False

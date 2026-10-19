@@ -349,7 +349,7 @@ the server starts, or passing its flag for one run:
 | `FINEPDFS_DEMO_RATE_LIMIT_READS` per `FINEPDFS_DEMO_RATE_LIMIT_WINDOW_SECONDS` | `--rate-limit-reads`, `--rate-limit-window-seconds` | 5 reads per 600 s, per client | one visitor's reads in a sliding window | kind `rate-limit` |
 | `FINEPDFS_DEMO_DAILY_OCR_PAGES` | `--daily-ocr-pages` | 300 OCR pages per UTC day | the demo's whole OCR spend for the day, across all visitors | kind `daily-budget` |
 
-Three more settings are the demo's but are not spend: `FINEPDFS_DEMO_UPLOAD_BYTES`
+Four more settings are the demo's but are not spend: `FINEPDFS_DEMO_UPLOAD_BYTES`
 (`--upload-bytes`, default `20971520`, 20 MiB -- refused as an HTTP `413` with kind `upload` before the
 body is read), `FINEPDFS_DEMO_QUEUE_DEPTH` (`--queue-depth`, default 3 Readings waiting -- refused as an
 HTTP `503` with kind `busy`) and `FINEPDFS_DEMO_WARM_TIMEOUT_SECONDS` / `FINEPDFS_DEMO_POLL_INTERVAL_SECONDS`
@@ -440,8 +440,19 @@ each answer means:
 * a wrong argument prints the usage line and exits 2, changing nothing.
 
 `status` reads the current floor through an autoscaler update that requests no change, so it changes
-nothing and costs nothing. Holding the worker warm is a decision for a session, not a fix: with the floor
-at 1 the demo's resting cost is no longer zero, which is the whole point of ADR-0012's scale-to-zero.
+nothing and costs nothing -- that is the SDK's documented behaviour, and it is worth checking rather than
+trusting this file:
+
+```bash
+python -c "import inspect, modal; print(inspect.getdoc(modal.Server.update_autoscaler))"
+```
+
+The sentence to look for is that an unspecified parameter retains its current value; that is what makes a
+read-only status out of an update call. The Warm Control has not been run against a deployed app in this
+repository (§Status), so the first operator to run it is the one confirming this.
+
+Holding the worker warm is a decision for a session, not a fix: with the floor at 1 the demo's resting cost
+is no longer zero, which is the whole point of ADR-0012's scale-to-zero.
 
 Check what is actually held, and put it back:
 

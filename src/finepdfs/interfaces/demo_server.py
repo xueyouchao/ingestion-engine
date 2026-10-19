@@ -59,6 +59,7 @@ from finepdfs.infrastructure.compute.providers import (
 )
 from finepdfs.infrastructure.demo.ledger import InMemoryGateLedger
 from finepdfs.infrastructure.engines.environment import engine_adapters, ocr_routing_policy
+from finepdfs.infrastructure.engines.registry import PADDLEOCR_VL_ENGINE
 from finepdfs.interfaces.demo_jobs import QueueFull, Reader, ReadingJob, ReadingQueue
 from finepdfs.interfaces.demo_page import DEMO_HTML
 
@@ -69,7 +70,9 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8766
 
 # A run defaults to the free text layer; the demo's OCR lane defaults to the deployed engine (ADR-0012).
-DEFAULT_ENGINE = "paddleocr-vl"
+# The name comes from where the registry writes it, so renaming the engine cannot make the demo's default
+# an engine that no longer exists.
+DEFAULT_ENGINE = PADDLEOCR_VL_ENGINE
 ENGINE = "FINEPDFS_ENGINE"
 
 # The demo's own names. One module answers "what does the demo allow?", so the defaults beside them in

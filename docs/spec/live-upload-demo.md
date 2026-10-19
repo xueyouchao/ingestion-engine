@@ -18,7 +18,7 @@ bring their own PDF and watch the pipeline decide about it.
 
 The reason is cost and shape, not capability. The probe, `OcrRoutingPolicy` and
 `ExtractionStep.route/extract` already produce exactly the decision the visitor wants to see, and the
-engines to act on it already exist. But the machine that runs the demo has no GPU, and a live demo is
+engines to act on it already exist. But the demo host is not given a GPU, and a live demo is
 the wrong load for ADR-0009's unit: one detached Sandbox per *run*, rented by a start command, waited on
 for readiness, given back by a stop command. A browser has no lease to hold and no run to end. Every
 upload would pay Sandbox creation, image pull, vLLM start and a weights load, and a demo that kept a
@@ -115,6 +115,14 @@ The entry point is the console script `finepdfs-live-demo` (`finepdfs.interfaces
 HTTP surface is `GET /` (the page), `GET /api/status`, `POST /api/read` (the PDF as the body,
 `Content-Type: application/pdf`, answering `202 {"job": ...}`) and `GET /api/read/<id>` (the job JSON).
 
+The edge checks what an edge can check before it reads a body: a media type that is `application/pdf`, a
+declared `Content-Length`, and that length against the byte cap (`413`, kind `upload`, decided before the
+body is pulled). Whether the bytes are a readable PDF is not an edge question -- the probe is the one
+place that decides it, so those bytes are accepted as a job and refused a moment later with kind
+`unreadable` and the probe's own words. That keeps one rule for "this is not a PDF" instead of two that
+could disagree, and the visitor still does not wait for a read that cannot happen: routing happens before
+the gates and before any GPU time.
+
 Nothing under `src/` imports Modal, and nothing under `src/` imports `deploy/`.
 
 ### A Reading is an outcome, not a bool
@@ -173,10 +181,18 @@ names the timeout, not a refusal: the gate did not close, the worker did not com
 
 ### Only page images leave the host, and nothing is kept
 
-The demo server opens the uploaded bytes as a PDF from memory, renders page images from memory for the
-OCR lane, and writes no file. It does not persist jobs across a restart. The page states, before the
-upload control, that the document is sent to a rented GPU to be read and that nothing is kept after the
-response.
+The demo server opens the uploaded bytes as a PDF in memory. The OCR lane renders page images into a
+scratch directory that the engine removes before the response returns -- that scratch directory is the one
+way a Reading touches a disk, and both lanes' retention tests assert that nothing survives it: no uploaded
+PDF, no page image, no engine result, nothing under the working directory or `TMPDIR`. Finished jobs are
+kept in memory, bounded, so a page that polls a moment late still reads its answer; no job and no page text
+survives a restart.
+
+The page states, before the upload control, that the document is sent to a rented GPU to be read and that
+nothing is kept after the response. Below it the order is the answer first: the stage timeline with the
+measured warm-up, the Routing Decision with its features and thresholds, the page text the lane read, then
+the Engine Identity that produced it -- and a refusal or failure panel in place of the reading when there
+is none.
 
 ### The deployed app is one container, scale to zero, one bearer
 

@@ -177,20 +177,20 @@ DEMO_HTML = """<!doctype html>
   </table>
 </section>
 
-<section id="engine-identity" class="hidden">
-  <h2>Engine Identity</h2>
-  <p class="engine" id="engine-value"></p>
-</section>
-
 <section id="pages" class="hidden">
   <h2>Page text</h2>
   <p class="note" id="pages-summary"></p>
   <div id="page-texts"></div>
 </section>
 
+<section id="engine-identity" class="hidden">
+  <h2>Engine Identity</h2>
+  <p class="engine" id="engine-value"></p>
+</section>
+
 <section id="refusal" class="panel refusal hidden">
   <h2>Refused: <span id="refusal-kind"></span></h2>
-  <p class="label">the gate that closed</p>
+  <p class="label">why the demo refused it</p>
   <p id="refusal-reason"></p>
 </section>
 

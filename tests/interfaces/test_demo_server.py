@@ -289,6 +289,9 @@ def test_the_page_states_where_the_bytes_go_and_what_is_kept_before_the_upload()
     limits = html.index('id="limits"')
     upload = html.index('id="upload-file"')
     assert statements < limits < upload, "the limits and the two statements come before the upload control"
+    # The ticket lists the read's parts in this order: the decision, the text it read, then the identity
+    # that produced it -- a visitor reads the answer before the provenance.
+    assert html.index('id="decision"') < html.index('id="pages"') < html.index('id="engine-identity"')
     assert "rented GPU" in html
     assert "nothing is kept" in html
     for identifier in (
