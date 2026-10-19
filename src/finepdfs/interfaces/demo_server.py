@@ -104,24 +104,42 @@ class DemoLimitError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class _Limit:
-    """One demo limit: its variable, its default and the kind of number it is."""
+    """One demo limit: its variable, its default, the kind of number it is, and what it is counted in.
+
+    ``noun`` earns its place twice: it is the help text of the flag that sets this limit, and it is the
+    phrase an operator reads in the runbook, so the two cannot describe the same number differently.
+    """
 
     variable: str
     default: float
     whole: bool
+    noun: str
 
 
 _LIMITS = {
-    "page_cap": _Limit(PAGE_CAP, DEFAULT_PAGE_CAP, whole=True),
-    "rate_limit_reads": _Limit(RATE_LIMIT_READS, DEFAULT_RATE_LIMIT_READS, whole=True),
-    "rate_limit_window_seconds": _Limit(
-        RATE_LIMIT_WINDOW_SECONDS, DEFAULT_RATE_LIMIT_WINDOW_SECONDS, whole=False
+    "page_cap": _Limit(PAGE_CAP, DEFAULT_PAGE_CAP, whole=True, noun="pages per upload"),
+    "rate_limit_reads": _Limit(
+        RATE_LIMIT_READS, DEFAULT_RATE_LIMIT_READS, whole=True, noun="reads per client per window"
     ),
-    "daily_ocr_page_budget": _Limit(DAILY_OCR_PAGES, DEFAULT_DAILY_OCR_PAGE_BUDGET, whole=True),
-    "upload_bytes": _Limit(UPLOAD_BYTES, DEFAULT_UPLOAD_BYTES, whole=True),
-    "queue_depth": _Limit(QUEUE_DEPTH, DEFAULT_QUEUE_DEPTH, whole=True),
-    "warm_timeout_seconds": _Limit(WARM_TIMEOUT_SECONDS, DEFAULT_WARM_TIMEOUT_SECONDS, whole=False),
-    "poll_interval_seconds": _Limit(POLL_INTERVAL_SECONDS, DEFAULT_POLL_INTERVAL_SECONDS, whole=False),
+    "rate_limit_window_seconds": _Limit(
+        RATE_LIMIT_WINDOW_SECONDS,
+        DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+        whole=False,
+        noun="the rate-limit window in seconds",
+    ),
+    "daily_ocr_page_budget": _Limit(
+        DAILY_OCR_PAGES, DEFAULT_DAILY_OCR_PAGE_BUDGET, whole=True, noun="OCR pages per UTC day"
+    ),
+    "upload_bytes": _Limit(UPLOAD_BYTES, DEFAULT_UPLOAD_BYTES, whole=True, noun="largest upload in bytes"),
+    "queue_depth": _Limit(
+        QUEUE_DEPTH, DEFAULT_QUEUE_DEPTH, whole=True, noun="Readings waiting behind the one running"
+    ),
+    "warm_timeout_seconds": _Limit(
+        WARM_TIMEOUT_SECONDS, DEFAULT_WARM_TIMEOUT_SECONDS, whole=False, noun="seconds to wait for a cold worker"
+    ),
+    "poll_interval_seconds": _Limit(
+        POLL_INTERVAL_SECONDS, DEFAULT_POLL_INTERVAL_SECONDS, whole=False, noun="seconds between readiness polls"
+    ),
 }
 
 # The console script's overrides, named for the limit they set rather than for the variable, so an
@@ -502,30 +520,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--host", default=DEFAULT_HOST, help=f"address to bind (default {DEFAULT_HOST})")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"port to bind (default {DEFAULT_PORT})")
-    parser.add_argument("--page-cap", type=int, help=f"pages per upload (default {DEFAULT_PAGE_CAP})")
-    parser.add_argument(
-        "--rate-limit-reads", type=int, help=f"reads per client per window (default {DEFAULT_RATE_LIMIT_READS})"
-    )
-    parser.add_argument(
-        "--rate-limit-window-seconds",
-        type=float,
-        help=f"the rate-limit window in seconds (default {DEFAULT_RATE_LIMIT_WINDOW_SECONDS})",
-    )
-    parser.add_argument(
-        "--daily-ocr-pages", type=int, help=f"OCR pages per UTC day (default {DEFAULT_DAILY_OCR_PAGE_BUDGET})"
-    )
-    parser.add_argument(
-        "--upload-bytes", type=int, help=f"largest upload in bytes (default {DEFAULT_UPLOAD_BYTES})"
-    )
-    parser.add_argument(
-        "--queue-depth", type=int, help=f"Readings waiting behind the one running (default {DEFAULT_QUEUE_DEPTH})"
-    )
-    parser.add_argument(
-        "--warm-timeout", type=float, help=f"seconds to wait for a cold worker (default {DEFAULT_WARM_TIMEOUT_SECONDS})"
-    )
-    parser.add_argument(
-        "--poll-interval", type=float, help=f"seconds between readiness polls (default {DEFAULT_POLL_INTERVAL_SECONDS})"
-    )
+    for field, flag in _FLAGS.items():
+        limit = _LIMITS[field]
+        parser.add_argument(
+            flag,
+            dest=field,
+            type=int if limit.whole else float,
+            help=f"{limit.noun} (default {limit.default:g})",
+        )
     return parser
 
 

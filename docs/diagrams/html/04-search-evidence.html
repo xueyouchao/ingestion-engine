@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:">
+  <title>04-search-evidence</title>
+  <style>
+    :root { color-scheme: dark; --page:#0f0f1a; --panel:#0f172a; --border:#334155; --text:#e2e8f0; --muted:#94a3b8; --accent:#a855f7; }
+    html[data-theme="light"] { color-scheme:light; --page:#f8fafc; --panel:#fff; --border:#cbd5e1; --text:#0f172a; --muted:#475569; --accent:#7c3aed; }
+    * { box-sizing:border-box; }
+    html,body { width:100%; height:100%; margin:0; overflow:hidden; background:linear-gradient(135deg,var(--page),#1a1a2e); color:var(--text); font-family:'SF Mono','Fira Code',ui-monospace,monospace; }
+    body { display:grid; grid-template-rows:auto 1fr; }
+    .toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:10px 14px; background:color-mix(in srgb,var(--panel) 92%,transparent); border-bottom:1px solid var(--border); z-index:2; }
+    .title { margin-right:auto; font-size:13px; font-weight:700; }
+    button,select { min-height:34px; padding:6px 10px; color:var(--text); background:var(--panel); border:1px solid var(--border); border-radius:8px; font:inherit; cursor:pointer; }
+    button:hover,button:focus-visible,select:focus-visible { border-color:var(--accent); outline:2px solid color-mix(in srgb,var(--accent) 35%,transparent); outline-offset:1px; }
+    #stage { position:relative; overflow:hidden; touch-action:none; cursor:grab; }
+    #stage.dragging { cursor:grabbing; }
+    #canvas { width:100%; height:100%; display:grid; place-items:center; transform-origin:0 0; will-change:transform; }
+    #canvas svg { max-width:calc(100vw - 40px); max-height:calc(100vh - 92px); width:auto; height:auto; filter:drop-shadow(0 22px 60px rgba(0,0,0,.28)); user-select:none; }
+    #status { min-width:76px; color:var(--muted); font-size:12px; text-align:center; }
+    .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+    @media (prefers-reduced-motion:reduce) { * { scroll-behavior:auto!important; transition:none!important; } }
+  </style>
+</head>
+<body>
+  <header class="toolbar" aria-label="Diagram controls">
+    <span class="title">04-search-evidence</span>
+    <button type="button" data-action="zoom-out" aria-label="Zoom out">−</button>
+    <button type="button" data-action="reset" aria-label="Reset view">Reset</button>
+    <button type="button" data-action="zoom-in" aria-label="Zoom in">+</button>
+    <span id="status" aria-live="polite">100%</span>
+    <button type="button" data-action="theme" aria-label="Toggle theme">Theme</button>
+    <button type="button" data-action="copy" aria-label="Copy SVG source">Copy SVG</button>
+    <select id="scale" aria-label="Raster export scale"><option value="1">1×</option><option value="2" selected>2×</option><option value="3">3×</option><option value="4">4×</option></select>
+    <select id="format" aria-label="Export format"><option>SVG</option><option>PNG</option><option>JPEG</option><option>WebP</option></select>
+    <button type="button" data-action="download">Export</button>
+  </header>
+  <main id="stage" tabindex="0" aria-label="Interactive diagram. Drag to pan; use plus and minus to zoom.">
+    <div id="canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 770" width="1240" height="770" data-generator="fireworks-tech-graph" data-schema-version="1" data-text-metrics="heuristic-v1" data-style-id="7" data-visual-theme="OpenAI" data-diagram-type="data-flow" data-motion-scene="tool-call-flow" data-semantic-profile="generic" data-semantic-valid="true" data-quality-profile="showcase" data-max-bends-per-edge="2" data-max-total-bends="8" data-max-route-stretch="1.35" data-max-bridged-crossings="0" data-min-node-gap="40.0" data-min-container-gutter="20.0" data-min-label-clearance="4.0" data-min-segment-length="16.0" role="img" focusable="false">
+  <defs>
+    <marker id="arrowA" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#10a37f" />
+    </marker>
+    <marker id="arrowB" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#0f766e" />
+    </marker>
+    <marker id="arrowC" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#0891b2" />
+    </marker>
+    <marker id="arrowE" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f59e0b" />
+    </marker>
+    <marker id="arrowF" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#64748b" />
+    </marker>
+    <marker id="arrowG" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#475569" />
+    </marker>
+    <marker id="arrowH" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8" />
+    </marker>
+    <style>
+    text { font-family: 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', 'Microsoft JhengHei', 'SimHei', sans-serif; }
+    .title { font-size: 24px; font-weight: 700; fill: #0f172a; }
+    .subtitle { font-size: 13px; font-weight: 500; fill: #64748b; }
+    .section { font-size: 13px; font-weight: 700; fill: #087f5b; letter-spacing: 1.4px; }
+    .section-sub { font-size: 12px; font-weight: 500; fill: #64748b; }
+    .node-title { font-weight: 700; fill: #0f172a; }
+    .node-sub { font-weight: 500; fill: #475569; }
+    .node-type { font-size: 11px; font-weight: 700; fill: #64748b; letter-spacing: 0.08em; }
+    .arrow-label { font-size: 12px; font-weight: 600; fill: #475569; }
+    .legend { font-size: 12px; font-weight: 500; fill: #475569; }
+    .footnote { font-size: 12px; font-weight: 500; fill: #64748b; }
+    .metric-label { font-size: 8.5px; font-weight: 700; fill: #64748b; text-transform: uppercase; }
+    .metric-value { font-size: 9.5px; font-weight: 700; fill: #0f172a; }
+    </style>
+  </defs>
+  <rect data-graph-role="background" width="1240.0" height="770.0" fill="#ffffff" />
+  <text x="48.0" y="48" text-anchor="start" class="title">Search Over Accepted Evidence</text>
+  <text x="48.0" y="72" text-anchor="start" class="subtitle">one lexical index, one hit contract, one citation rule</text>
+  <line x1="48" y1="100" x2="1192.0" y2="100" stroke="#e2e8f0" stroke-width="1" />
+  <g id="declared" data-graph-role="container" data-container-id="declared" data-semantic-role="boundary" data-graph-bounds="40,110,1160,270">
+  <rect data-graph-role="container" x="40.0" y="110.0" width="1120.0" height="160.0" rx="16.0" fill="none" stroke="#e2e8f0" stroke-width="1.4" stroke-dasharray="5 4" />
+  <text x="58.0" y="134.0" class="section">DECLARED EVIDENCE</text>
+  <text x="58.0" y="154.0" class="section-sub">only a published Document exports pages and chunks</text>
+    <rect id="declared-header" data-graph-role="reserved" data-reserved-kind="container-header" x="48" y="116" width="350.16" height="30" fill="none" stroke="none" />
+  </g>
+  <g id="index" data-graph-role="container" data-container-id="index" data-semantic-role="boundary" data-graph-bounds="40,290,1160,470">
+  <rect data-graph-role="container" x="40.0" y="290.0" width="1120.0" height="180.0" rx="16.0" fill="none" stroke="#e2e8f0" stroke-width="1.4" stroke-dasharray="5 4" />
+  <text x="58.0" y="314.0" class="section">LOCAL LEXICAL INDEX</text>
+  <text x="58.0" y="334.0" class="section-sub">rebuilt from chunks</text>
+    <rect id="index-header" data-graph-role="reserved" data-reserved-kind="container-header" x="48" y="296" width="160.78" height="30" fill="none" stroke="none" />
+  </g>
+  <g id="readers" data-graph-role="container" data-container-id="readers" data-semantic-role="boundary" data-graph-bounds="40,490,1160,700">
+  <rect data-graph-role="container" x="40.0" y="490.0" width="1120.0" height="210.0" rx="16.0" fill="none" stroke="#e2e8f0" stroke-width="1.4" stroke-dasharray="5 4" />
+  <text x="58.0" y="514.0" class="section">READERS · ONE CONTRACT</text>
+  <text x="58.0" y="534.0" class="section-sub">the browser and the agent consume the same SearchHit</text>
+    <rect id="readers-header" data-graph-role="reserved" data-reserved-kind="container-header" x="48" y="496" width="367.68" height="30" fill="none" stroke="none" />
+  </g>
+  <path id="to-index" data-graph-role="edge" data-edge-id="to-index" data-source="chunks" data-target="rebuild" data-edge-kind="flow" data-topic-id="" data-flow="write" data-motion-role="tool-call" data-motion-stage="1" data-motion-order="0" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 240,250 L 240,350" fill="none" stroke="#0f766e" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowB)" />
+  <path id="indexed" data-graph-role="edge" data-edge-id="indexed" data-source="rebuild" data-target="fts" data-edge-kind="flow" data-topic-id="" data-flow="write" data-motion-role="tool-call" data-motion-stage="2" data-motion-order="0" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 380,390 L 460,390" fill="none" stroke="#0f766e" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowB)" />
+  <path id="to-search" data-graph-role="edge" data-edge-id="to-search" data-source="fts" data-target="search" data-edge-kind="flow" data-topic-id="" data-flow="read" data-motion-role="data" data-motion-stage="3" data-motion-order="0" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="1" data-route-stretch="1.0" data-bridges="" d="M 460,430 L 440,430 L 440,550" fill="none" stroke="#0891b2" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowC)" />
+  <path id="to-explore" data-graph-role="edge" data-edge-id="to-explore" data-source="fts" data-target="explore" data-edge-kind="flow" data-topic-id="" data-flow="read" data-motion-role="data" data-motion-stage="3" data-motion-order="1" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="2" data-route-stretch="1.0" data-bridges="" d="M 630,430 L 630,448 L 720,448 L 720,550" fill="none" stroke="#0891b2" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowC)" />
+  <path id="to-ask" data-graph-role="edge" data-edge-id="to-ask" data-source="fts" data-target="ask" data-edge-kind="flow" data-topic-id="" data-flow="read" data-motion-role="data" data-motion-stage="3" data-motion-order="2" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="2" data-route-stretch="1.0" data-bridges="" d="M 800,430 L 800,454 L 1000,454 L 1000,550" fill="none" stroke="#0891b2" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowC)" />
+  <path id="exact-page" data-graph-role="edge" data-edge-id="exact-page" data-source="pages" data-target="ask" data-edge-kind="flow" data-topic-id="" data-flow="read" data-motion-role="memory-read" data-motion-stage="4" data-motion-order="0" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="2" data-route-stretch="1.06" data-bridges="" d="M 700,210 L 1144,210 L 1144,595 L 1120,595" fill="none" stroke="#0891b2" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowC)" stroke-dasharray="6,4" />
+  <g id="node-chunks" data-graph-role="node" data-node-id="chunks" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="100,170,380,250">
+  <rect x="100.0" y="170.0" width="280.0" height="80.0" rx="14.0" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.8" />
+  <text data-text-role="title" data-full-text="Declared chunks" data-text-max-width="256.0" x="240.0" y="210.0" text-anchor="middle" class="node-title" font-size="18">Declared chunks</text>
+  <text data-text-role="subtitle" data-full-text="out/chunks/&lt;key&gt;.jsonl · --search" data-text-max-width="256.0" x="240.0" y="232.0" text-anchor="middle" class="node-sub" font-size="12">out/chunks/&lt;key&gt;.jsonl · --search</text>
+  </g>
+  <g id="node-pages" data-graph-role="node" data-node-id="pages" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="420,170,700,250">
+  <rect x="420.0" y="170.0" width="280.0" height="80.0" rx="14.0" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.8" />
+  <text data-text-role="title" data-full-text="Accepted pages" data-text-max-width="256.0" x="560.0" y="210.0" text-anchor="middle" class="node-title" font-size="18">Accepted pages</text>
+  <text data-text-role="subtitle" data-full-text="out/pages/&lt;key&gt;.jsonl · exact text" data-text-max-width="256.0" x="560.0" y="232.0" text-anchor="middle" class="node-sub" font-size="12">out/pages/&lt;key&gt;.jsonl · exact text</text>
+  </g>
+  <g id="node-rebuild" data-graph-role="node" data-node-id="rebuild" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="100,350,380,430">
+  <rect x="100.0" y="350.0" width="280.0" height="80.0" rx="14.0" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.8" />
+  <text data-text-role="title" data-full-text="index-search" data-text-max-width="256.0" x="240.0" y="390.0" text-anchor="middle" class="node-title" font-size="18">index-search</text>
+  <text data-text-role="subtitle" data-full-text="rebuild from the declared chunk set" data-text-max-width="256.0" x="240.0" y="412.0" text-anchor="middle" class="node-sub" font-size="12">rebuild from the declared chunk set</text>
+  </g>
+  <g id="node-fts" data-graph-role="node" data-node-id="fts" data-semantic-role="cylinder" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="460,350,800,430">
+  <ellipse cx="630.0" cy="360.0" rx="170.0" ry="10.0" fill="#ffffff" stroke="#e5e5e5" stroke-width="2.2" />
+  <rect x="460.0" y="360.0" width="340.0" height="60.0" fill="#ffffff" stroke="#e5e5e5" stroke-width="2.2" />
+  <ellipse cx="630.0" cy="420.0" rx="170.0" ry="10.0" fill="#ffffff" stroke="#e5e5e5" stroke-width="2.2" />
+  <ellipse cx="630.0" cy="380.4" rx="170.0" ry="10.0" fill="none" stroke="#e5e5e5" stroke-opacity="0.45" stroke-width="1.2" />
+  <ellipse cx="630.0" cy="398.0" rx="170.0" ry="10.0" fill="none" stroke="#e5e5e5" stroke-opacity="0.25" stroke-width="1.2" />
+  <text data-text-role="title" data-full-text="SQLite FTS5" data-text-max-width="316.0" x="630.0" y="384.0" text-anchor="middle" class="node-title" font-size="18">SQLite FTS5</text>
+  <text data-text-role="subtitle" data-full-text="BM25 ranking · out/search.db" data-text-max-width="316.0" x="630.0" y="408.0" text-anchor="middle" class="node-sub" font-size="12">BM25 ranking · out/search.db</text>
+  </g>
+  <g id="node-stale-note" data-graph-role="node" data-node-id="stale-note" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="840,350,1120,430">
+  <rect x="840.0" y="350.0" width="280.0" height="80.0" rx="14.0" fill="#fff7ed" stroke="#fed7aa" stroke-width="1.8" />
+  <text data-text-role="title" data-full-text="Stale means unavailable" data-text-max-width="256.0" x="980.0" y="390.0" text-anchor="middle" class="node-title" font-size="18">Stale means unavailable</text>
+  <text data-text-role="subtitle" data-full-text="reason + run index-search; never short" data-text-max-width="256.0" x="980.0" y="412.0" text-anchor="middle" class="node-sub" font-size="11.6">reason + run index-search; never short</text>
+  </g>
+  <g id="node-citation-note" data-graph-role="node" data-node-id="citation-note" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="60,550,280,640">
+  <rect x="60.0" y="550.0" width="220.0" height="90.0" rx="14.0" fill="#fafafa" stroke="#ededed" stroke-width="1.8" />
+  <text data-text-role="title" data-full-text="Citation rule" data-text-max-width="196.0" x="170.0" y="595.0" text-anchor="middle" class="node-title" font-size="18">Citation rule</text>
+  <text data-text-role="subtitle" data-full-text="snippet locates; page verifies" data-text-max-width="196.0" x="170.0" y="617.0" text-anchor="middle" class="node-sub" font-size="11.75">snippet locates; page verifies</text>
+  </g>
+  <g id="node-search" data-graph-role="node" data-node-id="search" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="320,550,560,640">
+  <rect x="320.0" y="550.0" width="240.0" height="90.0" rx="14.0" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.8" />
+  <text data-text-role="title" data-full-text="CLI search" data-text-max-width="216.0" x="440.0" y="595.0" text-anchor="middle" class="node-title" font-size="18">CLI search</text>
+  <text data-text-role="subtitle" data-full-text="filters · top-k · --json" data-text-max-width="216.0" x="440.0" y="617.0" text-anchor="middle" class="node-sub" font-size="12">filters · top-k · --json</text>
+  </g>
+  <g id="node-explore" data-graph-role="node" data-node-id="explore" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="600,550,840,640">
+  <rect x="600.0" y="550.0" width="240.0" height="90.0" rx="14.0" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.8" />
+  <text data-text-role="title" data-full-text="Browser explorer" data-text-max-width="216.0" x="720.0" y="595.0" text-anchor="middle" class="node-title" font-size="18">Browser explorer</text>
+  <text data-text-role="subtitle" data-full-text="read-only over declared outputs" data-text-max-width="216.0" x="720.0" y="617.0" text-anchor="middle" class="node-sub" font-size="11.9">read-only over declared outputs</text>
+  </g>
+  <g id="node-ask" data-graph-role="node" data-node-id="ask" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="880,550,1120,640">
+  <rect x="880.0" y="550.0" width="240.0" height="90.0" rx="14.0" fill="#ffffff" stroke="#10a37f" stroke-width="1.8" />
+  <text data-text-role="title" data-full-text="Agent ask" data-text-max-width="216.0" x="1000.0" y="595.0" text-anchor="middle" class="node-title" font-size="18">Agent ask</text>
+  <text data-text-role="subtitle" data-full-text="2 tools · 6 calls · verified citations" data-text-max-width="216.0" x="1000.0" y="617.0" text-anchor="middle" class="node-sub" font-size="10.7">2 tools · 6 calls · verified citations</text>
+  </g>
+  <g id="to-index-label" data-graph-role="label" data-owner="to-index" data-graph-bounds="213.24,290,269,310">
+  <rect x="213.24" y="290.0" width="55.76" height="20" rx="6" fill="#ffffff" opacity="0.96" />
+  <text x="241.12" y="304.0" text-anchor="middle" class="arrow-label">chunks</text>
+  </g>
+  <g id="indexed-label" data-graph-role="label" data-owner="indexed" data-graph-bounds="397.16,355,442.84,375">
+  <rect x="397.16" y="355.0" width="45.68" height="20" rx="6" fill="#ffffff" opacity="0.96" />
+  <text x="420.0" y="369.0" text-anchor="middle" class="arrow-label">index</text>
+  </g>
+  <g id="to-search-label" data-graph-role="label" data-owner="to-search" data-graph-bounds="392.28,472,437,492">
+  <rect x="392.28" y="472.0" width="44.72" height="20" rx="6" fill="#ffffff" opacity="0.96" />
+  <text x="414.64" y="486.0" text-anchor="middle" class="arrow-label">BM25</text>
+  </g>
+  <g id="exact-page-label" data-graph-role="label" data-owner="exact-page" data-graph-bounds="869.76,173,974.24,193">
+  <rect x="869.76" y="173.0" width="104.48" height="20" rx="6" fill="#ffffff" opacity="0.96" />
+  <text x="922.0" y="187.0" text-anchor="middle" class="arrow-label">read_pdf_page</text>
+  </g>
+  <g id="legend" data-graph-role="legend">
+    <rect id="legend-zone" data-graph-role="reserved" data-reserved-kind="legend" x="40" y="684" width="287.28" height="46" rx="10" fill="none" stroke="none" />
+    <line data-graph-role="decoration" x1="50.0" y1="698.0" x2="80.0" y2="698.0" stroke="#0f766e" stroke-width="2.0" marker-end="url(#arrowB)" />
+    <text data-graph-role="decoration" x="90.0" y="702.0" class="legend">index build</text>
+    <line data-graph-role="decoration" x1="182.56" y1="698.0" x2="212.56" y2="698.0" stroke="#0891b2" stroke-width="2.0" marker-end="url(#arrowC)" />
+    <text data-graph-role="decoration" x="222.56" y="702.0" class="legend">evidence read</text>
+  </g>
+  <g id="footer" data-graph-role="reserved" data-graph-bounds="48,736,846,752">
+  <text x="48.0" y="748.0" class="footnote">Style 7 · OpenAI Official · backend: SQLite FTS5 (ADR-0008) · sources: application/search.py, application/agent.py</text>
+  </g>
+</svg></div>
+    <p class="sr-only">Keyboard shortcuts: plus and minus zoom, zero resets, T toggles theme, S exports.</p>
+  </main>
+  <script>
+  (() => {
+    'use strict';
+    const metadata = {"slug": "04-search-evidence"};
+    const stage = document.getElementById('stage');
+    const canvas = document.getElementById('canvas');
+    const svg = canvas.querySelector('svg');
+    const status = document.getElementById('status');
+    const scaleSelect = document.getElementById('scale');
+    const formatSelect = document.getElementById('format');
+    let view = { x:0, y:0, scale:1 };
+    let drag = null;
+    const clamp = value => Math.max(.2, Math.min(8, value));
+    const render = () => {
+      canvas.style.transform = `translate(${view.x}px,${view.y}px) scale(${view.scale})`;
+      status.textContent = `${Math.round(view.scale * 100)}%`;
+    };
+    const zoom = (factor, originX=stage.clientWidth/2, originY=stage.clientHeight/2) => {
+      const next = clamp(view.scale * factor);
+      const ratio = next / view.scale;
+      view.x = originX - (originX - view.x) * ratio;
+      view.y = originY - (originY - view.y) * ratio;
+      view.scale = next; render();
+    };
+    const reset = () => { view = {x:0,y:0,scale:1}; render(); };
+    stage.addEventListener('wheel', event => { event.preventDefault(); const rect=stage.getBoundingClientRect(); zoom(event.deltaY < 0 ? 1.12 : .89, event.clientX-rect.left, event.clientY-rect.top); }, {passive:false});
+    stage.addEventListener('pointerdown', event => { drag={id:event.pointerId,x:event.clientX,y:event.clientY,vx:view.x,vy:view.y}; stage.setPointerCapture(event.pointerId); stage.classList.add('dragging'); });
+    stage.addEventListener('pointermove', event => { if(!drag||drag.id!==event.pointerId)return; view.x=drag.vx+event.clientX-drag.x; view.y=drag.vy+event.clientY-drag.y; render(); });
+    const endDrag = () => { drag=null; stage.classList.remove('dragging'); };
+    stage.addEventListener('pointerup', endDrag); stage.addEventListener('pointercancel', endDrag);
+    const source = () => new XMLSerializer().serializeToString(svg);
+    const saveBlob = (blob, extension) => { const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`${(metadata.slug||'fireworks-tech-graph')}.${extension}`; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000); };
+    const copySource = async () => {
+      const value=source();
+      try { await navigator.clipboard.writeText(value); status.textContent='Copied'; return; } catch {}
+      const area=document.createElement('textarea'); area.value=value; area.setAttribute('readonly',''); area.style.position='fixed'; area.style.opacity='0'; document.body.appendChild(area); area.select();
+      status.textContent=document.execCommand('copy')?'Copied':'Copy failed'; area.remove();
+    };
+    const exportDiagram = async () => {
+      const format = formatSelect.value.toLowerCase();
+      if(format==='svg') { saveBlob(new Blob([source()],{type:'image/svg+xml;charset=utf-8'}),'svg'); return; }
+      const scale = Math.max(1,Math.min(4,Number(scaleSelect.value)||2));
+      const box = svg.viewBox.baseVal; const width=box.width||svg.clientWidth; const height=box.height||svg.clientHeight;
+      const image = new Image(); const url=URL.createObjectURL(new Blob([source()],{type:'image/svg+xml'}));
+      await new Promise((resolve,reject)=>{ image.onload=resolve; image.onerror=reject; image.src=url; });
+      const raster=document.createElement('canvas'); raster.width=Math.round(width*scale); raster.height=Math.round(height*scale);
+      const ctx=raster.getContext('2d'); if(format==='jpeg'){ctx.fillStyle='#ffffff';ctx.fillRect(0,0,raster.width,raster.height);} ctx.drawImage(image,0,0,raster.width,raster.height); URL.revokeObjectURL(url);
+      const mime=format==='jpeg'?'image/jpeg':format==='webp'?'image/webp':'image/png';
+      const blob=await new Promise(resolve=>raster.toBlob(resolve,mime,.94)); if(blob) saveBlob(blob,format==='jpeg'?'jpg':format);
+    };
+    document.querySelector('.toolbar').addEventListener('click', async event => {
+      const action=event.target.closest('[data-action]')?.dataset.action; if(!action)return;
+      if(action==='zoom-in')zoom(1.2); else if(action==='zoom-out')zoom(.83); else if(action==='reset')reset();
+      else if(action==='theme')document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark';
+      else if(action==='download')await exportDiagram();
+      else if(action==='copy') await copySource();
+    });
+    document.addEventListener('keydown', event => {
+      if(event.target.matches('select'))return;
+      if(event.key==='+'||event.key==='=')zoom(1.2); else if(event.key==='-')zoom(.83); else if(event.key==='0'||event.key.toLowerCase()==='r')reset();
+      else if(event.key.toLowerCase()==='t')document.querySelector('[data-action=theme]').click(); else if(event.key.toLowerCase()==='s'){event.preventDefault();exportDiagram();}
+    });
+    render();
+  })();
+  </script>
+</body>
+</html>
