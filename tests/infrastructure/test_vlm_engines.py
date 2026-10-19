@@ -117,6 +117,26 @@ def _two_page_pdf() -> bytes:
     return content
 
 
+def _pdf_with_pages(*texts: str) -> bytes:
+    """A PDF whose pages carry different text, so no two Documents render the same page image."""
+    document = pymupdf.open()
+    for text in texts:
+        page = document.new_page(width=595, height=842)
+        page.insert_text((72, 120), text)
+    content = document.tobytes()
+    document.close()
+    return content
+
+
+def _page_images(content: bytes, dpi: int = 72) -> list[bytes]:
+    """Render a Document's pages ahead of its read, so a test can tell requests apart by their image.
+
+    Rendering is deterministic, so the image a read sends is byte-for-byte the one rendered here.
+    """
+    with PdfDocument(content) as pdf:
+        return [pdf.render_page_png(number, dpi=dpi) for number in range(1, pdf.page_count + 1)]
+
+
 @pytest.fixture
 def paddle_server():
     server = StubModelServer({"choices": [{"message": {"role": "assistant", "content": "OCR:"}}]})
@@ -165,8 +185,12 @@ class GatedTransport(VlmChatTransport):
         self.threads: list[threading.Thread] = []
         self.failures: dict[int, Exception] = {}
 
+    def page_number_of(self, image_png: bytes) -> int:
+        """The page a request belongs to, read from the image the engine rendered."""
+        return next(page for _, page, image in list(self._renders) if image == image_png)
+
     def complete_with_page_image(self, prompt: str, image_png: bytes) -> str:
-        page_number = next(page for _, page, image in list(self._renders) if image == image_png)
+        page_number = self.page_number_of(image_png)
         self.threads.append(threading.current_thread())
         self._gate(page_number)
         failure = self.failures.get(page_number)
@@ -190,6 +214,52 @@ class CountingTransport(GatedTransport):
             self.peak = max(self.peak, self.running)
         try:
             return super().complete_with_page_image(prompt, image_png)
+        finally:
+            with self._lock:
+                self.running -= 1
+
+
+class SharedPoolTransport(GatedTransport):
+    """Requests from different Documents share one pool, so they are told apart by their image.
+
+    Page numbers restart with every Document, so a gate keyed on the page number cannot tell one
+    Document's page 1 from another's; the rendered bytes can. A request is recorded as sent on entry,
+    before any gate: the pool sent it whether or not it has reached the model yet.
+    """
+
+    def __init__(
+        self,
+        renders: list[RenderRecord],
+        held: dict[bytes, threading.Event],
+        failing: bytes,
+    ) -> None:
+        super().__init__(renders, gate=lambda _page_number: None)
+        self._held = held
+        self._failing = failing
+        self.sent: list[bytes] = []
+        self.running = 0
+        self._lock = threading.Lock()
+        self._sent = threading.Condition(self._lock)
+
+    def wait_until_sent(self, count: int, timeout: float = 30) -> None:
+        """Block until the pool has sent this many requests, then return; never sleep and hope."""
+        with self._sent:
+            arrived = self._sent.wait_for(lambda: len(self.sent) >= count, timeout=timeout)
+        if not arrived:
+            raise AssertionError(f"only {len(self.sent)} page requests reached the pool, expected {count}")
+
+    def complete_with_page_image(self, prompt: str, image_png: bytes) -> str:
+        with self._sent:
+            self.sent.append(image_png)
+            self.running += 1
+            self._sent.notify_all()
+        try:
+            gate = self._held.get(image_png)
+            if gate is not None and not gate.wait(timeout=30):
+                raise AssertionError("a page request the test gated was never released")
+            if image_png == self._failing:
+                raise VlmTransportError("the model server answered 500 for this page")
+            return f"page {self.page_number_of(image_png)} text"
         finally:
             with self._lock:
                 self.running -= 1
@@ -351,6 +421,86 @@ def test_a_page_that_fails_fails_its_document_and_leaves_the_run_s_bound_intact(
     assert [(page.number, page.text) for page in extracted.pages] == [(1, "page 1 text"), (2, "page 2 text")]
     assert transport.running == 0, "the second read left a page request running"
     assert transport.peak == 2, f"{transport.peak} requests were ever in flight at once; the run's bound was two"
+
+
+def test_a_failed_read_cancels_the_page_requests_it_has_already_queued(renders, monkeypatch) -> None:
+    """A read whose page fails gives up the requests still waiting behind it, and only those.
+
+    Two Documents share one Engine and its run-wide bound of two. Document X's two pages hold both
+    workers; Document A's two pages are queued behind them and have not started. Releasing one of X's
+    gates frees a worker, which takes A's page 1 (the pool is FIFO), and that page fails. A's page 2 is
+    still queued, and the failed read must cancel it rather than let the pool spend a request on a
+    Document that has already failed: the transport never sees A's page 2, before or after the rest of
+    the run drains. A request a worker has already started is not recalled, so this test keeps the worker
+    freed by the failure behind a call the test holds until the read has cancelled -- otherwise the
+    pool's own FIFO dequeue would race the cancellation and the assertion would depend on luck.
+    """
+    x_content = _pdf_with_pages("X page 1", "X page 2")
+    a_content = _pdf_with_pages("A page 1", "A page 2")
+    x_images = _page_images(x_content)
+    a_images = _page_images(a_content)
+
+    release = {image: threading.Event() for image in x_images}
+    transport = SharedPoolTransport(renders, held=release, failing=a_images[0])
+    engine = PaddleOcrVlEngine(transport=transport, dpi=72, concurrency=2)
+
+    extracted: dict[str, list] = {"x": [], "a": []}
+    failures: dict[str, BaseException] = {}
+
+    def read(name: str, content: bytes) -> None:
+        try:
+            extracted[name].append(engine.extract(Document(name=f"https://a.example/{name}.pdf", content=content)))
+        except BaseException as error:
+            failures[name] = error
+
+    # Hold the worker that the failure frees until the read has cancelled, so page 2 cannot be started
+    # by the pool's FIFO dequeue before the cancellation runs. The event is released in `finally`.
+    cancel_checked = threading.Event()
+    a_thread = threading.Thread(target=read, args=("a", a_content))
+    a_submitted: list = []
+    submitted = threading.Condition()
+    original_submit = engine.calls.submit
+
+    def recording_submit(call, *args, **kwargs):
+        future = original_submit(call, *args, **kwargs)
+        if threading.current_thread() is a_thread and args[1] in a_images:
+            with submitted:
+                a_submitted.append(future)
+                submitted.notify_all()
+            if len(a_submitted) == 1:
+                # Stand in for whatever page request was queued between A's two pages: it keeps the
+                # freed worker busy while A's reading thread collects the failure and cancels.
+                original_submit(cancel_checked.wait, 30)
+        return future
+
+    monkeypatch.setattr(engine.calls, "submit", recording_submit)
+
+    x_thread = threading.Thread(target=read, args=("x", x_content))
+    try:
+        x_thread.start()
+        transport.wait_until_sent(2)
+        a_thread.start()
+        with submitted:
+            queued = submitted.wait_for(lambda: len(a_submitted) == 2, timeout=30)
+        assert queued, "Document A never queued both of its page requests"
+
+        release[x_images[0]].set()
+        a_thread.join(timeout=30)
+        assert not a_thread.is_alive(), "Document A's failed read never returned"
+        assert isinstance(failures.get("a"), VlmTransportError), failures.get("a")
+        assert "500" in str(failures["a"])
+        assert a_images[1] not in transport.sent, "the failed read sent the page request it had queued"
+    finally:
+        cancel_checked.set()
+        for gate in release.values():
+            gate.set()
+
+    x_thread.join(timeout=30)
+    assert not x_thread.is_alive(), "Document X's read never returned"
+    assert failures.get("x") is None, failures.get("x")
+    assert [(page.number, page.text) for page in extracted["x"][0].pages] == [(1, "page 1 text"), (2, "page 2 text")]
+    assert a_images[1] not in transport.sent, "the queued page request was sent once the run drained"
+    assert transport.running == 0, "a page request was still running when both reads finished"
 
 
 def test_a_concurrency_of_one_still_reads_every_page_in_page_number_order(renders) -> None:

@@ -74,6 +74,11 @@ class PaddleOcrVlEngine:
         Pages are collected oldest first, never in completion order, so their numbers are their own. The
         pool the requests go to belongs to the Engine rather than to this call, so Documents waiting on
         each other share one bound instead of each bringing its own (ADR-0010 step 3).
+
+        A page that fails fails this read, and every page request the read has queued but not started is
+        cancelled on the way out, so the run's bound is not spent on a Document that has already failed.
+        A request a worker has already started cannot be cancelled: it runs to completion and is not
+        recalled.
         """
         pages: dict[int, PageText] = {}
         in_flight: deque[tuple[int, Future[str]]] = deque()
@@ -85,15 +90,23 @@ class PaddleOcrVlEngine:
             pages[page_number] = PageText(number=page_number, text=strip_model_preamble(answer, OCR_PROMPT))
 
         with PdfDocument(document.content) as pdf:
-            for page_number in range(1, pdf.page_count + 1):
-                while len(in_flight) >= self.calls.limit:  # bound the images held for in-flight requests
+            try:
+                for page_number in range(1, pdf.page_count + 1):
+                    while len(in_flight) >= self.calls.limit:  # bound the images held for in-flight requests
+                        collect(in_flight.popleft())
+                    image = pdf.render_page_png(page_number, dpi=self._dpi)
+                    in_flight.append(
+                        (page_number, self.calls.submit(self._transport.complete_with_page_image, OCR_PROMPT, image))
+                    )
+                while in_flight:
                     collect(in_flight.popleft())
-                image = pdf.render_page_png(page_number, dpi=self._dpi)
-                in_flight.append(
-                    (page_number, self.calls.submit(self._transport.complete_with_page_image, OCR_PROMPT, image))
-                )
-            while in_flight:
-                collect(in_flight.popleft())
+            except BaseException:
+                # A failed page must not keep paying for the pages waiting behind it, nor hold the run's
+                # bound while they wait: give them up on the way out. No waiting -- a request a worker has
+                # already started cannot be cancelled and is left to finish on its own.
+                for _, queued in in_flight:
+                    queued.cancel()
+                raise
         return ExtractedDocument(pages=tuple(pages[number] for number in sorted(pages)), engine=self._identity)
 
 

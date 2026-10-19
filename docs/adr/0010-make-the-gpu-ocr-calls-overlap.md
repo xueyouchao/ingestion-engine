@@ -103,8 +103,9 @@ surface, against ADR-0009's one-lease-per-run).
   bytes, same identity" no longer promises byte-identical text across a memo reset. Keys and identity are
   unaffected; the first read is still the one the memo remembers.
 * **Failure is still per document.** A page that fails fails its document, not its siblings -- the same
-  contract `read_document` already has -- and the run's bound carries on: the permits that read held are
-  free again (and the pool slots it was queued on), while a request a worker has already started is not
-  recalled.
+  contract `read_document` already has -- and the run's bound carries on: the read's page requests that
+  are still waiting are cancelled when a page fails, so the bound they held goes back to the other
+  documents instead of being spent on one that has already failed. A request a worker has already
+  started cannot be cancelled: it runs to completion and is not recalled.
 * **A regression guard, not a comment.** The test uses an engine with a barrier and asserts the reading
   pass really overlaps, so the serialization cannot come back unnoticed.
