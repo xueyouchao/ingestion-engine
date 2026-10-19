@@ -59,6 +59,71 @@ WORKER_DETAIL = (
 
 PROVIDER_MODAL = "modal"
 
+# --- The deployed app: one container, scale to zero, one bearer (ADR-0012) -------------------------
+#
+# The demo does not rent a Sandbox per run. It deploys the same pinned image as a Modal Server, capped at
+# one container, scaling to zero between visitors, and authenticated with a bearer the app itself checks
+# because the pipeline's adapter cannot send Modal's own proxy headers (ADR-0012). The pins live here
+# beside the batch worker's, so the two postures cannot drift into two different engines. Nothing in this
+# block names an address or a token: the URL belongs to Modal and the bearer belongs in the Secret.
+DEPLOYED_APP_NAME = "finepdfs-demo-ocr"
+DEPLOYED_SERVER_NAME = "OcrWorkerServer"
+DEPLOYED_SECRET_NAME = "finepdfs-demo-ocr-bearer"
+# The Secret carries one key, and the launcher reads that key by this name; the test pins the two modules
+# to the same string, because a Secret injected under another name is a server that answers without a bearer.
+DEPLOYED_SECRET_VARIABLE = "PADDLEOCR_VL_API_KEY"
+DEPLOYED_GPU = "L4"
+# One GPU as the ceiling and nothing at rest. The floor is what the Warm Control moves, without a redeploy.
+DEPLOYED_MAX_CONTAINERS = 1
+DEPLOYED_MIN_CONTAINERS = 0
+WARM_FLOOR_CONTAINERS = 1
+# Low minutes, generous enough that a visitor who reloads hits the same container, short enough that an
+# idle demo holds no GPU for long.
+DEPLOYED_SCALEDOWN_WINDOW = 180
+# The first whole Sandbox run took 450 s including the first weights download (ADR-0009), so a cold start
+# of a deployed container that must load weights can plausibly take several minutes. This bounds it.
+DEPLOYED_STARTUP_TIMEOUT = 1200
+# Modal gives the exit hook this long to stop vLLM before the container goes away.
+DEPLOYED_EXIT_GRACE_PERIOD = 60
+
+# Modal's published L4 price, observed on 2026-10-19. The source and the date are pins too: the Warm
+# Control's number and the runbook's number have to come from the same observation, not from memory.
+GPU_RATE_PER_SECOND_USD = 0.000222
+GPU_RATE_SOURCE = "https://modal.com/pricing"
+GPU_RATE_OBSERVED = "2026-10-19"
+
+
+@dataclass(frozen=True, slots=True)
+class WarmFloorCost:
+    """What a held-warm floor costs: computed here so the command and the runbook cannot disagree.
+
+    ``containers`` is the floor, not the ceiling: zero costs nothing, and one is Modal's published
+    per-second L4 rate for every second the container exists. The two formatters are the only spellings
+    of the number an operator should see.
+    """
+
+    containers: int
+    per_minute_usd: float
+    per_hour_usd: float
+
+    def per_minute(self) -> str:
+        return f"${self.per_minute_usd:,.4f}"
+
+    def per_hour(self) -> str:
+        return f"${self.per_hour_usd:,.2f}"
+
+
+def warm_floor_cost(containers: int = WARM_FLOOR_CONTAINERS) -> WarmFloorCost:
+    """The per-minute and per-hour cost of keeping ``containers`` warm, at the pinned L4 rate."""
+    if containers < 0:
+        raise WorkerContractError(f"a warm floor cannot be negative, got {containers}")
+    per_second = GPU_RATE_PER_SECOND_USD * containers
+    return WarmFloorCost(
+        containers=containers,
+        per_minute_usd=per_second * 60,
+        per_hour_usd=per_second * 3600,
+    )
+
 # One lease, one state file. The provider mints an identity per lease and passes it to the start and the
 # stop command alike (``FINEPDFS_GPU_LEASE_ID``); the state file is named after it, so two runs record two
 # workers and neither can find, overwrite or terminate the other's (ADR-0007).

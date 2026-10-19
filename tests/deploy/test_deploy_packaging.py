@@ -57,7 +57,7 @@ def test_no_core_module_imports_a_gpu_vendor_sdk() -> None:
 def test_the_vendor_scripts_import_modal_lazily() -> None:
     """The offline suite runs without Modal installed because the scripts import it inside a call."""
     offenders = []
-    for name in ("start.py", "stop.py"):
+    for name in ("start.py", "stop.py", "serve.py", "warm.py"):
         path = ROOT / "deploy" / "modal" / name
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in tree.body:
