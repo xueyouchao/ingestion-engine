@@ -632,6 +632,18 @@ def test_a_worker_that_cannot_be_entered_is_an_unavailable_refusal_in_its_own_wo
     assert fakes.worker.exited == 0, "a worker that was never entered is not given back"
 
 
+def test_a_worker_that_never_starts_charges_neither_the_window_nor_the_budget() -> None:
+    """The gates admitted it, but nothing was read: a start command that keeps failing must cost nothing."""
+    demo, fakes = _demo(SCANNED, worker_failure=RuntimeError("modal: the start command exited 1"))
+
+    outcome = demo.read(b"%PDF scanned", "10.0.0.1", lambda stage: None)
+
+    assert isinstance(outcome, Refusal)
+    assert outcome.kind == "unavailable"
+    assert fakes.ledger.reads == [], "a read that never started is not a read against the visitor"
+    assert fakes.ledger.charged == 0, "no page reached the GPU, so no page is charged to the day"
+
+
 def test_a_release_that_fails_after_a_reading_keeps_the_reading(caplog: Any) -> None:
     """The visitor's text is real; a stop command that failed is the operator's log line (ADR-0007)."""
     demo, fakes = _demo(SCANNED, release_failure=RuntimeError("the stop command timed out"))

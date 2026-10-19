@@ -284,8 +284,8 @@ function renderTimeline(stage, outcome, warmMs) {
     // A finished job marks the stages it really reached: a native read never warms anything, and saying
     // otherwise on the page would claim a wait that did not happen.
     if (done) mark = seen ? "done" : "skipped";
-    else if (index < current - 1 || seen) mark = "done";
     else if (index === current - 1) mark = "active";
+    else if (index < current - 1 || seen) mark = "done";
     item.dataset.state = mark;
   }
   if (outcome === "read") {

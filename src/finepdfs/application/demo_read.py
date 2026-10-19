@@ -172,15 +172,11 @@ class DemoRead:
         closed = _closed(self._gates.decide(page_count, usage, ocr_pages=ocr_pages), plan, self._policy.routing)
         if closed is not None:
             return closed
-        self._ledger.record_read(client)
+
         if ocr_pages is not None:
-            # Charged on admission, not on success: an admitted read spends the GPU whether or not it
-            # finishes, and nothing here can give a charge back.
-            self._ledger.charge_ocr_pages(ocr_pages)
+            return self._read_ocr(plan, content, name, on_stage, started, client, ocr_pages)
 
-        if plan.decision.needs_ocr:
-            return self._read_ocr(plan, content, name, on_stage, started)
-
+        self._ledger.record_read(client)
         on_stage("reading")
         try:
             extracted = self._extraction.extract_with(Document(name=name, content=content), plan.engine_name)
@@ -203,6 +199,8 @@ class DemoRead:
         name: str,
         on_stage: Callable[[ReadingStage], None],
         started: float,
+        client: str,
+        pages: int,
     ) -> ReadingOutcome:
         """The OCR lane, and the only place a worker is entered: admitted, then warmed, then read.
 
@@ -210,6 +208,12 @@ class DemoRead:
         kind ``unavailable`` -- no gate closed and no lane ran -- while a worker that came up and then
         failed to read is a Failed Reading. A release that fails after the answer is the operator's log
         line, not the visitor's: the text is real either way (ADR-0007).
+
+        The two charges are committed only once the worker exists. Charging on admission and not on
+        success is deliberate -- an admitted read spends the GPU whether or not it finishes -- but a read
+        whose worker never started read nothing and spent nothing, and a refusal charges nothing: a start
+        command that keeps failing must not eat a visitor's window or the day's budget. Between the
+        decision and the charge nothing else can interleave, because the queue runs one Reading at a time.
         """
         try:
             lease = self._worker()  # a fresh context manager: a worker belongs to one Reading
@@ -223,6 +227,8 @@ class DemoRead:
             )
         outcome: ReadingOutcome | None = None
         try:
+            self._ledger.record_read(client)
+            self._ledger.charge_ocr_pages(pages)
             try:
                 warm_ms = self._warm(on_stage, endpoint)
             except (OcrEndpointUnavailable, _WarmTimeout) as fault:

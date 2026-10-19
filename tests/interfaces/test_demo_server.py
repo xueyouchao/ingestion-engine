@@ -293,6 +293,20 @@ def _upload(base: str, body: bytes = b"%PDF-1.7 uploaded", **headers: str) -> di
     return _wait_for_job(base, answer["job"])
 
 
+def test_the_timeline_shows_the_current_stage_as_active_not_complete() -> None:
+    """The page marks the stage it has reached as active, whatever it had seen before.
+
+    ``seen`` already holds the current stage when the marks are computed, so a branch that consults it
+    first would paint a long warm-up as finished while the server is still waiting for the worker.
+    """
+    html = demo_page.DEMO_HTML
+
+    active = html.index('else if (index === current - 1) mark = "active";')
+    seen_complete = html.index('else if (index < current - 1 || seen) mark = "done";')
+
+    assert active < seen_complete
+
+
 def test_the_page_states_where_the_bytes_go_and_what_is_kept_before_the_upload() -> None:
     app = _app(
         FakeProbe(HEALTHY),

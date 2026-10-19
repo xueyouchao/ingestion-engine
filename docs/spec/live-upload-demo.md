@@ -161,7 +161,9 @@ sentence a visitor can read. The counters live behind a **Gate Ledger** port in 
 implemented in memory by an adapter under `infrastructure/demo/`. The ledger owns the clock boundary: a
 read enters the current window, OCR pages are charged to the current UTC day, and the day rolls over
 without a background task. Charging happens when the work is admitted, never on successful completion: a
-read that fails still spent the GPU.
+read that fails still spent the GPU. It happens only once the OCR worker exists, though -- a read whose
+worker would not start read nothing and spent nothing, and a refusal charges nothing, so a start command
+that keeps failing can eat neither a visitor's window nor the day's budget.
 
 ### The Reading Queue is the demo server's, and it is bounded
 
