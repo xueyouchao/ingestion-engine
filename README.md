@@ -272,6 +272,7 @@ nothing was published, so an operator or a CI can tell "engine is down" from "no
 | `FINEPDFS_ENGINE_COMMAND` | -- | local command for Docling, MinerU or PaddleOCR-VL |
 | `FINEPDFS_ENGINE_WORK_DIR` | a fresh temporary directory | where a command-line engine may keep scratch files |
 | `FINEPDFS_ENGINE_DPI` | `200` | page render resolution for vision models |
+| `FINEPDFS_ENGINE_CONCURRENCY` | `6` | engine calls in flight for the whole run -- one page request, or one local `doc_parser` command -- never a permit a Document takes (ADR-0010) |
 | `FINEPDFS_ENGINE_TIMEOUT` | `300` | seconds per model request, and per command-line engine run |
 | `FINEPDFS_ENGINE_DETAIL` | -- | the deployment detail in the engine's memo key, for a worker whose address changes every run (ADR-0007) |
 | `FINEPDFS_MIN_CHARACTERS_PER_PAGE` | `200` | routing floor |
