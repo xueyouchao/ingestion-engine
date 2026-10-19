@@ -99,7 +99,7 @@ reads declared outputs and the corpus PDFs; it never writes into a state.
 
 - Writes `index.html`, `bundle.json` and `images/` -- one render per PDF digest and page number, shared
   by every reading, because a render is of the PDF and not of the engine. The pinned corpus is 313
-  renders / 18.19 MiB of JPEG at 72 dpi beside a 3.84 MiB page.
+  renders / 18.19 MiB of JPEG at 72 dpi beside a 3.67 MiB page (21.9 MiB in all).
 - `--inline` bakes those renders into the page instead, producing one self-contained file (~28 MiB here).
 - `--check` reports whether the bundle still mirrors what the flow declared, per state, from a sha256
   over every declared file the page copies a fact from: the run summary, records, pages, chunks and
@@ -135,7 +135,7 @@ Dependencies point inward. The domain knows nothing about HTTP, files or CocoInd
 |---|---|---|
 | `domain/` | value objects and pure policies | `CrawlRecord`, `TextLayerQuality`, `OcrRoutingPolicy`, `CleaningRules`, `LanguagePolicy`, `PublishPolicy`, `plan_deduplication` |
 | `application/` | the use cases, expressed against ports | `ExtractionStep` (route + read), `CurationStep` (clean + judge), `CurateDocument` |
-| `infrastructure/` | adapters | `commoncrawl/`, `engines/`, `language/`, `publishing/`, `corpus/`, `cocoindex/`, `compute/` |
+| `infrastructure/` | adapters | `commoncrawl/`, `engines/`, `language/`, `publishing/`, `search/`, `llm/`, `corpus/`, `cocoindex/`, `compute/` |
 | `interfaces/` | how it is driven | `interfaces/cli.py`, `main.py` |
 
 Seams you can replace without touching the pipeline:
@@ -147,6 +147,8 @@ Seams you can replace without touching the pipeline:
 | `OcrEngine` | PyMuPDF, Docling, PaddleOCR-VL, MinerU | counting engines |
 | `LanguageIdentifier` | `ScriptLanguageIdentifier` (script tags, nothing installed) or `FastTextLanguageIdentifier` (language tags, needs a model) | a fixed tag |
 | `GpuProvider` | `none`, `static`, `command` (`infrastructure/compute/`) | a scripted command |
+| `SearchIndex` | `SqliteFtsSearchIndex` (SQLite FTS5, `infrastructure/search/`) | a hand-written recording index |
+| `DeclaredPageReader` | `DiskPageReader` (the declared pages, records and exclusions) | a temporary output directory |
 
 ## Engines
 
@@ -316,6 +318,7 @@ nothing was published, so an operator or a CI can tell "engine is down" from "no
 | `FINEPDFS_GPU_STOP_COMMAND` | -- | with `command`: gives the worker back when the run ends |
 | `FINEPDFS_GPU_TIMEOUT` | `1800` | seconds allowed to start or stop a worker |
 | `FINEPDFS_SEARCH_INDEX` | `out/search.db` | the local full-text index `finepdfs search`, `index-search`, `explore` and `ask` read; one resolver (`interfaces/search_paths.py`) applies the same precedence everywhere: `--index`, then this variable, then `<out>/search.db` |
+| `FINEPDFS_ASK_API_KEY` | -- | bearer token `finepdfs ask` sends to the chat endpoint; `--api-key` overrides it, and the environment is preferred so the token is not printed |
 
 ## Output layout
 
@@ -383,6 +386,39 @@ explorer cannot rebuild a database or become a second writer; only `index-search
 [ADR-0008](docs/adr/0008-one-local-search-backend.md) and the
 [demo runbook](docs/demo/pdf-demo-runbook.md#search-accepted-evidence-the-local-fallback).
 
+## Ask over accepted evidence (P3)
+
+`finepdfs ask` puts a tool-calling model in front of the same accepted evidence the browser reads. Two
+application functions are exposed as tools -- `search_pdfs(query, filters, top_k)` over the local index,
+and `read_pdf_page(doc_id, page_number)` for one original page -- with six tool executions per question
+by default (`--max-tool-calls`), every call and result printed. The citation contract is enforced,
+not requested: an answer may cite only a page `read_pdf_page` returned as accepted, a search snippet
+never makes a page citable, a prose "page 37" is not a citation, and an answer with no verified
+citation becomes `INSUFFICIENT EVIDENCE` after one bounded repair turn.
+
+~~~~bash
+# the index must exist first, exactly as for search and the explorer
+.venv/bin/finepdfs index-search --out out --index out/search.db
+
+.venv/bin/finepdfs ask --out out --index out/search.db \
+  --question "What rate of wind-speed increase over 24 hours counts as rapid intensification?" \
+  --base-url 'http://[::1]:11434/v1' --model deepseek-v4.1-flash:cloud
+
+# add --json to the same command for the answer, its verified citations and the full tool trace
+~~~~
+
+`--base-url` is any OpenAI-compatible chat endpoint and `--model` any model that actually emits tool
+calls; a model list is not evidence of that. `--api-key` is a bearer token, and `FINEPDFS_ASK_API_KEY`
+is the same token from the environment, so it is never printed. `ask` exits 2 when the index is absent
+or a flag is invalid, and 3 when the endpoint cannot answer. The observed runs --
+`deepseek-v4.1-flash:cloud` over Ollama, five answerable questions each citing the page that states the
+answer and one unanswerable control returning `INSUFFICIENT EVIDENCE` -- are in
+[`docs/demo/agent-evidence.md`](docs/demo/agent-evidence.md); the questions are
+[`docs/demo/agent-questions.md`](docs/demo/agent-questions.md) and the mechanism is the
+[runbook's agent section](docs/demo/pdf-demo-runbook.md#agent-tools-search-and-inspect-accepted-pages).
+That evidence is the text-layer run (15 Documents / 590 chunks), not the OCR reading, and the questions
+avoid the scans: what is verified is the tool round-trip and the citation rule, not retrieval quality.
+
 ## Two things worth knowing before you run it
 
 *The state database is disposable.* `cocoindex.db` holds the memo table and the target state. Deleting
@@ -432,16 +468,23 @@ this pipeline is aimed at corpora of thousands of documents rather than the whol
   newsletter, which the script adapter calls `Latn` like everything else. The real model is also
   exercised by a marked test that skips cleanly when it is not on the machine, and the rest of the
   adapter is tested against a hand-written labeller, so the everyday suite needs no model and no extra.
+* **Agent tools**: `finepdfs ask` ran twice per question against a real OpenAI-compatible endpoint
+  (`deepseek-v4.1-flash:cloud` over Ollama): five answerable questions each cited the page that states
+  the answer, and the unanswerable control returned `INSUFFICIENT EVIDENCE` with no citation. The
+  contract that strips an unread page, drops a contradictory tail and refuses a prose page number is
+  pinned by tests; answer quality beyond that rule is a model property, not a pipeline guarantee.
 
 ## Documents
 
 * `docs/spec/finepdfs-integration.md` -- the specification this was built from
 * [PDF workflow demo plan](docs/spec/pdf-workflow-demo.md) -- two-day priorities, acceptance criteria and optional search
 * [`docs/demo/pdf-demo-corpus.md`](docs/demo/pdf-demo-corpus.md) -- the pinned 19-record / 18-Document Corpus and what it does not demonstrate
-* [`docs/demo/pdf-demo-runbook.md`](docs/demo/pdf-demo-runbook.md) -- the rehearsal: commands, versions, measured runs, OCR page evidence, mutations and limitations
+* [`docs/demo/pdf-demo-runbook.md`](docs/demo/pdf-demo-runbook.md) -- the rehearsal: commands, versions, measured runs, OCR page evidence, agent tools, mutations and limitations
+* [`docs/demo/agent-evidence.md`](docs/demo/agent-evidence.md) -- the `ask` runs: tool calls, verified citations, timings and what is still a model property
+* [`docs/demo/agent-questions.md`](docs/demo/agent-questions.md) -- the five answerable questions with their known pages and the one unanswerable control
 * [`docs/deploy/modal-worker-runbook.md`](docs/deploy/modal-worker-runbook.md) -- the rented Modal GPU worker: per-run Sandbox, per-lease state, budget gate, and the GPU validation gates
 * [`docs/deploy/modal-worker-evidence.md`](docs/deploy/modal-worker-evidence.md) -- what the four real L4 runs on 2026-10-18 observed, and what remains unverified (failure teardown, OCR quality, RunPod, cost)
 * `docs/GLOSSARY.md` -- the vocabulary, kept deliberately small
-* `docs/adr/0001..0009` -- the decisions, with the alternatives that lost
+* `docs/adr/0001..0012` -- the decisions, with the alternatives that lost
 * `research/` -- the research behind the design, including `paddleocr-vl-mineru-adapters.md`
 * `research/diagrams/` -- validated architecture diagrams of the FinePDFs pipeline
