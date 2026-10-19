@@ -208,7 +208,9 @@ function corpusSearch(query) {
   if (!wanted.length) return [];
   const hits = [];
   for (const entry of state.index) {
-    if (wanted.every((term) => spansOf(entry.text, [term]).length)) hits.push(entry);
+    // Folded once per chunk: the same lowercased copy answers every term.
+    const { lower } = fold(entry.text);
+    if (wanted.every((term) => lower.includes(term))) hits.push(entry);
   }
   return hits;
 }
