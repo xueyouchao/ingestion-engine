@@ -11,7 +11,7 @@ Accepted. Scope: the live upload demo. Batch runs keep ADR-0009's per-run Sandbo
 ADR-0011 makes the pinned Corpus a static page. The live demo is the other shape: a visitor uploads a
 PDF, the routing decision is shown as a decision (lane, reason, the five features behind it), and the
 page comes back read by the lane that decision chose. The first two steps are already a use case -- the
-probe, `OcrRoutingPolicy`, and `CurationService.route/extract` in `application/curate.py` -- so the only
+probe, `OcrRoutingPolicy`, and `ExtractionStep.route/extract` in `application/curate.py` -- so the only
 new question is where the GPU lives when a request arrives that nobody scheduled.
 
 ADR-0009's unit is the wrong one for that. It rents one detached Sandbox per *run*: a start command
@@ -83,10 +83,12 @@ a rented GPU to be read.
 + Demo and batch share one adapter, one set of pins and one identity convention, so a reading taken by
   the demo is comparable with a reading taken by a run.
 + The blast radius is bounded by construction: one container, one request, one budget.
-- The first OCR after idle is slow and the demo will feel it. A Sandbox start here measured 450 s for the
-  very first start including the weights download, and 167 s for a later cold corpus run; the deployed
-  app's cold start with a warm Volume is **not yet measured**, and until it is, the demo cannot claim a
-  latency. That number belongs in the demo's evidence next to ADR-0009's.
+- The first OCR after idle is slow and the demo will feel it, and the size of that wait is not yet known.
+  What was measured here are **whole Sandbox runs**, not startups: 450 s for the first one-page run --
+  start, readiness, reading the page and stopping, including the first download of the weights -- and
+  167 s for a later cold corpus run. Readiness on its own was never timed, and the deployed app's cold
+  start with a warm Volume is not measured at all. Until it is, the demo cannot claim a latency, and the
+  number belongs in the demo's evidence next to ADR-0009's.
 - Two GPU postures now exist -- a Sandbox per run and a deployed app -- with the same image and different
   lifecycles. The pins are shared; the runbooks are not.
 - A public GPU endpoint is an attack surface. It must stay authenticated, be rate-limited, and have its
