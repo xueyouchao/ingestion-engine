@@ -4,7 +4,12 @@ Date: 2026-10-19
 
 ## Status
 
-Proposed
+Accepted. Amended 2026-10-19, on the day it was accepted: **the step-4 measurement has not been taken.**
+`--mm-processor-cache-gb 0` and `--max-num-batched-tokens 16384` are both unchanged, and this ADR does
+not claim they were revisited. Step 4 stands as a measurement still to be taken, and the
+[deploy runbook](../deploy/modal-worker-runbook.md#assumptions-and-what-the-first-paid-runs-did-and-did-not-settle)
+carries the check an operator runs on a real worker and what each answer would mean. What the repo owns
+is that instruction, not a number it did not measure.
 
 ## Context
 
@@ -30,13 +35,16 @@ thread each, so a blocking body freezes every sibling task. ADR-0006 describes t
 
 ## Decision
 
-Fix the shape, and bound the result. Four changes, in this order.
+Fix the shape, and bound the result. Three changes, then a measurement -- and the Status says whether
+the measurement was taken.
 
-1. **A `def`, not an `async def`.** `extract_with_engine` becomes a synchronous processor and
-   `flow.py:145` drops its `await`. `OcrEngine.extract` is already sync (`ports.py:43`), so no engine or
-   port changes and the core gives each document its own thread. The memo scope is unchanged -- one
-   document, keyed on digest, engine name and identity -- but this is **not** free of re-reads; see
-   "One re-read" below.
+1. **A `def`, not an `async def`.** `extract_with_engine` becomes a synchronous processor. The call
+   site keeps its `await`: `coco.use_mount` is `async def` in the pinned CocoIndex
+   (`cocoindex/_internal/api.py`), so `read_document` awaits the mount whatever shape the processor it
+   runs has. What changes is the processor's body, not the call site -- nothing was removed to go
+   looking for. `OcrEngine.extract` is already sync (`ports.py:43`), so no engine or port changes and
+   the core gives each document its own thread. The memo scope is unchanged -- one document, keyed on
+   digest, engine name and identity -- but this is **not** free of re-reads; see "One re-read" below.
 2. **Pages overlap; rendering does not.** `PaddleOcrVlEngine.extract` keeps walking its pages on the
    calling thread and hands only the HTTP request to a bounded `ThreadPoolExecutor`, so page *k*'s request
    is in flight while page *k+1* renders. Reassembly is by `PageText.number`, never completion order.
@@ -47,14 +55,16 @@ Fix the shape, and bound the result. Four changes, in this order.
    with it, not one document's failure. A page rendered on this thread is what keeps the memo unit one
    document.
 3. **One concurrency knob, at the leaf.** `FINEPDFS_ENGINE_CONCURRENCY` (default 6) bounds in-flight
-   **engine calls** -- one remote page request, or one local CLI invocation -- and nothing above them. It
-   is deliberately *not* a permit a document body takes before waiting for its own pages: with N
-   documents holding all N permits and each waiting on work that needs one, the run deadlocks. Both the
-   remote and the CLI engines read it.
-4. **Revisit two worker pins once requests overlap.** `--mm-processor-cache-gb 0` (`deploy/gpu/server.py:41`)
-   makes every concurrent request re-preprocess its image on the worker's CPU, which saturates before the
-   GPU does; `--max-num-batched-tokens 16384` (`:38`) is where a batch of page images gets split. Neither
-   number is changed blind: measure first.
+   **engine calls** -- one remote page request, or one local command, for every engine that makes one --
+   and nothing above them. It is deliberately *not* a permit a document body takes before waiting for its
+   own pages: with N documents holding all N permits and each waiting on work that needs one, the run
+   deadlocks. Every adapter that makes a call takes its permit from that one bound and holds it for the
+   call alone: PaddleOCR-VL both ways, Docling's command (and its one-off version probe), and MinerU's
+   command or its HTTP request. Rendering, scratch directories and parsing stay outside it.
+4. **Revisit two worker pins once requests overlap.** *Not taken: see Status.*
+   `--mm-processor-cache-gb 0` (`deploy/gpu/server.py:41`) makes every concurrent request re-preprocess
+   its image on the worker's CPU, which saturates before the GPU does; `--max-num-batched-tokens 16384`
+   (`:38`) is where a batch of page images gets split. Neither number is changed blind: measure first.
 
 ## Alternatives considered
 
@@ -93,6 +103,9 @@ surface, against ADR-0009's one-lease-per-run).
   bytes, same identity" no longer promises byte-identical text across a memo reset. Keys and identity are
   unaffected; the first read is still the one the memo remembers.
 * **Failure is still per document.** A page that fails fails its document, not its siblings -- the same
-  contract `read_document` already has.
+  contract `read_document` already has -- and the run's bound carries on: the read's page requests that
+  are still waiting are cancelled when a page fails, so the bound they held goes back to the other
+  documents instead of being spent on one that has already failed. A request a worker has already
+  started cannot be cancelled: it runs to completion and is not recalled.
 * **A regression guard, not a comment.** The test uses an engine with a barrier and asserts the reading
   pass really overlaps, so the serialization cannot come back unnoticed.

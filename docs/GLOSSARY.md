@@ -58,6 +58,12 @@ the name says which Engine ran, the detail names the deployment behind it. A mod
 version change moves the detail and re-reads the corpus; a rented worker's new address does not
 (ADR-0005, ADR-0007).
 
+**Engine Concurrency** — how many engine calls one run may have in flight at once: one remote page
+request, or one local command, for every engine that makes one. It is one bound for the run, held at the
+leaf where the call happens and sized by the worker rather than by this machine's render capacity, so a
+Document that waits for its own pages never occupies the slot its pages need.
+`FINEPDFS_ENGINE_CONCURRENCY` sets it (ADR-0010).
+
 **GpuProvider** — the port that supplies the Endpoint an Engine is reached at for a run and the Lease
 that holds it. Three adapters ship: none (the offline default, which supplies nothing and rents
 nothing), static (a server that already exists and outlives the run) and command (a start command that

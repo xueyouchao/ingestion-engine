@@ -15,11 +15,12 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText
+from finepdfs.infrastructure.engines.concurrency import DEFAULT_ENGINE_CONCURRENCY, EngineCalls
 from finepdfs.infrastructure.engines.subprocess_support import CommandRunner, SubprocessRunner, require_success
 
 MINERU_MODEL = "MinerU2.5-Pro"
@@ -90,7 +91,16 @@ class MineruSubprocessBackend:
 
     command: str = "mineru"
     work_dir: Path | None = None
+    # How many engine calls the run may keep in flight (ADR-0010 step 3). An InitVar, not a field: the
+    # number is not kept here, it lives in the one EngineCalls the command takes its permit from.
+    concurrency: InitVar[int] = DEFAULT_ENGINE_CONCURRENCY
     runner: CommandRunner = field(default_factory=SubprocessRunner)
+    # The run's one bound, held around the command and nothing else: the temp directory and the content
+    # list read back stay outside it.
+    calls: EngineCalls = field(init=False, compare=False, repr=False)
+
+    def __post_init__(self, concurrency: int) -> None:
+        object.__setattr__(self, "calls", EngineCalls(concurrency))
 
     def describe(self) -> str:
         return f"{MINERU_MODEL}@cli:{self.command}"
@@ -101,9 +111,11 @@ class MineruSubprocessBackend:
             pdf_path = scratch_dir / "document.pdf"
             pdf_path.write_bytes(document.content)
             output_dir = scratch_dir / "out"
-            require_success(
-                self.runner.run([self.command, "-p", str(pdf_path), "-o", str(output_dir), "-b", "pipeline"])
-            )
+            with self.calls.permit():
+                result = self.runner.run(
+                    [self.command, "-p", str(pdf_path), "-o", str(output_dir), "-b", "pipeline"]
+                )
+            require_success(result)
             candidates = sorted(output_dir.rglob("*content_list.json"))
             if not candidates:
                 raise MineruError(f"mineru wrote no content list under {output_dir}")
@@ -117,7 +129,16 @@ class MineruHttpBackend:
     base_url: str
     api_key: str = ""
     timeout_seconds: float = 1800.0
+    # How many engine calls the run may keep in flight (ADR-0010 step 3). An InitVar, not a field: the
+    # number is not kept here, it lives in the one EngineCalls the request takes its permit from.
+    concurrency: InitVar[int] = DEFAULT_ENGINE_CONCURRENCY
     opener: Any = None
+    # The run's one bound, held around the request and nothing else: building the multipart body and
+    # reading the content list out of the answer stay outside it.
+    calls: EngineCalls = field(init=False, compare=False, repr=False)
+
+    def __post_init__(self, concurrency: int) -> None:
+        object.__setattr__(self, "calls", EngineCalls(concurrency))
 
     def describe(self) -> str:
         return f"{MINERU_MODEL}@{self.base_url}"
@@ -129,11 +150,12 @@ class MineruHttpBackend:
             headers["Authorization"] = f"Bearer {self.api_key}"
         request = urllib.request.Request(self.base_url.rstrip("/") + "/file_parse", data=body, headers=headers)
         opener = self.opener or urllib.request.urlopen
-        try:
-            with opener(request, timeout=self.timeout_seconds) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, ValueError) as error:
-            raise MineruError(f"could not reach the MinerU service at {self.base_url}: {error}") from error
+        with self.calls.permit():
+            try:
+                with opener(request, timeout=self.timeout_seconds) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            except (urllib.error.URLError, OSError, ValueError) as error:
+                raise MineruError(f"could not reach the MinerU service at {self.base_url}: {error}") from error
         return content_list_from_response(payload)
 
 

@@ -272,6 +272,7 @@ nothing was published, so an operator or a CI can tell "engine is down" from "no
 | `FINEPDFS_ENGINE_COMMAND` | -- | local command for Docling, MinerU or PaddleOCR-VL |
 | `FINEPDFS_ENGINE_WORK_DIR` | a fresh temporary directory | where a command-line engine may keep scratch files |
 | `FINEPDFS_ENGINE_DPI` | `200` | page render resolution for vision models |
+| `FINEPDFS_ENGINE_CONCURRENCY` | `6` | engine calls in flight for the whole run -- one remote page request, or one local command, for every engine that makes one -- never a permit a Document takes (ADR-0010) |
 | `FINEPDFS_ENGINE_TIMEOUT` | `300` | seconds per model request, and per command-line engine run |
 | `FINEPDFS_ENGINE_DETAIL` | -- | the deployment detail in the engine's memo key, for a worker whose address changes every run (ADR-0007) |
 | `FINEPDFS_MIN_CHARACTERS_PER_PAGE` | `200` | routing floor |
@@ -365,10 +366,12 @@ it costs a re-read of every document and nothing else, and you should delete it 
 of the flow (as this branch did when the deciding pass was introduced): a state database written by an
 older component tree can leave declarations that no current component owns.
 
-*The first pass is concurrent, the second is one component.* Reading runs per document and is memoised;
-deciding runs once and holds every text in memory. That is what makes a corpus-wide duplicate decision
-possible, and it is the reason this pipeline is aimed at corpora of thousands of documents rather than
-the whole crawl.
+*The first pass is concurrent, the second is one component.* Reading runs per document, on a thread of
+its own, and is memoised, so a slow engine call holds up its own document while its siblings keep
+going -- the ones that cost money included. Inside one document the page requests overlap while its
+pages are rendered one at a time, because the renderer is not thread-safe. Deciding runs once and holds
+every text in memory. That is what makes a corpus-wide duplicate decision possible, and it is the reason
+this pipeline is aimed at corpora of thousands of documents rather than the whole crawl.
 
 ## Tests
 

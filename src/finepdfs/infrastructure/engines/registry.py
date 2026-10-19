@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from finepdfs.domain.ports import OcrEngine
+from finepdfs.infrastructure.engines.concurrency import DEFAULT_ENGINE_CONCURRENCY
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextEngine
 from finepdfs.infrastructure.engines.stable_identity import StableIdentity
 from finepdfs.infrastructure.engines.subprocess_support import SubprocessRunner
@@ -38,6 +39,11 @@ class EngineConfig:
     model: str = ""
     api_key: str = ""
     page_dpi: int = 200
+    # How many engine calls this run may keep in flight at once (ADR-0010 step 3): one remote page
+    # request, or one local command, for every engine that makes one. It sizes the bound on the one
+    # Engine instance the run shares across Documents, so it says something about the worker, never
+    # about render capacity.
+    concurrency: int = DEFAULT_ENGINE_CONCURRENCY
     timeout_seconds: float = 300.0
     work_dir: Path | None = None
     detail: str = ""
@@ -85,6 +91,7 @@ def _build_engine(config: EngineConfig) -> OcrEngine:
         return DoclingEngine(
             command=config.command or "docling",
             work_dir=config.work_dir,
+            concurrency=config.concurrency,
             runner=SubprocessRunner(config.timeout_seconds),
         )
     if config.name == PADDLEOCR_VL_ENGINE:
@@ -95,6 +102,7 @@ def _build_engine(config: EngineConfig) -> OcrEngine:
                 command=config.command,
                 work_dir=config.work_dir,
                 dpi=config.page_dpi,
+                concurrency=config.concurrency,
                 runner=SubprocessRunner(config.timeout_seconds),
             )
         from finepdfs.infrastructure.engines.vlm_chat import ChatEndpoint, VlmChatTransport
@@ -105,18 +113,24 @@ def _build_engine(config: EngineConfig) -> OcrEngine:
             api_key=config.api_key,
             timeout_seconds=config.timeout_seconds,
         )
-        return PaddleOcrVlEngine(transport=VlmChatTransport(endpoint), dpi=config.page_dpi)
+        return PaddleOcrVlEngine(
+            transport=VlmChatTransport(endpoint), dpi=config.page_dpi, concurrency=config.concurrency
+        )
     if config.name == MINERU_ENGINE:
         from finepdfs.infrastructure.engines.mineru import MineruEngine, MineruHttpBackend, MineruSubprocessBackend
 
         if config.base_url:
             backend = MineruHttpBackend(
-                base_url=config.base_url, api_key=config.api_key, timeout_seconds=config.timeout_seconds
+                base_url=config.base_url,
+                api_key=config.api_key,
+                timeout_seconds=config.timeout_seconds,
+                concurrency=config.concurrency,
             )
         else:
             backend = MineruSubprocessBackend(
                 command=config.command or "mineru",
                 work_dir=config.work_dir,
+                concurrency=config.concurrency,
                 runner=SubprocessRunner(config.timeout_seconds),
             )
         return MineruEngine(backend=backend)

@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import os
 import shutil
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -677,3 +679,97 @@ def test_changing_the_engine_identity_re_extracts_even_though_the_name_is_the_sa
 
     assert first.calls > 0
     assert second.calls > 0, "the model switch must not be served from the previous memo entry"
+
+
+SCAN_ONE = "https://e.example/scan-one.pdf"
+SCAN_TWO = "https://f.example/scan-two.pdf"
+
+
+class BarrierEngine:
+    """An Engine whose call returns only once another Document's call is in flight beside it.
+
+    A reading pass that gives each Document its own thread lets two calls meet at the barrier, so both
+    return and both Documents publish. A pass that runs the bodies one after another never has a second
+    call to meet: the barrier breaks on its own timeout instead of hanging the suite, and the peak the
+    engine recorded stays at one -- which is the defect, named in the assertion below.
+    """
+
+    def __init__(self, barrier: threading.Barrier) -> None:
+        self._identity = EngineIdentity(name="paddleocr-vl", detail="barrier")
+        self._barrier = barrier
+        self._lock = threading.Lock()
+        self._in_flight = 0
+        self.peak_in_flight = 0
+
+    @property
+    def identity(self) -> EngineIdentity:
+        return self._identity
+
+    def extract(self, document: Document) -> ExtractedDocument:
+        with self._lock:
+            self._in_flight += 1
+            self.peak_in_flight = max(self.peak_in_flight, self._in_flight)
+        try:
+            self._barrier.wait()
+        finally:
+            with self._lock:
+                self._in_flight -= 1
+        text = document.content.decode("utf-8", "replace")
+        return ExtractedDocument(pages=(PageText(number=1, text=text),), engine=self._identity)
+
+
+# Two scans whose text shares no vocabulary, so the deciding pass keeps both and each one's record is
+# evidence its own Extraction came back rather than its sibling's.
+SCAN_TEXTS = {
+    SCAN_ONE: "%PDF-1.5 " + " ".join(
+        f"The meteorological instruments were calibrated at the geneva observatory and reading {index} "
+        f"matched the reference barometer. "
+        for index in range(1, 5)
+    ),
+    SCAN_TWO: "%PDF-1.5 " + " ".join(
+        f"Parliament debated the appropriations clause and amendment {index} of the budget timetable "
+        f"was carried by a narrow majority. "
+        for index in range(1, 5)
+    ),
+}
+
+
+def test_two_scanned_documents_are_read_at_the_same_time(monkeypatch, tmp_path) -> None:
+    """ADR-0010: a blocking engine call must not freeze the reading pass that is running beside it.
+
+    `coco.map` describes the reading pass as concurrent, and it is -- for bodies whose calls return
+    promptly. An `async def` body with nothing to await runs on the one shared event loop, so an engine
+    call that blocks for a remote page stalls every sibling Document for exactly as long as it takes.
+    A synchronous body is handed to a thread of its own, so the documents whose calls cost money
+    actually overlap. The barrier makes the difference observable in both directions: it releases when
+    the pass really overlaps, and it times out when the pass is serial rather than deadlocking the run.
+    """
+    corpus_dir = tmp_path / "corpus"
+    _write_near_duplicate_corpus(
+        corpus_dir,
+        tuple(_Entry(url=url, body=text.encode("utf-8")) for url, text in SCAN_TEXTS.items()),
+    )
+    engine = BarrierEngine(threading.Barrier(2, timeout=5))
+    policy = CurationPolicy(engine_name="paddleocr-vl")
+    runtime = _runtime(corpus_dir, tmp_path / "out", policy=policy, probe=ScanningProbe(), engines={"paddleocr-vl": engine})
+
+    _run(monkeypatch, tmp_path, runtime, "runs")
+
+    assert engine.peak_in_flight >= 2, (
+        "the reading pass read Documents one at a time: a blocking engine call ran on the shared event "
+        "loop, so every sibling Document waited for it (ADR-0010 step 1)"
+    )
+    for url, text in SCAN_TEXTS.items():
+        record = _record(tmp_path / "out", url)
+        assert record["url"] == url
+        assert record["routing_decision"] == "ocr"
+        assert record["engine"] == "paddleocr-vl@barrier"
+        published = (tmp_path / "out" / "docs" / f"{document_key(url)}.md").read_text()
+        assert text.split(" ", 1)[1][:40] in published, "each Document published its own Extraction"
+
+    # The shape is pinned, not merely measured: an overlapping pass today and an `async def` again
+    # tomorrow would both pass a timing assertion that happened to be lucky. `coco.fn` wraps the body,
+    # so the coroutine test has to be asked about the wrapped function.
+    assert not inspect.iscoroutinefunction(inspect.unwrap(flow.extract_with_engine)), (
+        "a coroutine body runs on the shared event loop; the memoised extract body must be a plain def"
+    )

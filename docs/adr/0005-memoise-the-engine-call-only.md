@@ -16,6 +16,11 @@ that lands, and the documents that engine read are read once more before being m
 one-time cost, not a per-run one, and the alternative -- leaving DPI out -- would serve a 300 DPI read
 from a 200 DPI setting.
 
+ADR-0010 made the memoised body a plain `def` rather than an `async def`. No argument was added or
+removed -- still one document, still no new input -- but the key is not only the arguments: it also
+carries the body's own AST, so that change moved the key and re-reads every document once. ADR-0010's
+Consequences say why that is this decision working, not a revision of it.
+
 ## Context
 
 FinePDFs' expensive stages are the OCR engines: a document vision model reading 40 pages costs minutes
@@ -33,13 +38,16 @@ The memoised unit is exactly one thing:
 
 ~~~~python
 @coco.fn(memo=True)
-async def extract_with_engine(digest: str, engine_name: str, engine_identity: str) -> ExtractedDocument: ...
+def extract_with_engine(digest: str, engine_name: str, engine_identity: str) -> ExtractedDocument: ...
 ~~~~
 
-The memo key is therefore (content digest, engine name, engine identity), and nothing else: not the path
-the file happens to live at, and not anything the engine does not control. The bytes are found under the
-digest and checked against it, so a file that no longer holds what its name says fails visibly. Two
-consequences, both deliberate:
+The memo key is therefore those three arguments -- (content digest, engine name, engine identity) -- plus
+the memoised body's own AST, and nothing the body reads from around itself: not the path the file
+happens to live at, not a threshold read from configuration, and not anything the engine does not
+control. The AST is CocoIndex's: it canonicalises the decorated body, strips the decorators and the
+docstring, and hashes what is left, so a comment-only edit re-runs nothing while a changed statement
+re-reads. The bytes are found under the digest and checked against it, so a file that no longer holds
+what its name says fails visibly. Two consequences, both deliberate:
 
 * The routing decision happens *outside* the memoised function, so a threshold change that moves a
   document between "text layer" and "ocr" changes the engine name, and the memo key changes with it.

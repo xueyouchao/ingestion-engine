@@ -42,6 +42,7 @@ from finepdfs.infrastructure.compute.providers import (
 from finepdfs.infrastructure.corpus.fetch import fetch_corpus
 from finepdfs.infrastructure.corpus.index import CorpusIndex
 from finepdfs.infrastructure.corpus.manifest import MANIFEST_NAME, CorpusManifest
+from finepdfs.infrastructure.engines.concurrency import ENGINE_CONCURRENCY
 from finepdfs.infrastructure.engines.registry import KNOWN_ENGINES
 from finepdfs.infrastructure.llm.chat_completions import ChatCompletionsClient, ChatCompletionsError
 from finepdfs.infrastructure.publishing.disk import DiskPageReader, PublishedCorpus
@@ -74,6 +75,7 @@ ENVIRONMENT_FOR_ENGINE = {
     "engine_command": "FINEPDFS_ENGINE_COMMAND",
     "engine_detail": ENGINE_DETAIL,
     "dpi": "FINEPDFS_ENGINE_DPI",
+    "concurrency": ENGINE_CONCURRENCY,
     "similarity_threshold": "FINEPDFS_SIMILARITY_THRESHOLD",
     "search": "FINEPDFS_SEARCH",
     "gpu_provider": GPU_PROVIDER,
@@ -242,6 +244,12 @@ def _add_engine_arguments(parser: argparse.ArgumentParser, *, out: bool) -> None
     )
     parser.add_argument(
         "--dpi", type=int, default=argparse.SUPPRESS, help="resolution used to render pages for a vision model"
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="engine calls in flight for the whole run: one remote page request, or one local command",
     )
     parser.add_argument(
         "--similarity-threshold",

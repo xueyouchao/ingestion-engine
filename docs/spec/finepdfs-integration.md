@@ -169,9 +169,12 @@ name says fails visibly instead of serving stale text.
 
 **CocoIndex wiring.** One component per document, mounted with mount_each over a keyed iterable of
 crawl records, with a stable key derived from the document URL. Expensive extraction uses memo=True.
-Outputs are declared through the localfs target so deletion propagates. Concurrency, retries and
-failure accounting use CocoIndex's own facilities (map, exception handlers, stats) rather than a
-hand-rolled queue.
+Outputs are declared through the localfs target so deletion propagates. Document-level concurrency,
+retries and failure accounting use CocoIndex's own facilities (map, exception handlers, stats) rather
+than a hand-rolled queue of documents: the memoised body is synchronous, so each Document runs on a
+thread of its own and its engine call blocks only itself. The only other bound is the run's one
+engine-call bound, held at the leaf where the call happens -- one page request, or one local command --
+and never a permit a Document takes before waiting for its own pages (ADR-0010).
 
 **Duplicates are decided in the flow, not by a command.** An earlier version of this design had a
 `dedupe` command that rewrote records and deleted Markdown after the fact. That made target state a lie:

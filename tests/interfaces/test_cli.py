@@ -42,6 +42,23 @@ def test_the_similarity_threshold_reaches_the_runtime(monkeypatch) -> None:
     assert os.environ["FINEPDFS_SIMILARITY_THRESHOLD"] == "0.55"
 
 
+def test_the_concurrency_flag_reaches_the_runtime_and_never_exports_a_default(monkeypatch) -> None:
+    """The env owns the knob, so a flag nobody typed must not put a default over the operator's value."""
+    import os
+
+    from finepdfs.infrastructure.engines.concurrency import ENGINE_CONCURRENCY
+    from finepdfs.interfaces import cli
+
+    assert cli.ENVIRONMENT_FOR_ENGINE["concurrency"] == ENGINE_CONCURRENCY
+    monkeypatch.setattr(cli, "runtime_from_environment", lambda: "a runtime")
+
+    cli._runtime_from_args(build_parser().parse_args(["run", "--engine", "paddleocr-vl", "--concurrency", "2"]))
+
+    assert os.environ[ENGINE_CONCURRENCY] == "2"
+    untyped = build_parser().parse_args(["run", "--engine", "paddleocr-vl"])
+    assert not hasattr(untyped, "concurrency"), "an untyped flag must not appear at all"
+
+
 def test_engine_flags_do_not_shadow_the_command_name() -> None:
     args = build_parser().parse_args(["run", "--engine", "mineru", "--engine-command", "mineru", "--dpi", "150"])
 
