@@ -119,6 +119,20 @@ class FakeEndpoint:
         return self._answers[index]
 
 
+class _SlowFirstAnswer:
+    """An endpoint whose first answer takes as long as the probe waits: the request that starts a container."""
+
+    def __init__(self, time: FakeTime, seconds: float = 8.0) -> None:
+        self._time = time
+        self._seconds = seconds
+        self.calls = 0
+
+    def ready(self) -> bool:
+        self.calls += 1
+        self._time.advance(self._seconds)
+        return True
+
+
 class FakeTime:
     """The only time a demo read in this file sees: a clock a sleep moves by hand."""
 
@@ -158,7 +172,15 @@ class Fakes:
         )
         self.ledger = FakeLedger(options.get("usage"))
         self.endpoint = FakeEndpoint(options.get("answers"), options.get("endpoint_failure"))
-        self.engines = {OCR_ENGINE: self.ocr, NATIVE_TEXT_ENGINE: self.native}
+        # The OCR engine is reachable only through the worker, which is the point: a native read, or a
+        # refusal, has no way to touch it, because nothing builds it until a read says it needs one.
+        self.worker = FakeWorker(
+            self.ocr,
+            self.endpoint,
+            enter_failure=options.get("worker_failure"),
+            release_failure=options.get("release_failure"),
+        )
+        self.engines = {NATIVE_TEXT_ENGINE: self.native}
 
     def use_case(self, **overrides: Any) -> DemoRead:
         routing = overrides.pop("routing", OcrRoutingPolicy())
@@ -169,12 +191,49 @@ class Fakes:
             policy=CurationPolicy(engine_name=OCR_ENGINE, routing=routing),
             gates=SpendGatePolicy(limits),
             ledger=self.ledger,
-            endpoint=self.endpoint,
+            worker=self.worker,
             warm_timeout_seconds=overrides.pop("warm_timeout_seconds", 900.0),
             poll_interval_seconds=overrides.pop("poll_interval_seconds", 2.0),
             clock=self.time.clock,
             sleep=self.time.sleep,
+            redact=overrides.pop("redact", str),
         )
+
+
+class FakeWorker:
+    """The OCR lane's worker: entering it yields the engine and its endpoint, and it says so out loud.
+
+    ``entered`` is what the tests read to prove a read did *not* rent a worker: a native upload and a
+    refused one must leave it at zero, because that is the difference between a demo and a bill.
+    """
+
+    def __init__(
+        self,
+        engine: FakeEngine,
+        endpoint: FakeEndpoint,
+        enter_failure: Exception | None = None,
+        release_failure: Exception | None = None,
+    ) -> None:
+        self.engine = engine
+        self.endpoint = endpoint
+        self._enter_failure = enter_failure
+        self._release_failure = release_failure
+        self.entered = 0
+        self.exited = 0
+
+    def __call__(self) -> FakeWorker:
+        return self
+
+    def __enter__(self) -> tuple[FakeEngine, FakeEndpoint]:
+        self.entered += 1
+        if self._enter_failure is not None:
+            raise self._enter_failure
+        return self.engine, self.endpoint
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.exited += 1
+        if self._release_failure is not None:
+            raise self._release_failure
 
 
 def _pages(prefix: str) -> list[PageText]:
@@ -348,7 +407,7 @@ def test_a_cold_endpoint_is_announced_as_a_warming_stage_with_its_measured_wait(
     assert outcome.engine == fakes.ocr.identity
 
 
-def test_a_warm_endpoint_announces_no_warming_stage_and_no_measured_wait() -> None:
+def test_a_warm_endpoint_announces_no_warming_stage_and_no_wait_of_its_own() -> None:
     demo, fakes = _demo(SCANNED, answers=[True])
     seen, on_stage = _stages()
 
@@ -356,9 +415,20 @@ def test_a_warm_endpoint_announces_no_warming_stage_and_no_measured_wait() -> No
 
     assert isinstance(outcome, Reading)
     assert seen == ["routing", "reading", "done"]
-    assert outcome.warm_ms is None
+    assert outcome.warm_ms == 0, "a worker that answered at once was waited for zero milliseconds"
     assert fakes.time.sleeps == []
     assert fakes.endpoint.calls == 1
+
+
+def test_a_first_readiness_question_that_waited_is_measured_as_the_wait() -> None:
+    """The first question can be what starts a container: its own duration is part of the number."""
+    demo, fakes = _demo(SCANNED)
+    fakes.worker.endpoint = _SlowFirstAnswer(fakes.time)
+
+    outcome = demo.read(b"%PDF scanned", "10.0.0.1", lambda stage: None)
+
+    assert isinstance(outcome, Reading)
+    assert outcome.warm_ms == 8000, "a cold start answered on the first question is still a cold start"
 
 
 def test_an_endpoint_that_never_answers_is_a_failed_reading_naming_the_timeout() -> None:
@@ -495,11 +565,11 @@ def test_an_ocr_read_writes_only_into_a_scratch_directory_it_removes(tmp_path: P
     engine = PaddleOcrVlCliEngine(command="paddleocr", work_dir=work, runner=runner)
     demo = DemoRead(
         probe=PymupdfTextLayerProbe(),
-        engines={OCR_ENGINE: engine},
+        engines={NATIVE_TEXT_ENGINE: FakeEngine(NATIVE_TEXT_ENGINE, [])},
         policy=CurationPolicy(engine_name=OCR_ENGINE, routing=OcrRoutingPolicy()),
         gates=SpendGatePolicy(DemoLimits()),
         ledger=FakeLedger(),
-        endpoint=FakeEndpoint(),
+        worker=FakeWorker(engine, FakeEndpoint()),
         clock=FakeTime().clock,
         sleep=FakeTime().sleep,
     )
@@ -518,3 +588,72 @@ def test_an_ocr_read_writes_only_into_a_scratch_directory_it_removes(tmp_path: P
     assert {root: _tree(root) for root in (work, spool)} == before, "the demo kept a page image or a result"
 
 
+
+
+def test_a_native_read_never_enters_a_worker() -> None:
+    """Nothing is rented for a document this host can read: the worker is not even built."""
+    demo, fakes = _demo(HEALTHY)
+
+    outcome = demo.read(b"%PDF healthy", "10.0.0.1", lambda stage: None)
+
+    assert isinstance(outcome, Reading)
+    assert fakes.worker.entered == 0
+
+
+def test_a_refused_upload_never_enters_a_worker() -> None:
+    demo, fakes = _demo(SCANNED, limits=DemoLimits(page_cap=1))
+
+    outcome = demo.read(b"%PDF scanned", "10.0.0.1", lambda stage: None)
+
+    assert isinstance(outcome, Refusal)
+    assert outcome.kind == "page-cap"
+    assert fakes.worker.entered == 0, "a refusal must not rent the GPU it never uses"
+
+
+def test_an_admitted_ocr_read_enters_and_leaves_the_worker_exactly_once() -> None:
+    demo, fakes = _demo(SCANNED)
+
+    outcome = demo.read(b"%PDF scanned", "10.0.0.1", lambda stage: None)
+
+    assert isinstance(outcome, Reading)
+    assert (fakes.worker.entered, fakes.worker.exited) == (1, 1)
+    assert fakes.ocr.calls == 1, "the engine the worker published is the one that read"
+
+
+def test_a_worker_that_cannot_be_entered_is_an_unavailable_refusal_in_its_own_words() -> None:
+    demo, fakes = _demo(SCANNED, worker_failure=RuntimeError("modal: the start command exited 1"))
+
+    outcome = demo.read(b"%PDF scanned", "10.0.0.1", lambda stage: None)
+
+    assert isinstance(outcome, Refusal)
+    assert outcome.kind == "unavailable"
+    assert "modal: the start command exited 1" in outcome.reason
+    assert fakes.ocr.calls == 0, "no lane ran, so no lane failed"
+    assert fakes.worker.exited == 0, "a worker that was never entered is not given back"
+
+
+def test_a_release_that_fails_after_a_reading_keeps_the_reading(caplog: Any) -> None:
+    """The visitor's text is real; a stop command that failed is the operator's log line (ADR-0007)."""
+    demo, fakes = _demo(SCANNED, release_failure=RuntimeError("the stop command timed out"))
+
+    outcome = demo.read(b"%PDF scanned", "10.0.0.1", lambda stage: None)
+
+    assert isinstance(outcome, Reading)
+    assert fakes.worker.exited == 1
+    assert "the stop command timed out" in caplog.text
+
+
+def test_a_failure_reason_is_shown_through_the_redactor() -> None:
+    """An engine's own error can quote the worker's address, and the job answer is public."""
+    address = "https://workspace--finepdfs-demo-ocr.modal.run/v1"
+    demo, _ = _demo(
+        SCANNED,
+        ocr_failure=RuntimeError(f"the model request to {address} failed: connection reset"),
+        redact=lambda message: message.replace(address, "<the OCR worker>"),
+    )
+
+    outcome = demo.read(b"%PDF scanned", "10.0.0.1", lambda stage: None)
+
+    assert isinstance(outcome, FailedReading)
+    assert "modal.run" not in outcome.reason
+    assert "<the OCR worker>" in outcome.reason

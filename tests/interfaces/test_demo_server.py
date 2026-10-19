@@ -172,6 +172,26 @@ def _ocr_engine() -> FakeEngine:
     return FakeEngine(OCR_ENGINE, [PageText(1, "ocr one"), PageText(2, "ocr two")], detail="weights-c5630abae1d9")
 
 
+class _Worker:
+    """The OCR lane's worker as this file sees it: a fake engine, a fake endpoint, and no GPU at all."""
+
+    def __init__(self, engine: FakeEngine, endpoint: FakeEndpoint) -> None:
+        self.engine = engine
+        self.endpoint = endpoint
+        self.entered = 0
+        self.exited = 0
+
+    def __call__(self) -> _Worker:
+        return self
+
+    def __enter__(self) -> tuple[FakeEngine, FakeEndpoint]:
+        self.entered += 1
+        return self.engine, self.endpoint
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.exited += 1
+
+
 def _app(
     probe: FakeProbe,
     endpoint: FakeEndpoint,
@@ -189,11 +209,11 @@ def _app(
     ledger = ledger or InMemoryGateLedger(clock=lambda: NOW, limits=settings)
     read = DemoRead(
         probe=probe,
-        engines={"pymupdf": native or _native_engine(), OCR_ENGINE: ocr or _ocr_engine()},
+        engines={"pymupdf": native or _native_engine()},
         policy=CurationPolicy(engine_name=OCR_ENGINE, routing=OcrRoutingPolicy()),
         gates=SpendGatePolicy(settings),
         ledger=ledger,
-        endpoint=endpoint,
+        worker=_Worker(ocr or _ocr_engine(), endpoint),
         warm_timeout_seconds=settings.warm_timeout_seconds,
         poll_interval_seconds=settings.poll_interval_seconds,
         clock=time_source.clock,
@@ -649,12 +669,51 @@ def test_the_demo_composes_its_engine_environment_the_way_a_run_does() -> None:
     app = DemoApp(environ=dict(values))
     try:
         demo = app._demo_read()
+        # The lane's engine and its readiness probe are built where the worker publishes them, which is
+        # inside the lease: the same environment a run reads, so the same identity and the same address.
+        with app._worker() as (engine, probe):
+            sought = engine_adapters(values, "paddleocr-vl").engines["paddleocr-vl"]
+            assert engine.detail == sought.detail
+            assert probe.base_url == "https://ocr.example/v1"
     finally:
         app.close()
 
     assert demo.thresholds == engine_adapters(values, "paddleocr-vl").routing
     assert demo.thresholds.min_characters_per_page == 120.0
-    assert demo.endpoint.base_url == "https://ocr.example/v1"
+
+
+def test_a_local_engine_is_wired_and_has_nothing_to_warm() -> None:
+    """An engine this host runs is not a worker to wait for, and saying it is unwired would be wrong."""
+    values = {"FINEPDFS_ENGINE": "paddleocr-vl", "FINEPDFS_ENGINE_COMMAND": "paddleocr"}
+    app = DemoApp(environ=dict(values))
+    try:
+        with app._worker() as (engine, probe):
+            assert engine.identity.name == "paddleocr-vl"
+            assert probe.ready() is True, "a command has no endpoint to come up"
+        assert app.status()["ocr_endpoint_configured"] is True
+    finally:
+        app.close()
+
+
+def test_a_failure_reason_never_carries_the_worker_address_or_the_bearer() -> None:
+    """The job answer is public: an engine's transport error quotes the address and the page must not."""
+    values = {
+        "FINEPDFS_ENGINE_BASE_URL": "https://workspace--finepdfs-demo-ocr.modal.run/v1",
+        "FINEPDFS_ENGINE_API_KEY": "bearer-secret",
+    }
+    message = (
+        "the model request to https://workspace--finepdfs-demo-ocr.modal.run/v1/chat/completions failed "
+        "with Authorization: Bearer bearer-secret"
+    )
+
+    masked = demo_server.redact(message, values)
+
+    assert "modal.run" not in masked
+    assert "bearer-secret" not in masked
+    assert masked.count(demo_server.WORKER_ADDRESS) == 1
+    assert demo_server.WORKER_TOKEN in masked
+    # An address nobody spelled here -- one a lease published -- is masked by shape.
+    assert "other.modal.run" not in demo_server.redact("failed calling https://other.modal.run/v1", values)
 
 
 def test_the_engine_is_named_by_the_run_variable_not_by_a_demo_copy() -> None:

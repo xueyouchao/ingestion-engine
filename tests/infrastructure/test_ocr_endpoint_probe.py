@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from finepdfs.domain.ports import OcrEndpointProbe, OcrEndpointUnavailable
-from finepdfs.infrastructure.compute.ocr_endpoint import HttpOcrEndpointProbe
+from finepdfs.infrastructure.compute.ocr_endpoint import HttpOcrEndpointProbe, LocalEngineProbe, endpoint_probe
 
 MODEL_LIST = json.dumps({"object": "list", "data": [{"id": "PaddlePaddle/PaddleOCR-VL-1.6"}]}).encode("utf-8")
 
@@ -182,3 +182,27 @@ def test_a_malformed_base_url_names_the_fault_without_echoing_it() -> None:
 
     assert str(caught.value) == "the OCR endpoint's base URL is not an http(s) address"
     assert "gpu-box.local" not in str(caught.value)
+
+
+def test_a_local_engine_has_nothing_to_wait_for() -> None:
+    """``registry.engine_endpoint`` answers ``None`` for an engine this host runs: it is ready already."""
+    probe = endpoint_probe(None)
+
+    assert isinstance(probe, LocalEngineProbe)
+    assert probe.ready() is True, "a command has no server to come up"
+
+
+def test_an_http_engine_gets_the_probe_that_asks_its_address() -> None:
+    probe = endpoint_probe("http://127.0.0.1:9/v1", "secret")
+
+    assert isinstance(probe, HttpOcrEndpointProbe)
+    assert probe.ready() is False, "nothing answers on that port: the probe asks, and reports"
+
+
+def test_an_http_engine_with_no_address_names_the_fault() -> None:
+    """An empty address is not "local": it is a chat endpoint nobody configured."""
+    probe = endpoint_probe("")
+
+    assert isinstance(probe, HttpOcrEndpointProbe)
+    with pytest.raises(OcrEndpointUnavailable, match="no base URL"):
+        probe.ready()

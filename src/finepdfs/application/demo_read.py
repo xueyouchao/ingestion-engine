@@ -12,8 +12,10 @@ of Extraction and its Decision, not a curation run (ADR-0012).
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Literal
 
@@ -33,8 +35,11 @@ from finepdfs.domain.ports import (
     OcrEndpointProbe,
     OcrEndpointUnavailable,
     OcrEngine,
+    OcrWorker,
     TextLayerProbe,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,8 +48,9 @@ class Reading:
 
     ``plan`` is the Routing Decision with its five features, and ``thresholds`` what they were measured
     against, so the page can show both. ``elapsed_ms`` spans the whole read, warming included; ``warm_ms``
-    is the part of it spent waiting for a cold OCR worker, measured, or ``None`` when nothing was waited
-    for -- it is never a guess.
+    is the part of it spent waiting for the OCR worker to answer, measured from the first readiness
+    question -- ``None`` on the native lane, which never asks one, and zero when the worker answered at
+    once. It is never a guess.
     """
 
     plan: RoutingPlan
@@ -101,21 +107,27 @@ class DemoRead:
         policy: CurationPolicy,
         gates: SpendGatePolicy,
         ledger: GateLedger,
-        endpoint: OcrEndpointProbe,
+        worker: OcrWorker,
         warm_timeout_seconds: float = DEFAULT_WARM_TIMEOUT_SECONDS,
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        redact: Callable[[str], str] = str,
     ) -> None:
         self._extraction = ExtractionStep(probe, engines, policy)
         self._policy = policy
         self._gates = gates
         self._ledger = ledger
-        self._endpoint = endpoint
+        # The worker is a context manager rather than an engine, so entering it is what a read decides:
+        # only an admitted OCR read rents one, and a native read or a refusal rents nothing (ADR-0012).
+        self._worker = worker
         self._warm_timeout_seconds = warm_timeout_seconds
         self._poll_interval_seconds = poll_interval_seconds
         self._clock = clock
         self._sleep = sleep
+        # What a failure's words are shown through: a configured address or token in an engine's error
+        # is a leak, not a diagnosis, and the composition root is the one place that knows both.
+        self._redact = redact
 
     @property
     def extraction(self) -> ExtractionStep:
@@ -128,10 +140,6 @@ class DemoRead:
     @property
     def ledger(self) -> GateLedger:
         return self._ledger
-
-    @property
-    def endpoint(self) -> OcrEndpointProbe:
-        return self._endpoint
 
     @property
     def thresholds(self) -> OcrRoutingPolicy:
@@ -147,7 +155,6 @@ class DemoRead:
     ) -> ReadingOutcome:
         """Route the upload, pass the gates, read it with the lane the decision chose."""
         started = self._clock()
-        warm_ms: int | None = None
         on_stage("routing")
         try:
             plan = self._extraction.route(content)
@@ -172,10 +179,7 @@ class DemoRead:
             self._ledger.charge_ocr_pages(ocr_pages)
 
         if plan.decision.needs_ocr:
-            try:
-                warm_ms = self._warm(on_stage)
-            except (OcrEndpointUnavailable, _WarmTimeout) as fault:
-                return self._failed(plan, fault)
+            return self._read_ocr(plan, content, name, on_stage, started)
 
         on_stage("reading")
         try:
@@ -189,25 +193,88 @@ class DemoRead:
             engine=extracted.engine,
             pages=extracted.pages,
             elapsed_ms=_milliseconds(started, self._clock()),
-            warm_ms=warm_ms,
+            warm_ms=None,
         )
 
-    def _warm(self, on_stage: Callable[[ReadingStage], None]) -> int | None:
-        """Wait for a cold OCR endpoint; the measured wait in milliseconds, or None if it was answering.
+    def _read_ocr(
+        self,
+        plan: RoutingPlan,
+        content: bytes,
+        name: str,
+        on_stage: Callable[[ReadingStage], None],
+        started: float,
+    ) -> ReadingOutcome:
+        """The OCR lane, and the only place a worker is entered: admitted, then warmed, then read.
 
-        The first question is asked before the warming stage is announced, so a warm worker never shows a
-        stage it did not have. Only a timeout is a fault here: the endpoint probe's own
-        ``OcrEndpointUnavailable`` travels up untouched, because waiting cannot fix a bearer it refuses.
+        Entering is separated from the body on purpose. A worker that cannot be had at all is a refusal of
+        kind ``unavailable`` -- no gate closed and no lane ran -- while a worker that came up and then
+        failed to read is a Failed Reading. A release that fails after the answer is the operator's log
+        line, not the visitor's: the text is real either way (ADR-0007).
         """
-        if self._endpoint.ready():
-            return None
-        on_stage("warming")
+        lease = self._worker()  # a fresh context manager: a worker belongs to one Reading
+        try:
+            engine, endpoint = lease.__enter__()
+        except Exception as error:  # a provider that cannot start one: nothing was read, nothing was spent
+            return Refusal(
+                kind="unavailable",
+                reason=self._redact(f"the demo could not reach its OCR worker: {_words(error)}"),
+                plan=plan,
+                thresholds=self._policy.routing,
+            )
+        outcome: ReadingOutcome | None = None
+        try:
+            try:
+                warm_ms = self._warm(on_stage, endpoint)
+            except (OcrEndpointUnavailable, _WarmTimeout) as fault:
+                outcome = self._failed(plan, fault)
+            else:
+                on_stage("reading")
+                try:
+                    extracted = engine.extract(Document(name=name, content=content))
+                except Exception as error:  # a failed lane is reported, not raised
+                    outcome = self._failed(plan, error)
+                else:
+                    on_stage("done")
+                    outcome = Reading(
+                        plan=plan,
+                        thresholds=self._policy.routing,
+                        engine=extracted.engine,
+                        pages=extracted.pages,
+                        elapsed_ms=_milliseconds(started, self._clock()),
+                        warm_ms=warm_ms,
+                    )
+        finally:
+            self._release(lease)
+        return outcome
+
+    def _release(self, lease: AbstractContextManager[tuple[OcrEngine, OcrEndpointProbe]]) -> None:
+        """Give the worker back, and never replace the answer with a failure to do so."""
+        try:
+            lease.__exit__(None, None, None)
+        except Exception as error:  # the operator's report, not the visitor's
+            logger.warning("the OCR worker could not be released after a Reading: %s", self._redact(_words(error)))
+
+    def _warm(self, on_stage: Callable[[ReadingStage], None], endpoint: OcrEndpointProbe) -> int:
+        """Wait for a cold worker; the measured wait in milliseconds, zero when it was already answering.
+
+        The clock starts before the first question, because asking can start a container and block for as
+        long as the probe waits -- a first check that returned after a wait is a wait, and reporting it as
+        "no wait" would understate the one number this demo exists to measure. The ``warming`` stage is
+        announced only when the first answer was "not yet", so a warm worker never shows a stage it did
+        not have.
+
+        Only a timeout is this method's own fault: the probe's ``OcrEndpointUnavailable`` travels up
+        untouched, because waiting cannot fix a bearer it refuses or a route it does not serve.
+        """
         started = self._clock()
+        if endpoint.ready():
+            return _milliseconds(started, self._clock())
+        on_stage("warming")
         while True:
             if self._clock() - started >= self._warm_timeout_seconds:
                 raise _WarmTimeout(f"the OCR worker did not answer within {self._warm_timeout_seconds:g} s")
             self._sleep(self._poll_interval_seconds)
-            if self._endpoint.ready():
+            if endpoint.ready():
                 return _milliseconds(started, self._clock())
 
     def _failed(self, plan: RoutingPlan, error: BaseException) -> FailedReading:
@@ -215,7 +282,7 @@ class DemoRead:
         return FailedReading(
             kind="failed",
             lane=plan.lane,
-            reason=_words(error),
+            reason=self._redact(_words(error)),
             plan=plan,
             thresholds=self._policy.routing,
         )

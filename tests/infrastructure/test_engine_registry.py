@@ -13,6 +13,7 @@ from finepdfs.infrastructure.engines.registry import (
     EngineConfig,
     UnknownEngine,
     build_engine,
+    engine_endpoint,
 )
 
 
@@ -31,6 +32,24 @@ def test_paddleocr_vl_with_a_command_uses_the_local_tool() -> None:
 
     assert isinstance(engine, PaddleOcrVlCliEngine)
     assert "paddleocr" in str(engine.identity)
+
+
+def test_which_engines_are_reached_over_http_is_stated_in_one_place() -> None:
+    """Readiness asks this instead of guessing; ``build_engine`` decides the kind from the same facts.
+
+    ``None`` means "a process on this host, nothing to wait for", ``""`` means "an HTTP engine with no
+    address", and an address means a server. Each row is a combination ``build_engine`` also accepts, so
+    the two cannot disagree without this table changing.
+    """
+    assert engine_endpoint(EngineConfig(name="pymupdf")) is None
+    assert engine_endpoint(EngineConfig(name="docling")) is None
+    assert engine_endpoint(EngineConfig(name="paddleocr-vl", base_url="http://127.0.0.1:8000/v1")) == (
+        "http://127.0.0.1:8000/v1"
+    )
+    assert engine_endpoint(EngineConfig(name="paddleocr-vl", command="paddleocr")) is None, "a command is local"
+    assert engine_endpoint(EngineConfig(name="paddleocr-vl")) == "", "an HTTP engine with no address says so"
+    assert engine_endpoint(EngineConfig(name="mineru", base_url="http://127.0.0.1:9000")) == "http://127.0.0.1:9000"
+    assert engine_endpoint(EngineConfig(name="mineru")) is None
 
 
 def test_a_different_model_is_a_different_engine_identity() -> None:

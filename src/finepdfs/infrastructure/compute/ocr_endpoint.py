@@ -17,7 +17,7 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
-from finepdfs.domain.ports import OcrEndpointUnavailable
+from finepdfs.domain.ports import OcrEndpointProbe, OcrEndpointUnavailable
 
 # A readiness check is not a read: it must answer quickly enough to be polled, and a slow answer is the
 # same fact as no answer -- the worker is not serving yet.
@@ -92,6 +92,29 @@ class HttpOcrEndpointProbe:
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         return headers
+
+
+class LocalEngineProbe:
+    """Readiness for an engine this host runs itself: it is ready as soon as it is built.
+
+    A local engine is a command, not a server, so there is nothing to wait for and no warming stage to
+    show. Reporting that honestly is what lets the demo use ``docling`` or a local ``paddleocr`` without
+    being told its "endpoint has no base URL".
+    """
+
+    def ready(self) -> bool:
+        return True
+
+
+def endpoint_probe(base_url: str, api_key: str = "") -> OcrEndpointProbe:
+    """The probe an engine asks for: an HTTP one when it has an address, otherwise the local answer.
+
+    The caller passes ``registry.engine_endpoint``, so this never decides which kind of engine it has --
+    it only turns that answer into the right question.
+    """
+    if base_url is None:
+        return LocalEngineProbe()
+    return HttpOcrEndpointProbe(base_url, api_key)
 
 
 def _lists_a_model(body: bytes) -> bool:

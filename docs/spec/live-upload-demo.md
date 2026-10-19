@@ -137,8 +137,14 @@ Routing Decision when one was made:
   daily budget, an unreadable upload, or a full queue. A refusal names its kind and its reason in
   words, and carries no page text.
 - **failed** -- a lane was chosen and the read failed. The reason is the underlying error's own words,
-  never a summary, and the kind is the exclusion kind `failed` that already exists. No Reading is
-  recorded, because the demo records nothing anywhere.
+  never a summary, and the kind is the exclusion kind `failed` that already exists. Those words are shown
+  through the composition root's redactor, because an engine's transport error quotes the address it
+  called and the job answer is public: no address and no bearer reaches the page. No Reading is recorded,
+  because the demo records nothing anywhere.
+
+One refusal kind exists beyond the gates and the upload itself: `unavailable`, when the demo cannot
+reach an OCR worker at all -- a provider whose start command failed, a lease that was refused. No gate
+closed and no lane ran.
 
 These are three frozen dataclasses with one shared union, not a status string on one object: each has
 different fields, and a caller that switches on the type cannot read a page list that is not there.
@@ -170,14 +176,31 @@ state `done` carries the outcome. This is what makes "warming the OCR worker" a 
 an animation: the server is waiting for the endpoint's `/v1/models` to answer, and it reports how long
 that took.
 
+### The worker is entered for an admitted OCR read, and for nothing else
+
+The OCR lane's worker is a context manager the composition root hands the use case: entering it yields the
+engine and the probe that says whether its endpoint answers, and leaving it gives the worker back. The use
+case enters it **after** the gates have let an OCR read through and **before** the warming stage, so the
+order a spend can happen in is: route, decide, admit, and only then rent. A native upload rents nothing,
+and a refused one rents nothing -- which is the difference between a demo and a bill.
+
+Whether there is anything to wait for is the engine registry's own rule, not a guess: a command means a
+process on this host (nothing to warm), an address means an HTTP endpoint (something to ask). An HTTP
+engine with no address configured says so rather than pretending the worker is ready.
+
 ### Warming is measured, not guessed
 
 When the Routing Decision says OCR, the use case asks the endpoint probe whether the endpoint answers.
-If it does, the read proceeds with no warming stage. If it does not, the use case announces `warming` and
-polls the probe until the warm timeout, then announces `reading`. The measured wait travels back to the
-page as a number. The probe is a port: an adapter asks the endpoint's OpenAI-compatible `/v1/models` with
-the bearer, and a fake answers in tests. A probe that never answers is a failed Reading whose reason
-names the timeout, not a refusal: the gate did not close, the worker did not come up.
+The clock starts before that first question, because asking can itself start a container and block for
+as long as the probe waits: a first check that returned after a wait is a wait, and reporting it as "no
+wait" would understate the one number this demo exists to measure. If the first answer is yes the read
+proceeds with no warming stage; if it is no the use case announces `warming` and polls the probe until
+the warm timeout, then announces `reading`. Either way the wait travels back to the page as milliseconds
+-- zero when the worker answered at once, and `null` only on the native lane, which never asks.
+
+The probe is a port: an adapter asks the endpoint's OpenAI-compatible `/v1/models` with the bearer, and a
+fake answers in tests. A probe that never answers is a failed Reading whose reason names the timeout, not
+a refusal: the gate did not close, the worker did not come up.
 
 ### Only page images leave the host, and nothing is kept
 

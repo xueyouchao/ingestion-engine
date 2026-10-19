@@ -197,9 +197,13 @@ class ReadingQueue:
         """
 
         def on_stage(stage: ReadingStage) -> None:
+            # ``done`` is the queue's to publish, and it publishes it under the lock together with the
+            # outcome: a poll in between must never see a job that says it finished and has no answer,
+            # which is why the use case's own ``done`` is not taken here.
+            if stage == "done":
+                return
             with self._lock:
-                if entry.stage != "done":
-                    entry.stage = stage
+                entry.stage = stage
 
         try:
             return self._read(entry.content, entry.client, on_stage, entry.name), None

@@ -139,6 +139,35 @@ def test_a_job_that_is_still_waiting_is_a_stage_with_no_outcome_yet() -> None:
         reader.release.set()
 
 
+def test_a_job_is_never_shown_finished_before_its_answer_is_stored() -> None:
+    """The one window the page could see: a reader that says ``done`` and then takes its time to return.
+
+    A poll in that gap must keep seeing the last stage the read really reached. ``done`` with a null
+    outcome would stop the page polling and tell a visitor their job finished without an answer.
+    """
+    answered = threading.Event()
+    holding = threading.Event()
+
+    def reader(content, client, on_stage, name):
+        on_stage("routing")
+        on_stage("reading")
+        on_stage("done")
+        answered.set()
+        assert holding.wait(5), "the test never let the reader return"
+        return _reading()
+
+    with _queue(reader) as queue:
+        job = queue.submit(b"one", "203.0.113.7", "mine.pdf")
+        assert answered.wait(5)
+
+        answer = queue.get(job.id).as_json()
+
+        assert answer["stage"] == "reading", "the queue publishes done only together with the outcome"
+        assert answer["outcome"] is None
+        holding.set()
+        assert _done(queue, job.id)["outcome"] == "read"
+
+
 def test_a_full_waiting_list_is_refused_with_the_busy_kind() -> None:
     reader = BlockingReader()
     with _queue(reader, DemoLimits(queue_depth=1)) as queue:

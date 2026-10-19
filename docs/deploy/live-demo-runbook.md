@@ -327,12 +327,18 @@ The HTTP surface, and what each answer means:
 | `GET /` | the page: the statements about where the bytes go and what is kept, the limits and the remaining budget before the upload control, and the decision, the Engine Identity and the page text once a Reading arrives |
 | `GET /api/status` | the §4 status object: limits, remaining OCR budget, queue depth, whether an OCR endpoint is configured -- never the bearer or the address |
 | `POST /api/read` | the PDF as the body, `Content-Type: application/pdf`; `202 {"job": "<id>"}`; `413` over the byte cap; `400` for an empty body, the wrong media type or no `Content-Length`; `503` when the queue is full |
-| `GET /api/read/<id>` | the job JSON: `stage`, `outcome`, `elapsed_ms`, `warmed_ms` (`null` unless the OCR lane waited for a cold worker), `refusal`, `failure`, `reading` (lane, reason, the five features, the thresholds, the Engine Identity, and each page with its original 1-based number); `404` for an unknown id |
+| `GET /api/read/<id>` | the job JSON: `stage`, `outcome`, `elapsed_ms`, `warmed_ms` (milliseconds measured from the first readiness question, zero when the worker answered at once, `null` only on the text layer, which asks nothing), `refusal`, `failure`, `reading` (lane, reason, the five features, the thresholds, the Engine Identity, and each page with its original 1-based number); `404` for an unknown id |
 
 `POST` answers immediately; the page polls the job. The stages are `queued`, `routing`, `warming`,
 `reading`, and `done` carries the outcome. A visitor sees a slow first OCR as a measured warm-up
-(`Warm-up: N.N s measured waiting for the cold OCR worker.`), never as an error and never as a fake fast
-answer; a failed OCR is a failed Reading in the endpoint's own words.
+(`Warm-up: N.N s measured, from the first readiness question.`), never as an error and never as a fake
+fast answer; a failed OCR is a failed Reading in the endpoint's own words, with any address or bearer in
+them masked.
+
+Nothing is rented for a document that does not need the worker: the worker is entered after the gates, so
+a text-layer read and a refused upload never start a GPU container. An engine the host runs itself
+(`FINEPDFS_ENGINE_COMMAND` set, so no address) needs no worker at all -- it reports no `warming` stage and
+a `warmed_ms` of zero, because there was no server to wait for.
 
 The page is a view: it never curates, never publishes and never writes (§11).
 
@@ -523,8 +529,8 @@ The procedure, in order. Every step is a command and an answer to judge, not an 
    never goes, do not record a number -- measure nothing rather than measure a warm worker.
 
 5. **Send one PDF that routes to OCR.** A genuine image-only scan, like ADR-0009's one-page scan: a PDF with
-   a text layer never needs OCR, never shows `warming` and reports `warmed_ms: null`. The rate limit counts
-   this read, so send it once. The upload answers `202` and a job id; the read itself takes as long as the
+   a text layer never needs OCR, never shows `warming`, reports `warmed_ms: null` and never leases the
+   GPU. The rate limit counts this read, so send it once. The upload answers `202` and a job id; the read itself takes as long as the
    start does, so poll the job until its stage is `done`:
 
    ```bash

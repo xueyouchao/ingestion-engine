@@ -7,6 +7,7 @@ the same interface, which is why the pipeline can be exercised with no network, 
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Protocol
 
@@ -129,6 +130,23 @@ class OcrEndpointProbe(Protocol):
     """
 
     def ready(self) -> bool: ...
+
+
+class OcrWorker(Protocol):
+    """The OCR lane's worker for one Reading, handed out as a context manager and given back after it.
+
+    ``worker()`` answers a *fresh* context manager, because a worker belongs to one Reading: entering it
+    is what rents one -- starting a container, publishing the address and bearer the engine and the probe
+    are built from -- and leaving it is what gives it back. The use case enters it only after the Spend
+    Gates have let an OCR read through, so a native upload or a refusal never rents anything, and leaves
+    it before the Reading answers, so the wait it took to come up is part of the reported number.
+
+    Entering raises when the worker cannot be had at all -- a provider whose start command fails, a lease
+    it refuses -- and the caller answers that as a refusal of kind ``unavailable``, because the gates did
+    not close and no lane was chosen.
+    """
+
+    def __call__(self) -> AbstractContextManager[tuple[OcrEngine, OcrEndpointProbe]]: ...
 
 
 class DeclaredPageReader(Protocol):

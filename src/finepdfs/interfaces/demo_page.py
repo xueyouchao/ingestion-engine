@@ -279,17 +279,20 @@ function renderTimeline(stage, outcome, warmMs) {
   const current = done ? STAGES.length : STAGES.indexOf(stage) + 1;
   for (const item of byId("timeline-stages").children) {
     const index = STAGES.indexOf(item.dataset.stage);
+    const seen = state.seen.has(item.dataset.stage);
     let mark = "pending";
-    if (index < current - 1 || (done && state.seen.has(item.dataset.stage))) mark = "done";
-    else if (done) mark = "skipped";
+    // A finished job marks the stages it really reached: a native read never warms anything, and saying
+    // otherwise on the page would claim a wait that did not happen.
+    if (done) mark = seen ? "done" : "skipped";
+    else if (index < current - 1 || seen) mark = "done";
     else if (index === current - 1) mark = "active";
     item.dataset.state = mark;
   }
   if (outcome === "read") {
     byId("warm-measured").textContent =
       warmMs === null || warmMs === undefined
-        ? "Warm-up: the worker was already serving, so no wait was measured."
-        : "Warm-up: " + (warmMs / 1000).toFixed(1) + " s measured waiting for the cold OCR worker.";
+        ? "Warm-up: none \u2014 the text layer needed no worker."
+        : "Warm-up: " + (warmMs / 1000).toFixed(1) + " s measured, from the first readiness question.";
   } else if (stage === "done") {
     byId("warm-measured").textContent = "";
   } else {
@@ -368,6 +371,8 @@ function renderJob(job) {
   if (job.stage !== "done") return;
   stopPolling();
   byId("upload-button").disabled = false;
+  // An OCR read charges the day's budget, so the standing limits are stale the moment a job finishes.
+  loadStatus();
   if (job.outcome === "read") renderReading(job.reading);
   else if (job.outcome === "refused") renderRefusal(job.refusal);
   else if (job.outcome === "failed") renderFailure(job.failure);

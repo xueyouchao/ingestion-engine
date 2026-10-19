@@ -25,8 +25,10 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
-from collections.abc import Callable, Mapping, MutableMapping
+from collections.abc import Callable, Iterator, Mapping, MutableMapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from http import HTTPStatus
@@ -35,7 +37,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from finepdfs.application.curate import CurationPolicy
-from finepdfs.application.demo_read import DemoRead, ReadingOutcome, Refusal
+from finepdfs.application.demo_read import DemoRead
 from finepdfs.domain.demo import (
     DEFAULT_DAILY_OCR_PAGE_BUDGET,
     DEFAULT_PAGE_CAP,
@@ -46,20 +48,20 @@ from finepdfs.domain.demo import (
     DEFAULT_UPLOAD_BYTES,
     DEFAULT_WARM_TIMEOUT_SECONDS,
     DemoLimits,
-    ReadingStage,
     SpendGatePolicy,
 )
-from finepdfs.domain.ports import GateLedger
+from finepdfs.domain.ports import GateLedger, OcrEndpointProbe, OcrEngine
 from finepdfs.infrastructure.compute.endpoint import ENGINE_API_KEY, ENGINE_BASE_URL
-from finepdfs.infrastructure.compute.ocr_endpoint import HttpOcrEndpointProbe
+from finepdfs.infrastructure.compute.ocr_endpoint import endpoint_probe
 from finepdfs.infrastructure.compute.providers import (
     GPU_BASE_URL,
     GPU_START_COMMAND,
     leased_environment,
 )
 from finepdfs.infrastructure.demo.ledger import InMemoryGateLedger
-from finepdfs.infrastructure.engines.environment import engine_adapters, ocr_routing_policy
-from finepdfs.infrastructure.engines.registry import PADDLEOCR_VL_ENGINE
+from finepdfs.infrastructure.engines.environment import ENGINE_COMMAND, engine_config, ocr_routing_policy
+from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextLayerProbe
+from finepdfs.infrastructure.engines.registry import PADDLEOCR_VL_ENGINE, build_engines, engine_endpoint
 from finepdfs.interfaces.demo_jobs import QueueFull, Reader, ReadingJob, ReadingQueue
 from finepdfs.interfaces.demo_page import DEMO_HTML
 
@@ -97,6 +99,12 @@ DEFAULT_UPLOAD_NAME = "upload.pdf"
 # -- and ``unreadable`` stays the use case's own word for bytes a PDF reader could not open.
 UPLOAD = "upload"
 NO_CLIENT = ""
+
+# What a failure's words are shown through: an address or a token in a public answer is a leak, not a
+# diagnosis. The URL pattern catches a lease-published address the composition root never spelled.
+WORKER_ADDRESS = "<the OCR worker>"
+WORKER_TOKEN = "<the bearer>"
+_URL = re.compile(r"https?://[^\s'\"<>]+")
 
 
 class DemoLimitError(ValueError):
@@ -204,7 +212,8 @@ class DemoApp:
         self._limits = limits if limits is not None else demo_limits(self._environ)
         self._engine_name = engine_name if engine_name is not None else configured_engine(self._environ)
         self._ledger = ledger if ledger is not None else InMemoryGateLedger(clock=clock, limits=self._limits)
-        self._queue = ReadingQueue(read if read is not None else self._read_under_lease, self._limits)
+        self._use_case = self._demo_read()
+        self._queue = ReadingQueue(read if read is not None else self._use_case.read, self._limits)
 
     @property
     def limits(self) -> DemoLimits:
@@ -248,70 +257,65 @@ class DemoApp:
         """Stop the queue's worker; the process is ending or the test is done."""
         self._queue.close()
 
-    def _read_under_lease(
-        self, content: bytes, client: str, on_stage: Callable[[ReadingStage], None], name: str
-    ) -> ReadingOutcome:
-        """One Reading, with the GPU leased for exactly its length.
+    @contextmanager
+    def _worker(self) -> Iterator[tuple[OcrEngine, OcrEndpointProbe]]:
+        """The OCR lane's worker, entered only for an admitted OCR read.
 
-        The lease mutates the environment and the engine is built from that environment *after* the
-        lease, which is why this cannot be built once at startup: a worker this demo rents exists only
-        while a Reading is in flight. The single queue slot is what makes that safe (ADR-0012).
+        Entering leases the GPU this demo was configured for and publishes its endpoint into the
+        environment; the engine and the readiness probe are built *inside* the lease, from that
+        environment, because a worker this demo rents exists only while a Reading is in flight. The
+        single queue slot is what makes the in-place environment safe (ADR-0012).
 
-        A lease that fails before a Reading happened is a Refusal of the ``unavailable`` kind, because
-        the gates did not close and no lane failed -- the demo could not reach its worker. A release
-        that fails *after* a good Reading is logged and the Reading is still returned: the visitor's
-        text is real, and the operator's own report is the log line (ADR-0007).
+        Nothing is leased by a native upload or by a refused one: the use case enters this only after
+        the gates have let an OCR read through, which is the difference between a demo and a bill.
         """
-        outcome = None
-        leaked: BaseException | None = None
-        try:
-            with leased_environment(self._environ):
-                demo_read = self._demo_read()
-                outcome = demo_read.read(content, client, on_stage, name)
-        except Exception as error:  # the demo answers with the fault instead of crashing
-            if outcome is None:
-                return self._unavailable(error)
-            leaked = error
-        if leaked is not None:
-            logger.warning("the GPU lease could not be released after a Reading: %s", leaked)
-        # The use case answers one of its three outcomes or raises; reaching here means it answered.
-        assert outcome is not None
-        return outcome
+        with leased_environment(self._environ):
+            config = engine_config(self._environ, self._engine_name)
+            engines = build_engines([config])
+            # Which probe an engine asks for is the registry's rule, not a guess: a command means a
+            # process on this host, and only an address means something worth waiting for.
+            probe = endpoint_probe(engine_endpoint(config), self._environ.get(ENGINE_API_KEY, ""))
+            yield engines[self._engine_name], probe
 
     def _demo_read(self) -> DemoRead:
-        """The use case, built from the leased environment the way a run builds its own runtime.
+        """The use case, built once: the native lane here, the OCR lane from what the worker publishes.
 
-        The adapters come from the same assembler a run uses, so the demo cannot reach a different
-        engine identity, page DPI or routing threshold than the batch pipeline reads with (ADR-0012).
+        The routing thresholds and the engine name come from the reader a run uses, and the native
+        engine is the registry's, so a Reading the demo takes is comparable with a run's (ADR-0012).
         """
         values = self._environ
-        adapters = engine_adapters(values, self._engine_name)
-        policy = CurationPolicy(
-            engine_name=self._engine_name,
-            routing=adapters.routing,
-        )
+        policy = CurationPolicy(engine_name=self._engine_name, routing=ocr_routing_policy(values))
         return DemoRead(
-            probe=adapters.probe,
-            engines=adapters.engines,
+            probe=PymupdfTextLayerProbe(),
+            engines=build_engines([]),
             policy=policy,
             gates=SpendGatePolicy(self._limits),
             ledger=self._ledger,
-            endpoint=HttpOcrEndpointProbe(
-                values.get(ENGINE_BASE_URL, ""),
-                values.get(ENGINE_API_KEY, ""),
-            ),
+            worker=self._worker,
             warm_timeout_seconds=self._limits.warm_timeout_seconds,
             poll_interval_seconds=self._limits.poll_interval_seconds,
+            redact=self._redact,
         )
 
-    def _unavailable(self, error: BaseException) -> Refusal:
-        """A demo that could not build a reader, said in the refusal vocabulary the page already has."""
-        return Refusal(
-            kind="unavailable",
-            reason=f"the demo could not reach its OCR worker: {_words(error)}",
-            plan=None,
-            thresholds=ocr_routing_policy(self._environ),
-        )
+    def _redact(self, message: str) -> str:
+        """Take the worker's address and bearer out of a message the page will show."""
+        return redact(message, self._environ)
+
+
+def redact(message: str, values: Mapping[str, str]) -> str:
+    """A message with every configured address, host and bearer masked.
+
+    An engine's transport error quotes the address it called, and the job answer is public: the page must
+    never carry the worker's address or the token (ADR-0012). The configured values are masked exactly and
+    anything else that looks like a URL is masked by shape, so an address the composition never spelled --
+    one a lease published -- is caught too.
+    """
+    masked = message
+    for variable in (ENGINE_BASE_URL, ENGINE_API_KEY):
+        value = values.get(variable, "").strip()
+        if value:
+            masked = masked.replace(value, WORKER_ADDRESS if variable == ENGINE_BASE_URL else WORKER_TOKEN)
+    return _URL.sub(WORKER_ADDRESS, masked)
 
 
 def _number(limit: _Limit, raw: str) -> float | int:
@@ -329,12 +333,14 @@ def _number(limit: _Limit, raw: str) -> float | int:
 def _endpoint_configured(values: Mapping[str, str]) -> bool:
     """Whether the demo's environment names an OCR worker at all, without leasing one to find out.
 
-    The address may come from the engine's own names (a deployed app an operator pasted in) or from the
-    provider's (a worker this demo rents or a fixed server). Neither value is echoed: this is a yes/no.
+    "Wired" is any of the three ways an OCR lane is reached: the engine's own address (a deployed app an
+    operator pasted in), the provider's address, or a start command -- the last two being a worker this
+    demo rents and a process it runs here. A local engine's command counts, because a document that needs
+    OCR is then read rather than failed. None of the values is echoed: this is a yes/no.
     """
     return any(
         values.get(variable, "").strip()
-        for variable in (ENGINE_BASE_URL, GPU_BASE_URL, GPU_START_COMMAND)
+        for variable in (ENGINE_BASE_URL, GPU_BASE_URL, GPU_START_COMMAND, ENGINE_COMMAND)
     )
 
 
