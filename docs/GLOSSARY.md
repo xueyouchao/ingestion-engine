@@ -140,3 +140,27 @@ out as markdown plus one JSON record.
 
 **Exclusion** — a Document recorded as dropped or failed, with its reason, so nothing disappears
 silently.
+
+**Reading** — one uploaded document's journey through the live upload demo: routed by the pipeline's own
+policy, judged by the Spend Gates, read by the lane the OCR Decision chose, and answered as one outcome.
+`DemoRead.read` returns a Reading as one of three things — read, refused or failed — and a Reading leaves
+nothing behind: it curates nothing, publishes nothing and exports no Chunk.
+
+**Spend Gate** — one of the three bounds on what a visitor can cost, applied in one order by
+`SpendGatePolicy`: the **page cap** per upload, the **rate limit** per client over a sliding window, and the
+**daily OCR page budget** (`page-cap`, `rate-limit` and `daily-budget` are the kinds a refusal names). The
+first that closes refuses the upload in its own words; only OCR pages are ever charged.
+
+**Gate Ledger** — the counters the Spend Gates read: the reads inside each client's window and the OCR pages
+charged to the current UTC day. A port (`GateLedger`) whose only adapter is `InMemoryGateLedger`, so a
+restart of the demo server forgives every counter. Pages are charged when a Reading is admitted, never on
+success, and a refusal charges nothing.
+
+**Reading Queue** — the demo server's single slot and the bounded list of Readings waiting behind it
+(`ReadingQueue`). One Reading runs at a time, which is what makes leasing the GPU per Reading safe; an
+upload that finds every place taken is refused with kind `busy` rather than waiting unboundedly.
+
+**Warm Control** — the operator command that reports and moves the deployed OCR worker's floor —
+`python -m deploy.modal.warm status|on|off`, in `deploy/modal/warm.py` — and names what that floor costs per
+minute at the pinned L4 rate. `on` holds one container warm without a redeploy; `off` returns the app to the
+resting zero it ships with.
