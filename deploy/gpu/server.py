@@ -28,8 +28,12 @@ MODEL_VARIABLE = "PADDLEOCR_VL_MODEL"
 REVISION_VARIABLE = "PADDLEOCR_VL_REVISION"
 SERVED_MODEL_VARIABLE = "PADDLEOCR_VL_SERVED_MODEL_NAME"
 PORT_VARIABLE = "PADDLEOCR_VL_PORT"
+# The bearer the deployed app checks on every `/v1` route (ADR-0012). Unset on a leased worker, whose
+# access control is the unguessable tunnel; set in the deployed app, where the Secret injects it.
+API_KEY_VARIABLE = "PADDLEOCR_VL_API_KEY"
 
 DEFAULT_PORT = "8000"
+MASKED_BEARER = "***"
 
 # Arguments from the vLLM recipe for PaddleOCR-VL-1.6. OCR workloads do not benefit from prefix
 # caching or image reuse, so both are disabled as the recipe recommends.
@@ -48,14 +52,19 @@ class ServerConfigurationError(RuntimeError):
 
 
 def serve_argv(environ: Mapping[str, str]) -> list[str]:
-    """The argv the worker runs: the pinned vLLM command, built from the image's environment."""
+    """The argv the worker runs: the pinned vLLM command, built from the image's environment.
+
+    ``--api-key`` is added only when a bearer is set. That is the deployed app's posture: vLLM then
+    refuses every ``/v1`` route without it (ADR-0012). A leased worker sets no bearer, because its
+    protection is the unguessable tunnel it is reached through.
+    """
     model = _required(environ, MODEL_VARIABLE)
     revision = _required(environ, REVISION_VARIABLE)
     served_model = _required(environ, SERVED_MODEL_VARIABLE)
     port = environ.get(PORT_VARIABLE, DEFAULT_PORT).strip() or DEFAULT_PORT
     if not port.isdigit():
         raise ServerConfigurationError(f"{PORT_VARIABLE} is not a port number: {port!r}")
-    return [
+    command = [
         "vllm",
         "serve",
         model,
@@ -67,8 +76,24 @@ def serve_argv(environ: Mapping[str, str]) -> list[str]:
         "0.0.0.0",
         "--port",
         port,
-        *RECIPE_ARGUMENTS,
     ]
+    api_key = environ.get(API_KEY_VARIABLE, "").strip()
+    if api_key:
+        command.extend(["--api-key", api_key])
+    return [*command, *RECIPE_ARGUMENTS]
+
+
+def masked_command(argv: Sequence[str]) -> list[str]:
+    """The same argv with every bearer replaced, for the one place the command is printed.
+
+    The command is printed so an operator can see the pinned recipe before it runs; the bearer is set
+    from a Secret, and a token pasted out of that output into a shell history or a ticket is a bill.
+    """
+    masked = list(argv)
+    for index, argument in enumerate(masked[:-1]):
+        if argument == "--api-key":
+            masked[index + 1] = MASKED_BEARER
+    return masked
 
 
 def main(
@@ -81,7 +106,8 @@ def main(
     arguments = list(sys.argv[1:] if argv is None else argv)
     values = os.environ if environ is None else environ
     if arguments == ["--print-command"]:
-        print(json.dumps(serve_argv(values), separators=(",", ":")), file=stream or sys.stdout)
+        command = masked_command(serve_argv(values))
+        print(json.dumps(command, separators=(",", ":")), file=stream or sys.stdout)
         return 0
     if arguments:
         print(f"server.py takes no arguments except --print-command, got {arguments!r}", file=sys.stderr)

@@ -394,3 +394,38 @@ def test_a_crashed_holder_releases_the_reservation_when_its_process_dies(tmp_pat
 
     with contract.lease_reservation(path) as granted:
         assert granted == lock_file, "and it is not the lock: the reservation is granted again"
+
+
+def test_the_deployed_app_pins_one_container_a_zero_floor_and_the_l4_rate() -> None:
+    """The deploy posture is a pin, not a deploy-time variable: one GPU, scale to zero between visits.
+
+    The rate is Modal's published L4 price observed on 2026-10-19, with the page it came from, because
+    the Warm Control's number and the runbook's number must be the same number.
+    """
+    assert contract.DEPLOYED_APP_NAME == "finepdfs-demo-ocr"
+    assert contract.DEPLOYED_SERVER_NAME == "OcrWorkerServer"
+    assert contract.DEPLOYED_SECRET_NAME == "finepdfs-demo-ocr-bearer"
+    assert contract.DEPLOYED_GPU == "L4"
+    assert contract.DEPLOYED_MAX_CONTAINERS == 1
+    assert contract.DEPLOYED_MIN_CONTAINERS == 0
+    assert 120 <= contract.DEPLOYED_SCALEDOWN_WINDOW <= 300, "the low minutes ADR-0012 asks for"
+    assert contract.DEPLOYED_STARTUP_TIMEOUT >= 900, "the first weights load was measured in minutes"
+    assert contract.DEPLOYED_EXIT_GRACE_PERIOD > 0
+    assert contract.GPU_RATE_PER_SECOND_USD == 0.000222
+    assert contract.GPU_RATE_SOURCE == "https://modal.com/pricing"
+    assert contract.GPU_RATE_OBSERVED == "2026-10-19"
+
+
+def test_a_held_warm_container_costs_the_pinned_rate_per_minute_and_per_hour() -> None:
+    """The number the Warm Control names comes from the contract, so no command can invent one."""
+    cost = contract.warm_floor_cost(1)
+
+    assert cost.containers == 1
+    assert cost.per_minute_usd == pytest.approx(0.01332)
+    assert cost.per_hour_usd == pytest.approx(0.7992)
+    assert cost.per_minute() == "$0.0133"
+    assert cost.per_hour() == "$0.80"
+
+    assert contract.warm_floor_cost(0).per_minute() == "$0.0000"
+    assert contract.warm_floor_cost(0).per_hour() == "$0.00"
+    assert contract.warm_floor_cost(2).per_minute() == "$0.0266"
