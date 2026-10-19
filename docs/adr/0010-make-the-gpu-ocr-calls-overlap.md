@@ -4,7 +4,13 @@ Date: 2026-10-19
 
 ## Status
 
-Proposed
+Accepted. Amended 2026-10-19, on the day it was accepted: **step 4 was not taken.** The machine this
+landed from has no GPU, so neither worker pin was measured or changed. `--mm-processor-cache-gb 0` and
+`--max-num-batched-tokens 16384` stay exactly as they are, and this ADR does not claim they were
+revisited. Step 4 stands as a measurement still to be taken; the
+[deploy runbook](../deploy/modal-worker-runbook.md#assumptions-and-what-the-first-paid-runs-did-and-did-not-settle)
+now carries the check an operator runs on a real worker and what each answer would mean. What the repo
+owns is that instruction, not a number it did not measure.
 
 ## Context
 
@@ -30,13 +36,16 @@ thread each, so a blocking body freezes every sibling task. ADR-0006 describes t
 
 ## Decision
 
-Fix the shape, and bound the result. Four changes, in this order.
+Fix the shape, and bound the result. Three changes, then a measurement -- and the Status says whether
+the measurement was taken.
 
-1. **A `def`, not an `async def`.** `extract_with_engine` becomes a synchronous processor and
-   `flow.py:145` drops its `await`. `OcrEngine.extract` is already sync (`ports.py:43`), so no engine or
-   port changes and the core gives each document its own thread. The memo scope is unchanged -- one
-   document, keyed on digest, engine name and identity -- but this is **not** free of re-reads; see
-   "One re-read" below.
+1. **A `def`, not an `async def`.** `extract_with_engine` becomes a synchronous processor. The call
+   site keeps its `await`: `coco.use_mount` is `async def` in the pinned CocoIndex
+   (`cocoindex/_internal/api.py`), so `read_document` awaits the mount whatever shape the processor it
+   runs has. What changes is the processor's body, not the call site -- nothing was removed to go
+   looking for. `OcrEngine.extract` is already sync (`ports.py:43`), so no engine or port changes and
+   the core gives each document its own thread. The memo scope is unchanged -- one document, keyed on
+   digest, engine name and identity -- but this is **not** free of re-reads; see "One re-read" below.
 2. **Pages overlap; rendering does not.** `PaddleOcrVlEngine.extract` keeps walking its pages on the
    calling thread and hands only the HTTP request to a bounded `ThreadPoolExecutor`, so page *k*'s request
    is in flight while page *k+1* renders. Reassembly is by `PageText.number`, never completion order.
@@ -51,10 +60,10 @@ Fix the shape, and bound the result. Four changes, in this order.
    is deliberately *not* a permit a document body takes before waiting for its own pages: with N
    documents holding all N permits and each waiting on work that needs one, the run deadlocks. Both the
    remote and the CLI engines read it.
-4. **Revisit two worker pins once requests overlap.** `--mm-processor-cache-gb 0` (`deploy/gpu/server.py:41`)
-   makes every concurrent request re-preprocess its image on the worker's CPU, which saturates before the
-   GPU does; `--max-num-batched-tokens 16384` (`:38`) is where a batch of page images gets split. Neither
-   number is changed blind: measure first.
+4. **Revisit two worker pins once requests overlap.** *Not taken: see Status.*
+   `--mm-processor-cache-gb 0` (`deploy/gpu/server.py:41`) makes every concurrent request re-preprocess
+   its image on the worker's CPU, which saturates before the GPU does; `--max-num-batched-tokens 16384`
+   (`:38`) is where a batch of page images gets split. Neither number is changed blind: measure first.
 
 ## Alternatives considered
 

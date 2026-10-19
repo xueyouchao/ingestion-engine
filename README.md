@@ -365,10 +365,12 @@ it costs a re-read of every document and nothing else, and you should delete it 
 of the flow (as this branch did when the deciding pass was introduced): a state database written by an
 older component tree can leave declarations that no current component owns.
 
-*The first pass is concurrent, the second is one component.* Reading runs per document and is memoised;
-deciding runs once and holds every text in memory. That is what makes a corpus-wide duplicate decision
-possible, and it is the reason this pipeline is aimed at corpora of thousands of documents rather than
-the whole crawl.
+*The first pass is concurrent, the second is one component.* Reading runs per document, on a thread of
+its own, and is memoised, so a slow engine call holds up its own document while its siblings keep
+going -- the ones that cost money included. Inside one document the page requests overlap while its
+pages are rendered one at a time, because the renderer is not thread-safe. Deciding runs once and holds
+every text in memory. That is what makes a corpus-wide duplicate decision possible, and it is the reason
+this pipeline is aimed at corpora of thousands of documents rather than the whole crawl.
 
 ## Tests
 

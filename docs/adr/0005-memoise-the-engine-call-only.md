@@ -16,6 +16,11 @@ that lands, and the documents that engine read are read once more before being m
 one-time cost, not a per-run one, and the alternative -- leaving DPI out -- would serve a 300 DPI read
 from a 200 DPI setting.
 
+ADR-0010 made the memoised body a plain `def` rather than an `async def` and left the memo key
+unchanged: still (content digest, engine name, engine identity), one document, no new input. The key
+also carries the body's AST, so that change re-reads every document once -- ADR-0010's Consequences
+say why that is this decision working, not a revision of it.
+
 ## Context
 
 FinePDFs' expensive stages are the OCR engines: a document vision model reading 40 pages costs minutes
@@ -33,7 +38,7 @@ The memoised unit is exactly one thing:
 
 ~~~~python
 @coco.fn(memo=True)
-async def extract_with_engine(digest: str, engine_name: str, engine_identity: str) -> ExtractedDocument: ...
+def extract_with_engine(digest: str, engine_name: str, engine_identity: str) -> ExtractedDocument: ...
 ~~~~
 
 The memo key is therefore (content digest, engine name, engine identity), and nothing else: not the path

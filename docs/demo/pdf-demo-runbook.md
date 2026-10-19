@@ -138,9 +138,10 @@ are memo keys the reading pass asked for and served from CocoIndex's memo.
 | policy | `--min-characters 5000` | 0 | 18 | native 16, ocr 2 | 14 docs / 308 pages | 5 (dropped 3, exact 1, near 1) | 8.9 s | 9.3 s |
 
 The cold run is dominated by the two genuine scans: Docling took 54.5 s on the one-page scan and
-73.0 s on the two-page scan, and the extract body is synchronous, so those calls serialise. The
-`pymupdf` Documents are effectively free. The two cheap runs differ by seconds, both spent in the
-deciding pass and target-state apply, not in an engine.
+73.0 s on the two-page scan, and at rehearsal time the extract body was `async def` with nothing to
+await, so those two calls serialised (ADR-0010 made that body a plain `def`; these are the rehearsal's
+numbers, not a measurement of the shape after it). The `pymupdf` Documents are effectively free. The two
+cheap runs differ by seconds, both spent in the deciding pass and target-state apply, not in an engine.
 
 ### The demo command itself
 

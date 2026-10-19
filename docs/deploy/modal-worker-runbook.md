@@ -295,6 +295,61 @@ which, and [the evidence record](modal-worker-evidence.md) has the numbers.
   tunnel, and `/v1/chat/completions` read one page and the two scans. There is deliberately no command
   override: if the upstream surface differs, this file and its test change, so the served command stays
   pinned and inspectable.
+* **The two concurrency pins in that command.** `--mm-processor-cache-gb 0` and
+  `--max-num-batched-tokens 16384` (`RECIPE_ARGUMENTS` in `deploy/gpu/server.py`) were chosen when one
+  page request was in flight at a time. Page requests now overlap inside a Document (ADR-0010 step 2),
+  so 0 GB of multimodal processor cache means every concurrent request re-preprocesses its image on the
+  Worker's CPU, and 16384 is the point where a batch of page images is split. ADR-0010 step 4 said
+  neither number moves before it is measured, and no run has measured either one under overlap: **not
+  settled, and both numbers are unchanged.** A run on a real Worker settles them, and it settles each
+  pin separately -- send the same page set through a leased Worker twice, once with one page in flight
+  and once at the overlap the pipeline now produces, and sample the Worker while each send is running.
+  The lease to read is the file `ls` lists: a provider run names its file after the Lease Identity it
+  passed to both commands, and a hand-run start records `manual.json`.
+
+  ```bash
+  # the Preflight environment, .venv-deploy: it is the one with the pinned Modal SDK
+  . .venv-deploy/bin/activate
+
+  STATE_DIR="${FINEPDFS_GPU_STATE_DIR:-$HOME/.cache/finepdfs/gpu-workers}"
+  ls "$STATE_DIR"/*.json            # one file per lease; manual.json is the hand-run start
+  LEASE="$STATE_DIR/<the lease this run is using>.json"
+  python -m json.tool "$LEASE"      # worker_id is the sandbox id deploy/modal/stop.py terminates
+
+  # GPU utilisation and residency, then a CPU sample if the image carries a sampler
+  python - "$LEASE" <<'PY'
+  import json, sys, modal
+  worker_id = json.load(open(sys.argv[1]))["worker_id"]
+  sandbox = modal.Sandbox.from_id(worker_id)
+  for argv in (
+      ("nvidia-smi", "dmon", "-c", "20"),
+      ("sh", "-c", "command -v top >/dev/null && top -bn1 | head -12 || echo 'no top in this image'"),
+  ):
+      process = sandbox.exec(*argv)
+      process.wait()
+      print(argv, process.stdout.read().decode()[:4000])
+  PY
+
+  modal app logs finepdfs-gpu-worker    # vLLM's own Running/Waiting and throughput lines
+  ```
+
+  The `Sandbox.from_id(...).exec(...)` call is the pinned SDK's, and like the rest of this file it is a
+  command to run, not a claim that it has been run; the CPU half prints `no top in this image` if that
+  sampler is absent, which leaves the CPU question open rather than answered. What each answer means:
+
+  * **`--mm-processor-cache-gb 0`** -- if the CPU sample is saturated while `nvidia-smi` shows the GPU
+    well below its capacity, concurrent requests are re-preprocessing images and this pin is why:
+    measure a cache above 0 against the same send. If the GPU is busy and the CPU has room, 0 costs
+    nothing and stays. With no CPU sample at all, record that half as unmeasured; the GPU numbers alone
+    do not settle it.
+  * **`--max-num-batched-tokens 16384`** -- if vLLM reports requests waiting while the card still has
+    memory free, batches are being split below what the card could hold: measure a higher ceiling
+    against the same send. If nothing waits and memory is near the card's limit, 16384 is doing its job
+    and stays.
+
+  Record which card, which page set and which of the two sends each answer came from, in
+  [the evidence record](modal-worker-evidence.md): a number measured on an L4 is not an answer for
+  another card, and one measured through a one-at-a-time send is not an answer about the overlap.
 * **The weights cache.** The first real start creates the Modal Volume `finepdfs-hf-cache` and lets
   vLLM download the pinned revision into it; later runs reuse it. **Observed:** the first start (weights
   download included) took 450 s end to end for start, readiness, one page and stop, while the later runs
