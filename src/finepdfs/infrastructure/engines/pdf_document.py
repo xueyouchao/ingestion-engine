@@ -32,6 +32,9 @@ class MuPDFDocument:
 
     def __enter__(self) -> Self:
         try:
+            # ``filetype`` is a hint, not a filter: MuPDF sniffs the stream, so this opens a PDF and also
+            # a PNG, a JPEG or a (possibly multi-frame) TIFF. The scan path depends on that -- do not
+            # "tighten" it to reject anything that is not a PDF, or every scan becomes unreadable.
             self._document = pymupdf.open(stream=self.content, filetype="pdf")
         except Exception as error:
             raise DocumentReadError(f"these bytes are not a readable PDF or image: {error}") from error
