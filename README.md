@@ -102,7 +102,8 @@ reads declared outputs and the corpus PDFs; it never writes into a state.
   renders / 18.19 MiB of JPEG at 72 dpi beside a 3.84 MiB page.
 - `--inline` bakes those renders into the page instead, producing one self-contained file (~28 MiB here).
 - `--check` reports whether the bundle still mirrors what the flow declared, per state, from a sha256
-  over each state's run summary and sorted chunk files.
+  over every declared file the page copies a fact from: the run summary, records, pages, chunks and
+  exclusions. A bundle from another schema version is refused rather than called fresh.
 - `--link` names where the bundle is served; the page offers it whenever a page image cannot load, which
   is exactly what a sandboxed preview pane does with a sibling `images/` directory.
 - The bundle is gitignored and rebuilt, never committed: it is a copy of evidence, and `--check` is what

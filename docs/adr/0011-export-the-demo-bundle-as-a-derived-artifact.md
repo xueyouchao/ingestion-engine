@@ -29,8 +29,9 @@ and the corpus PDFs. It never writes into a state.
 - Page images are keyed by PDF digest and page number, so two engine readings share one render: a render
   is of the PDF, not of the engine. 313 renders serve both states.
 - `bundle.json` records the schema version, the states, the counts and, per state, a
-  `declared_fingerprint` -- a sha256 over the run summary and the sorted chunk files -- so `--check` can
-  say whether the bundle still mirrors what the flow declared.
+  `declared_fingerprint` -- a sha256 over every declared file the page copies a fact from (the run
+  summary, records, pages, chunks and exclusions) -- so `--check` can say whether the bundle still
+  mirrors what the flow declared, and refuse a contract from another schema rather than call it fresh.
 - `--inline` bakes the same renders into the page as data URIs, for a single self-contained file. The
   default writes siblings, because a 3.84 MiB page plus 18.19 MiB of images is what a static host wants
   to serve and what a browser can open without a server.
@@ -46,6 +47,8 @@ and the corpus PDFs. It never writes into a state.
 + The page is client-side only -- corpus search, page navigation and both readings run in the browser --
   so a static file host is enough. Here an `nginx` container serves `dist/bundle` behind the existing
   Traefik (`deploy/bundle/`).
-- The bundle is a second copy of page renders on disk (~22 MiB for this corpus), regenerated per build.
+- The bundle is a second copy of page renders on disk (~22 MiB for this corpus), regenerated per build,
+  and a rebuild keeps the generation the previous contract referenced until the next one retires it, so a
+  reader that has not reloaded is not left with 404s.
 - Only pages of published documents appear; exclusions are shown as counts with their verbatim reasons,
   not as pages.
