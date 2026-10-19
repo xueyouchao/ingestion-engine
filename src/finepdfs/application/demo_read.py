@@ -154,24 +154,24 @@ class DemoRead:
         except Exception as error:  # bytes the probe cannot measure are a refusal, not a crash
             return Refusal(kind="unreadable", reason=_words(error), plan=None, thresholds=self._policy.routing)
 
-        # The page cap and the rate limit, on the snapshot taken before this read counts itself: asking
-        # again after recording would count this read against the visitor who is making it.
         page_count = plan.quality.page_count
+        # The page cap and the rate limit are decided on the snapshot taken before this read counts
+        # itself; the budget is asked only for the OCR lane, because only OCR pages cost money. One
+        # decision, and the policy applies the gates in ADR-0012's order inside it. A refusal spends
+        # nothing -- no read against the visitor's window, no page against the day -- so the two charges
+        # below happen only after every gate has let this upload through.
         usage = self._ledger.usage(client)
-        closed = _closed(self._gates.decide(page_count, usage, ocr_pages=None), plan, self._policy.routing)
+        ocr_pages = page_count if plan.decision.needs_ocr else None
+        closed = _closed(self._gates.decide(page_count, usage, ocr_pages=ocr_pages), plan, self._policy.routing)
         if closed is not None:
             return closed
         self._ledger.record_read(client)
+        if ocr_pages is not None:
+            # Charged on admission, not on success: an admitted read spends the GPU whether or not it
+            # finishes, and nothing here can give a charge back.
+            self._ledger.charge_ocr_pages(ocr_pages)
 
         if plan.decision.needs_ocr:
-            # Only OCR pages are billed, and they are charged once they are admitted: an admitted read
-            # spends the GPU whether or not it finishes, and nothing here can give a charge back.
-            closed = _closed(
-                self._gates.decide(page_count, usage, ocr_pages=page_count), plan, self._policy.routing
-            )
-            if closed is not None:
-                return closed
-            self._ledger.charge_ocr_pages(page_count)
             try:
                 warm_ms = self._warm(on_stage)
             except (OcrEndpointUnavailable, _WarmTimeout) as fault:
@@ -214,7 +214,7 @@ class DemoRead:
         """A lane's failure, in the error's own words and under the exclusion kind that already exists."""
         return FailedReading(
             kind="failed",
-            lane=plan.engine_name,
+            lane=_lane(plan),
             reason=_words(error),
             plan=plan,
             thresholds=self._policy.routing,
@@ -230,6 +230,15 @@ def _closed(decision: GateDecision, plan: RoutingPlan, thresholds: OcrRoutingPol
     if decision.refused and decision.gate is not None:
         return Refusal(kind=decision.gate, reason=decision.reason, plan=plan, thresholds=thresholds)
     return None
+
+
+def _lane(plan: RoutingPlan) -> str:
+    """Which lane was chosen, in the vocabulary a published record already uses for the same fact.
+
+    ``DocumentRecord.routing_decision`` in ``domain/publishing.py`` names the two lanes this way, so a
+    failed Reading says "ocr" or "text-layer" and the page can put the engine's own name beside it.
+    """
+    return "ocr" if plan.decision.needs_ocr else "text-layer"
 
 
 def _words(error: BaseException) -> str:

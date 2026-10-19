@@ -285,7 +285,9 @@ def test_the_daily_ocr_budget_closes_only_the_ocr_lane_and_charges_nothing() -> 
     assert outcome.reason == "the OCR budget for today is spent: 299 of 300 pages used and this PDF needs 2 more"
     assert outcome.plan is not None and outcome.plan.decision.needs_ocr is True
     assert "warming" not in seen and "reading" not in seen
-    assert fakes.ledger.charged == 0
+    # A refusal spends nothing at all: not a page against the day, and not a read against the visitor's
+    # window, so a budget that closes does not also eat one of their five reads.
+    assert fakes.ledger.reads == [] and fakes.ledger.charged == 0
     assert fakes.ocr.calls == 0
 
 
@@ -361,7 +363,7 @@ def test_an_endpoint_that_never_answers_is_a_failed_reading_naming_the_timeout()
 
     assert isinstance(outcome, FailedReading)
     assert outcome.kind == "failed"
-    assert outcome.lane == OCR_ENGINE
+    assert outcome.lane == "ocr"
     assert outcome.reason == "the OCR worker did not answer within 5 s"
     assert outcome.plan is not None and outcome.plan.decision.needs_ocr is True
     assert seen == ["routing", "warming"]
@@ -382,7 +384,7 @@ def test_an_endpoint_that_cannot_be_asked_is_a_failed_reading_that_never_waits()
 
     assert isinstance(outcome, FailedReading)
     assert outcome.reason == "the OCR endpoint has no base URL configured"
-    assert outcome.lane == OCR_ENGINE
+    assert outcome.lane == "ocr"
     assert seen == ["routing"]
     assert fakes.time.sleeps == []
     assert fakes.ocr.calls == 0
@@ -396,7 +398,7 @@ def test_a_lane_failure_is_a_failed_reading_in_the_error_s_own_words() -> None:
 
     assert isinstance(outcome, FailedReading)
     assert outcome.kind == "failed"
-    assert outcome.lane == NATIVE_TEXT_ENGINE
+    assert outcome.lane == "text-layer"
     assert outcome.reason == "pdf is encrypted and cannot be opened"
     assert outcome.plan is not None and outcome.plan.decision.needs_ocr is False
     assert seen == ["routing", "reading"]
@@ -409,7 +411,7 @@ def test_an_ocr_lane_failure_is_a_failed_reading_naming_the_ocr_lane() -> None:
     outcome = demo.read(b"%PDF scanned", "10.0.0.1", lambda stage: None)
 
     assert isinstance(outcome, FailedReading)
-    assert outcome.lane == OCR_ENGINE
+    assert outcome.lane == "ocr"
     assert outcome.reason == "the model answered HTTP 500"
     assert fakes.native.calls == 0
 
