@@ -23,6 +23,7 @@ from finepdfs.infrastructure.compute.endpoint import (
     ENGINE_MODEL,
 )
 from finepdfs.infrastructure.corpus.index import CorpusIndex
+from finepdfs.infrastructure.engines.concurrency import ENGINE_CONCURRENCY, engine_concurrency
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextLayerProbe
 from finepdfs.infrastructure.engines.registry import EngineConfig, build_engines
 from finepdfs.infrastructure.language.registry import (
@@ -93,6 +94,7 @@ def runtime_from_environment(environ: Mapping[str, str] | None = None) -> Runtim
         model=values.get(ENGINE_MODEL, ""),
         api_key=values.get(ENGINE_API_KEY, ""),
         page_dpi=int(values.get("FINEPDFS_ENGINE_DPI", "200")),
+        concurrency=engine_concurrency(values.get(ENGINE_CONCURRENCY, "")),
         work_dir=pathlib.Path(values["FINEPDFS_ENGINE_WORK_DIR"]) if values.get("FINEPDFS_ENGINE_WORK_DIR") else None,
         timeout_seconds=float(values.get("FINEPDFS_ENGINE_TIMEOUT", "300")),
         detail=values.get(ENGINE_DETAIL, ""),

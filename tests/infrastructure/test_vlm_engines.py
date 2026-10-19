@@ -7,9 +7,9 @@ files the tool would write, which proves the command and the parsing around it.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
-import time
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -175,6 +175,69 @@ class GatedTransport(VlmChatTransport):
         return f"page {page_number} text"
 
 
+class CountingTransport(GatedTransport):
+    """A gated transport that also records how many page requests were in flight at once."""
+
+    def __init__(self, renders: list[RenderRecord], gate: Callable[[int], None]) -> None:
+        super().__init__(renders, gate)
+        self.running = 0
+        self.peak = 0
+        self._lock = threading.Lock()
+
+    def complete_with_page_image(self, prompt: str, image_png: bytes) -> str:
+        with self._lock:
+            self.running += 1
+            self.peak = max(self.peak, self.running)
+        try:
+            return super().complete_with_page_image(prompt, image_png)
+        finally:
+            with self._lock:
+                self.running -= 1
+
+
+def test_every_document_shares_one_bound_on_how_many_page_requests_are_in_flight(renders) -> None:
+    """The bound is the run's, not a Document's: two Documents never put more than the knob's requests
+    in flight between them. A pool built inside one read would let a run reach Documents x limit.
+    """
+    # Every page of both Documents, all at once, is what a bound per Document would put in flight: the
+    # two that the run's bound allows are never joined by the other two, and wait their turn instead.
+    all_four = threading.Barrier(4, timeout=0.25)
+
+    def wait_for_every_request(_page_number: int) -> None:
+        # Four requests meet only if the bound is per Document; under the run's bound the pair that got
+        # in waits out the rendezvous and goes on serially.
+        with contextlib.suppress(threading.BrokenBarrierError):
+            all_four.wait()
+
+    transport = CountingTransport(renders, gate=wait_for_every_request)
+    engine = PaddleOcrVlEngine(transport=transport, dpi=72, concurrency=2)
+    content = _two_page_pdf()
+    start = threading.Barrier(3)
+    extracted: list = []
+    failures: list[BaseException] = []
+
+    def read(name: str) -> None:
+        start.wait()
+        try:
+            extracted.append(engine.extract(Document(name=name, content=content)))
+        except BaseException as error:
+            failures.append(error)
+
+    threads = [threading.Thread(target=read, args=(f"https://a.example/{number}.pdf",)) for number in (1, 2)]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not any(thread.is_alive() for thread in threads), "the run stalled: a read never came back"
+    assert failures == []
+    assert len(extracted) == 2, "both Documents were read"
+    assert transport.peak == 2, f"{transport.peak} page requests were in flight at once, and the knob said two"
+    for extracted_document in extracted:
+        assert [(page.number, page.text) for page in extracted_document.pages] == [(1, "page 1 text"), (2, "page 2 text")]
+
+
 def test_paddleocr_vl_keeps_a_page_request_in_flight_while_the_next_page_renders(renders) -> None:
     """Two page requests are in flight at once, so neither answers until the other has arrived.
 
@@ -245,22 +308,26 @@ def test_paddleocr_vl_renders_every_page_on_the_extracting_thread(renders) -> No
     assert extracting_thread not in transport.threads, "the page requests did not leave the extracting thread"
 
 
-def test_a_page_that_fails_fails_its_document_and_leaves_no_pool_thread_behind(renders) -> None:
-    """A page that fails fails its Document (ADR-0010 Consequences), and the pool goes with it."""
-    transport = GatedTransport(renders, gate=lambda _page_number: None)
+def test_a_page_that_fails_fails_its_document_and_frees_its_slot_on_the_run_s_bound(renders) -> None:
+    """A page that fails fails its Document (ADR-0010 Consequences) and does not cost the run a slot.
+
+    The pool belongs to the Engine and now outlives a failed read, so what a failure must not do is keep
+    what it held: no request is left running, and the next Document is read with the bound unchanged.
+    """
+    transport = CountingTransport(renders, gate=lambda _page_number: None)
     transport.failures[2] = VlmTransportError("the model server answered 500")
-    engine = PaddleOcrVlEngine(transport=transport, dpi=72, concurrency=2)
+    engine = PaddleOcrVlEngine(transport=transport, dpi=72, concurrency=1)
 
     with pytest.raises(VlmTransportError, match="500"):
         engine.extract(Document(name="https://a.example/two.pdf", content=_two_page_pdf()))
 
-    assert len(transport.threads) == 2, "both page requests had reached the pool"
-    live = [thread for thread in transport.threads if thread.is_alive()]
-    deadline = time.monotonic() + 5
-    while live and time.monotonic() < deadline:  # poll briefly, never sleep a fixed time
-        time.sleep(0.01)
-        live = [thread for thread in transport.threads if thread.is_alive()]
-    assert live == [], "a failed read left a page-request thread running"
+    assert transport.running == 0, "the failed read left a page request running"
+
+    transport.failures.clear()
+    extracted = engine.extract(Document(name="https://a.example/two.pdf", content=_two_page_pdf()))
+
+    assert [page.number for page in extracted.pages] == [1, 2]
+    assert transport.peak == 1, f"{transport.peak} requests were in flight after the failure; the bound was one"
 
 
 def test_a_concurrency_of_one_still_reads_every_page_in_page_number_order(renders) -> None:
