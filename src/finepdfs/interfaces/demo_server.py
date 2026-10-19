@@ -58,9 +58,7 @@ from finepdfs.infrastructure.compute.providers import (
     leased_environment,
 )
 from finepdfs.infrastructure.demo.ledger import InMemoryGateLedger
-from finepdfs.infrastructure.engines.environment import engine_config, ocr_routing_policy
-from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextLayerProbe
-from finepdfs.infrastructure.engines.registry import NATIVE_ENGINE, EngineConfig, build_engines
+from finepdfs.infrastructure.engines.environment import engine_adapters, ocr_routing_policy
 from finepdfs.interfaces.demo_jobs import QueueFull, Reader, ReadingJob, ReadingQueue
 from finepdfs.interfaces.demo_page import DEMO_HTML
 
@@ -278,18 +276,20 @@ class DemoApp:
         return outcome
 
     def _demo_read(self) -> DemoRead:
-        """The use case, built from the leased environment the way a run builds its own runtime."""
+        """The use case, built from the leased environment the way a run builds its own runtime.
+
+        The adapters come from the same assembler a run uses, so the demo cannot reach a different
+        engine identity, page DPI or routing threshold than the batch pipeline reads with (ADR-0012).
+        """
         values = self._environ
+        adapters = engine_adapters(values, self._engine_name)
         policy = CurationPolicy(
             engine_name=self._engine_name,
-            routing=ocr_routing_policy(values),
-        )
-        configs: list[EngineConfig] = (
-            [] if self._engine_name == NATIVE_ENGINE else [engine_config(values, self._engine_name)]
+            routing=adapters.routing,
         )
         return DemoRead(
-            probe=PymupdfTextLayerProbe(),
-            engines=build_engines(configs),
+            probe=adapters.probe,
+            engines=adapters.engines,
             policy=policy,
             gates=SpendGatePolicy(self._limits),
             ledger=self._ledger,

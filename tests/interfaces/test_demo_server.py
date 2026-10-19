@@ -41,6 +41,7 @@ from finepdfs.domain.demo import (
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText, TextLayerQuality
 from finepdfs.domain.ocr import OcrRoutingPolicy, RoutingDecision
 from finepdfs.infrastructure.demo.ledger import InMemoryGateLedger
+from finepdfs.infrastructure.engines.environment import engine_adapters
 from finepdfs.interfaces import demo_page, demo_server
 from finepdfs.interfaces.demo_server import DemoApp
 
@@ -622,6 +623,35 @@ def test_the_limit_overrides_beat_the_environment(monkeypatch) -> None:
     limits = demo_server.demo_limits(served[-1][2])
     assert limits.page_cap == 4
     assert limits.queue_depth == 1, "the environment still supplies what no flag overrode"
+
+
+def test_the_demo_composes_its_engine_environment_the_way_a_run_does() -> None:
+    """The demo's engines and thresholds are the shared assembler's output, not a second copy of them.
+
+    The identity half of the agreement is pinned in tests/infrastructure/test_engine_environment.py,
+    where a run's engines are compared with the assembler's. Here the demo's half is pinned: the
+    thresholds it applies and the address its readiness probe asks are the environment's own values.
+    """
+    values = {
+        "FINEPDFS_ENGINE": "paddleocr-vl",
+        "FINEPDFS_ENGINE_BASE_URL": "https://ocr.example/v1",
+        "FINEPDFS_ENGINE_MODEL": "PaddleOCR-VL-1.6",
+        "FINEPDFS_ENGINE_API_KEY": "secret-token",
+        "FINEPDFS_ENGINE_DETAIL": "modal:ocr:1.6",
+        "FINEPDFS_ENGINE_DPI": "300",
+        "FINEPDFS_MIN_CHARACTERS_PER_PAGE": "120",
+        "FINEPDFS_MIN_TEXT_COVERAGE": "0.4",
+        "FINEPDFS_MAX_GARBLED_RATIO": "0.02",
+    }
+    app = DemoApp(environ=dict(values))
+    try:
+        demo = app._demo_read()
+    finally:
+        app.close()
+
+    assert demo.thresholds == engine_adapters(values, "paddleocr-vl").routing
+    assert demo.thresholds.min_characters_per_page == 120.0
+    assert demo.endpoint.base_url == "https://ocr.example/v1"
 
 
 def test_the_engine_is_named_by_the_run_variable_not_by_a_demo_copy() -> None:

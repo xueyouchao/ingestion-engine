@@ -214,7 +214,7 @@ class DemoRead:
         """A lane's failure, in the error's own words and under the exclusion kind that already exists."""
         return FailedReading(
             kind="failed",
-            lane=_lane(plan),
+            lane=plan.lane,
             reason=_words(error),
             plan=plan,
             thresholds=self._policy.routing,
@@ -230,15 +230,6 @@ def _closed(decision: GateDecision, plan: RoutingPlan, thresholds: OcrRoutingPol
     if decision.refused and decision.gate is not None:
         return Refusal(kind=decision.gate, reason=decision.reason, plan=plan, thresholds=thresholds)
     return None
-
-
-def _lane(plan: RoutingPlan) -> str:
-    """Which lane was chosen, in the vocabulary a published record already uses for the same fact.
-
-    ``DocumentRecord.routing_decision`` in ``domain/publishing.py`` names the two lanes this way, so a
-    failed Reading says "ocr" or "text-layer" and the page can put the engine's own name beside it.
-    """
-    return "ocr" if plan.decision.needs_ocr else "text-layer"
 
 
 def _words(error: BaseException) -> str:

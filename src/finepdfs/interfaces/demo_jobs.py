@@ -258,7 +258,7 @@ def _reading(reading: Reading | None) -> dict[str, Any] | None:
         return None
     pages = sorted(reading.pages, key=lambda page: page.number)
     return {
-        "lane": "ocr" if reading.plan.decision.needs_ocr else "text-layer",
+        "lane": reading.plan.lane,
         "reason": reading.plan.decision.reason,
         "features": dict(reading.plan.decision.features),
         "thresholds": _thresholds(reading.thresholds),

@@ -17,9 +17,8 @@ from finepdfs.domain.language import LanguagePolicy
 from finepdfs.domain.ports import OcrEngine
 from finepdfs.domain.publishing import PublishPolicy
 from finepdfs.infrastructure.corpus.index import CorpusIndex
-from finepdfs.infrastructure.engines.environment import engine_config, ocr_routing_policy
-from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextLayerProbe
-from finepdfs.infrastructure.engines.registry import NATIVE_ENGINE, build_engines
+from finepdfs.infrastructure.engines.environment import engine_adapters
+from finepdfs.infrastructure.engines.registry import NATIVE_ENGINE
 from finepdfs.infrastructure.language.registry import (
     DEFAULT_LANGUAGE_MODE,
     LanguageConfig,
@@ -80,26 +79,25 @@ def runtime_from_environment(environ: Mapping[str, str] | None = None) -> Runtim
         model_path=values.get("FINEPDFS_LANGUAGE_MODEL", ""),
     )
 
-    # One reader owns the engine's environment (infrastructure.engines.environment), and the demo
-    # server calls it too, so the two consumers cannot drift into different engines (ADR-0012).
-    config = engine_config(values, engine_name)
-    engines = build_engines([] if engine_name == NATIVE_ENGINE else [config])
+    # One reader owns the engine's environment and the adapters it assembles
+    # (infrastructure.engines.environment), and the demo server calls the same one, so the two
+    # consumers cannot drift into different engines (ADR-0012).
+    adapters = engine_adapters(values, engine_name)
 
     policy = CurationPolicy(
         engine_name=engine_name,
-        routing=ocr_routing_policy(values),
+        routing=adapters.routing,
         language=LanguagePolicy(min_confidence=float(values.get("FINEPDFS_LANGUAGE_CONFIDENCE", "0.65"))),
         publish=PublishPolicy(
             min_characters=int(values.get("FINEPDFS_MIN_CHARACTERS", "200")),
             required_languages=_languages(values),
         ),
     )
-    probe = PymupdfTextLayerProbe()
     return Runtime(
         corpus_dir=corpus_dir,
         out_dir=out_dir,
         policy=policy,
-        extraction=ExtractionStep(probe, engines, policy),
+        extraction=ExtractionStep(adapters.probe, adapters.engines, policy),
         curation=CurationStep(build_language_identifier(language_config), policy),
         similarity_threshold=float(values.get("FINEPDFS_SIMILARITY_THRESHOLD", "0.8")),
         search_enabled=_enabled(values.get("FINEPDFS_SEARCH", "")),

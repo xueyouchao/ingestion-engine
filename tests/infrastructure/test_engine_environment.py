@@ -10,7 +10,7 @@ from pathlib import Path
 
 from finepdfs.domain.ocr import OcrRoutingPolicy
 from finepdfs.infrastructure.cocoindex.runtime import runtime_from_environment
-from finepdfs.infrastructure.engines.environment import engine_config, ocr_routing_policy
+from finepdfs.infrastructure.engines.environment import engine_adapters, engine_config, ocr_routing_policy
 from finepdfs.infrastructure.engines.registry import EngineConfig, build_engines
 
 # One fixed environment: every name an engineer can set, each with a value that differs from its
@@ -93,6 +93,22 @@ def test_the_runtime_agrees_with_the_standalone_readers_on_a_fixed_environment()
     standalone_unpinned = build_engines([engine_config(unpinned, "paddleocr-vl")])["paddleocr-vl"]
 
     assert runtime_unpinned.engines["paddleocr-vl"].calls.limit == standalone_unpinned.calls.limit == 4
+
+
+def test_the_adapters_one_assembler_builds_are_what_a_run_reads_with() -> None:
+    """A run's probe, engines and thresholds are the assembler's, so the demo's cannot differ.
+
+    The demo server builds its ``DemoRead`` from the same ``engine_adapters`` call, which is what makes a
+    Reading comparable with a run (ADR-0012) -- and this pins the run's half of that agreement on the
+    observable parts: the engine set, each engine's identity, and the routing thresholds.
+    """
+    adapters = engine_adapters(ENVIRONMENT, "paddleocr-vl")
+    runtime = runtime_from_environment(ENVIRONMENT)
+
+    assert set(adapters.engines) == set(runtime.engines) == {"pymupdf", "paddleocr-vl"}
+    assert adapters.engines["paddleocr-vl"].identity == runtime.engines["paddleocr-vl"].identity
+    assert adapters.engines["paddleocr-vl"].identity.detail == "modal:ocr:1.6@dpi300"
+    assert adapters.routing == runtime.policy.routing
 
 
 def test_the_runtime_builds_from_a_blank_environment_without_raising() -> None:

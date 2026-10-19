@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import pathlib
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from finepdfs.domain.ocr import OcrRoutingPolicy
+from finepdfs.domain.ports import OcrEngine, TextLayerProbe
 from finepdfs.infrastructure.compute.endpoint import (
     ENGINE_API_KEY,
     ENGINE_BASE_URL,
@@ -22,7 +24,8 @@ from finepdfs.infrastructure.compute.endpoint import (
     ENGINE_MODEL,
 )
 from finepdfs.infrastructure.engines.concurrency import ENGINE_CONCURRENCY, engine_concurrency
-from finepdfs.infrastructure.engines.registry import EngineConfig
+from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextLayerProbe
+from finepdfs.infrastructure.engines.registry import NATIVE_ENGINE, EngineConfig, build_engines
 
 ENGINE_COMMAND = "FINEPDFS_ENGINE_COMMAND"
 ENGINE_DPI = "FINEPDFS_ENGINE_DPI"
@@ -52,6 +55,31 @@ def engine_config(values: Mapping[str, str], name: str) -> EngineConfig:
         work_dir=pathlib.Path(work_dir) if work_dir else None,
         timeout_seconds=float(_configured(values, ENGINE_TIMEOUT) or DEFAULT_TIMEOUT_SECONDS),
         detail=_configured(values, ENGINE_DETAIL),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class EngineAdapters:
+    """What one engine name and its environment decide: the probe, the engines, and the thresholds.
+
+    Assembling these is the same two steps every entry point takes -- build the config for this name
+    (or nothing at all for the free text layer), let the registry build the engines, read the routing
+    thresholds -- so the assembly is here rather than once per entry point. A composition root that
+    builds its own is exactly how the demo and a run would drift into two engines (ADR-0012).
+    """
+
+    probe: TextLayerProbe
+    engines: Mapping[str, OcrEngine]
+    routing: OcrRoutingPolicy
+
+
+def engine_adapters(values: Mapping[str, str], name: str) -> EngineAdapters:
+    """The adapters one engine name asks for, from the values this process was given."""
+    config = engine_config(values, name)
+    return EngineAdapters(
+        probe=PymupdfTextLayerProbe(),
+        engines=build_engines([] if name == NATIVE_ENGINE else [config]),
+        routing=ocr_routing_policy(values),
     )
 
 
