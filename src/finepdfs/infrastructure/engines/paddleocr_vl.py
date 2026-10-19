@@ -7,6 +7,8 @@ and its weights are Apache-2.0.
 
 from __future__ import annotations
 
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,6 +20,9 @@ from finepdfs.infrastructure.engines.vlm_chat import VlmChatTransport, strip_mod
 OCR_PROMPT = "OCR:"
 TABLE_PROMPT = "Table Recognition:"
 PIPELINE_VERSION = "v1.6"
+# How many page requests one Extraction keeps in flight, at ADR-0010's default. The engine takes it as a
+# parameter so that the run's one configured bound has somewhere to arrive.
+DEFAULT_ENGINE_CONCURRENCY = 6
 
 
 def paddleocr_detail(base: str, dpi: int) -> str:
@@ -39,9 +44,16 @@ class PaddleOcrError(RuntimeError):
 class PaddleOcrVlEngine:
     """Reads every page through a PaddleOCR-VL server that speaks the OpenAI chat protocol."""
 
-    def __init__(self, transport: VlmChatTransport, dpi: int = 200, detail: str = "") -> None:
+    def __init__(
+        self,
+        transport: VlmChatTransport,
+        dpi: int = 200,
+        detail: str = "",
+        concurrency: int = DEFAULT_ENGINE_CONCURRENCY,
+    ) -> None:
         self._transport = transport
         self._dpi = dpi
+        self._concurrency = concurrency
         self._identity = EngineIdentity(
             name="paddleocr-vl", detail=paddleocr_detail(detail or transport.endpoint.describe(), dpi)
         )
@@ -51,13 +63,37 @@ class PaddleOcrVlEngine:
         return self._identity
 
     def extract(self, document: Document) -> ExtractedDocument:
-        pages: list[PageText] = []
-        with PdfDocument(document.content) as pdf:
+        """Read every page, overlapping the requests while rendering them one at a time.
+
+        Rendering is serial and stays on this thread: PyMuPDF is not thread-safe, and every page goes
+        through the one open PDF handle, so moving a render into the pool would risk a crash that takes
+        the whole run with it rather than failing one Document (ADR-0010 step 2). Only the blocking page
+        request is handed to the pool, so page *k*'s request is in flight while page *k+1* renders.
+        Pages are collected oldest first, never in completion order, so their numbers are their own.
+        """
+        pages: dict[int, PageText] = {}
+        in_flight: deque[tuple[int, Future[str]]] = deque()
+
+        def collect(pending: tuple[int, Future[str]]) -> None:
+            """Take the oldest request's answer, so pages leave the pool in page-number order."""
+            page_number, future = pending
+            answer = future.result()
+            pages[page_number] = PageText(number=page_number, text=strip_model_preamble(answer, OCR_PROMPT))
+
+        with (
+            PdfDocument(document.content) as pdf,
+            ThreadPoolExecutor(max_workers=self._concurrency) as pool,
+        ):
             for page_number in range(1, pdf.page_count + 1):
+                while len(in_flight) >= self._concurrency:  # bound the images held for in-flight requests
+                    collect(in_flight.popleft())
                 image = pdf.render_page_png(page_number, dpi=self._dpi)
-                answer = self._transport.complete_with_page_image(OCR_PROMPT, image)
-                pages.append(PageText(number=page_number, text=strip_model_preamble(answer, OCR_PROMPT)))
-        return ExtractedDocument(pages=tuple(pages), engine=self._identity)
+                in_flight.append(
+                    (page_number, pool.submit(self._transport.complete_with_page_image, OCR_PROMPT, image))
+                )
+            while in_flight:
+                collect(in_flight.popleft())
+        return ExtractedDocument(pages=tuple(pages[number] for number in sorted(pages)), engine=self._identity)
 
 
 @dataclass(frozen=True, slots=True)

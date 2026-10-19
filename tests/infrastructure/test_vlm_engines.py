@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import json
 import threading
+import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import NamedTuple
 
 import pymupdf
 import pytest
@@ -37,6 +40,7 @@ from finepdfs.infrastructure.engines.paddleocr_vl import (
     page_from_paddle_result,
     pages_from_paddle_output,
 )
+from finepdfs.infrastructure.engines.pdf_document import PdfDocument
 from finepdfs.infrastructure.engines.subprocess_support import CommandResult
 from finepdfs.infrastructure.engines.vlm_chat import (
     ChatEndpoint,
@@ -118,6 +122,170 @@ def paddle_server():
     server = StubModelServer({"choices": [{"message": {"role": "assistant", "content": "OCR:"}}]})
     yield server
     server.stop()
+
+
+class RenderRecord(NamedTuple):
+    """One page render: the page, the image it produced, and the thread that rendered it."""
+
+    thread: threading.Thread
+    page_number: int
+    image: bytes
+
+
+@pytest.fixture
+def renders(monkeypatch) -> list[RenderRecord]:
+    """Record every render of an extraction, so a test can say where it happened.
+
+    Rendering one page at a time through the one open PDF handle, on the thread that walks the pages,
+    is a rule of ADR-0010 that no test may negotiate: PyMuPDF is not thread-safe.
+    """
+    record: list[RenderRecord] = []
+    original = PdfDocument.render_page_png
+
+    def recording_render(pdf: PdfDocument, page_number: int, dpi: int = 200) -> bytes:
+        image = original(pdf, page_number, dpi=dpi)
+        record.append(RenderRecord(threading.current_thread(), page_number, image))
+        return image
+
+    monkeypatch.setattr(PdfDocument, "render_page_png", recording_render)
+    return record
+
+
+class GatedTransport(VlmChatTransport):
+    """A transport whose page requests can be held at a gate, and that says where each one ran.
+
+    The page a request belongs to is read from the image the engine rendered, and the answer names
+    that page, so a test never has to guess which request it is looking at.
+    """
+
+    def __init__(self, renders: list[RenderRecord], gate: Callable[[int], None]) -> None:
+        super().__init__(ChatEndpoint(base_url="http://stub.invalid/v1", model="PaddleOCR-VL-1.6"))
+        self._renders = renders
+        self._gate = gate
+        self.threads: list[threading.Thread] = []
+        self.failures: dict[int, Exception] = {}
+
+    def complete_with_page_image(self, prompt: str, image_png: bytes) -> str:
+        page_number = next(page for _, page, image in list(self._renders) if image == image_png)
+        self.threads.append(threading.current_thread())
+        self._gate(page_number)
+        failure = self.failures.get(page_number)
+        if failure is not None:
+            raise failure
+        return f"page {page_number} text"
+
+
+def test_paddleocr_vl_keeps_a_page_request_in_flight_while_the_next_page_renders(renders) -> None:
+    """Two page requests are in flight at once, so neither answers until the other has arrived.
+
+    ADR-0010 step 2: page *k*'s request overlaps page *k+1*'s render. A serial engine walks into the
+    gate alone and fails after its timeout instead of hanging the suite.
+    """
+    arrivals = threading.Barrier(2, timeout=5)
+
+    def wait_for_the_second_request(_page_number: int) -> None:
+        try:
+            arrivals.wait()
+        except threading.BrokenBarrierError:
+            raise AssertionError(
+                "the second page request had not arrived within 5 s: this engine sends its page "
+                "requests one after another instead of overlapping them (ADR-0010 step 2)"
+            ) from None
+
+    transport = GatedTransport(renders, gate=wait_for_the_second_request)
+    engine = PaddleOcrVlEngine(transport=transport, dpi=72, concurrency=2)
+
+    extracted = engine.extract(Document(name="https://a.example/two.pdf", content=_two_page_pdf()))
+
+    assert [(page.number, page.text) for page in extracted.pages] == [(1, "page 1 text"), (2, "page 2 text")]
+
+
+def test_paddleocr_vl_keeps_page_texts_in_page_number_order_when_later_pages_answer_first(renders) -> None:
+    """A Page Text carries the number of the page that produced it, never the slot it arrived in.
+
+    Page 2's answer arrives first and page 1's waits behind it, so reassembly by completion order
+    would hand back page 2's text under page 1's number.
+    """
+    page_two_answered = threading.Event()
+
+    def answer_page_two_first(page_number: int) -> None:
+        if page_number == 2:
+            page_two_answered.set()
+        elif not page_two_answered.wait(timeout=5):
+            raise AssertionError(
+                "page 2's request never ran while page 1's was in flight: the page requests are serial"
+            )
+
+    transport = GatedTransport(renders, gate=answer_page_two_first)
+    engine = PaddleOcrVlEngine(transport=transport, dpi=72, concurrency=2)
+
+    extracted = engine.extract(Document(name="https://a.example/two.pdf", content=_two_page_pdf()))
+
+    assert [(page.number, page.text) for page in extracted.pages] == [(1, "page 1 text"), (2, "page 2 text")]
+
+
+def test_paddleocr_vl_renders_every_page_on_the_extracting_thread(renders) -> None:
+    """Rendering stays serial, on the thread that walks the pages, while the requests go to the pool.
+
+    Moving a render into the pool is the one change ADR-0010 step 2 must never make: PyMuPDF is not
+    thread-safe and every page is rendered through the one open PDF handle, so two threads on it can
+    take the whole run down. This test is the guard on that rule.
+    """
+    transport = GatedTransport(renders, gate=lambda _page_number: None)
+    engine = PaddleOcrVlEngine(transport=transport, dpi=72, concurrency=2)
+    extracting_thread = threading.current_thread()
+
+    engine.extract(Document(name="https://a.example/two.pdf", content=_two_page_pdf()))
+
+    assert [record.page_number for record in renders] == [1, 2], "every page is rendered, once"
+    assert {record.thread for record in renders} == {extracting_thread}, (
+        "a page was rendered off the extracting thread, so two threads were on one PDF handle"
+    )
+    assert len(transport.threads) == 2
+    assert extracting_thread not in transport.threads, "the page requests did not leave the extracting thread"
+
+
+def test_a_page_that_fails_fails_its_document_and_leaves_no_pool_thread_behind(renders) -> None:
+    """A page that fails fails its Document (ADR-0010 Consequences), and the pool goes with it."""
+    transport = GatedTransport(renders, gate=lambda _page_number: None)
+    transport.failures[2] = VlmTransportError("the model server answered 500")
+    engine = PaddleOcrVlEngine(transport=transport, dpi=72, concurrency=2)
+
+    with pytest.raises(VlmTransportError, match="500"):
+        engine.extract(Document(name="https://a.example/two.pdf", content=_two_page_pdf()))
+
+    assert len(transport.threads) == 2, "both page requests had reached the pool"
+    live = [thread for thread in transport.threads if thread.is_alive()]
+    deadline = time.monotonic() + 5
+    while live and time.monotonic() < deadline:  # poll briefly, never sleep a fixed time
+        time.sleep(0.01)
+        live = [thread for thread in transport.threads if thread.is_alive()]
+    assert live == [], "a failed read left a page-request thread running"
+
+
+def test_a_concurrency_of_one_still_reads_every_page_in_page_number_order(renders) -> None:
+    """The bound is a knob, and its lowest setting is a serial read, not a broken one."""
+    transport = GatedTransport(renders, gate=lambda _page_number: None)
+    engine = PaddleOcrVlEngine(transport=transport, dpi=72, concurrency=1)
+
+    extracted = engine.extract(Document(name="https://a.example/two.pdf", content=_two_page_pdf()))
+
+    assert [(page.number, page.text) for page in extracted.pages] == [(1, "page 1 text"), (2, "page 2 text")]
+
+
+def test_how_many_page_requests_overlap_is_not_part_of_the_engine_identity(renders) -> None:
+    """The memo key remembers the Engine and its page DPI, never how many requests it sends at once.
+
+    ADR-0005 keys an Extraction on ``model@base_url@dpi<dpi>``; making the requests overlap must not
+    move that key, or every Document the engine already read would be read again.
+    """
+    transport = GatedTransport(renders, gate=lambda _page_number: None)
+
+    serial = PaddleOcrVlEngine(transport=transport, dpi=200, concurrency=1)
+    overlapped = PaddleOcrVlEngine(transport=transport, dpi=200, concurrency=8)
+
+    assert overlapped.identity.detail == "PaddleOCR-VL-1.6@http://stub.invalid/v1@dpi200"
+    assert overlapped.identity == serial.identity
 
 
 def test_paddleocr_vl_reads_every_page_through_a_chat_endpoint(paddle_server) -> None:
