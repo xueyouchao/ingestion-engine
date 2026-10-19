@@ -1,9 +1,9 @@
 """How many engine calls one run may have in flight at once (ADR-0010 step 3).
 
-An **engine call** is the leaf: one remote page request, or one local `doc_parser` invocation. The bound
-belongs to the worker, not to this machine's render capacity, and it is one bound for the whole run --
-the Engine instance is shared across Documents, so a pool or a permit created per Document would let a
-run reach Documents x limit. Rendering is not throttled by it.
+An **engine call** is the leaf: one remote page request, or one local command, for every engine that
+makes one. The bound belongs to the worker, not to this machine's render capacity, and it is one bound
+for the whole run -- the Engine instance is shared across Documents, so a pool or a permit created per
+Document would let a run reach Documents x limit. Rendering is not throttled by it.
 
 It is deliberately not a permit a Document body takes before waiting for its own pages: with N Documents
 holding all N permits and each waiting on work that needs one, the run deadlocks. The bound sits where
@@ -44,9 +44,14 @@ def engine_concurrency(raw: str) -> int:
         limit = int(text)
     except ValueError:
         limit = 0
+    return _at_least_one_engine_call(limit, repr(text))
+
+
+def _at_least_one_engine_call(limit: int, rejected: str) -> int:
+    """One message for the one rule, whichever side of the wiring asked: the parser or the bound itself."""
     if limit < 1:
         raise MisconfiguredEngineConcurrency(
-            f"{ENGINE_CONCURRENCY} must be a positive whole number of engine calls in flight: {text!r}"
+            f"{ENGINE_CONCURRENCY} must be a positive whole number of engine calls in flight: {rejected}"
         )
     return limit
 
@@ -54,18 +59,18 @@ def engine_concurrency(raw: str) -> int:
 class EngineCalls:
     """The run's one bound on engine calls in flight, shared by every Document one Engine reads.
 
-    Both shapes of an engine call are bounded here, so "engine calls in flight" means the same thing
-    for both adapters: ``submit`` queues a blocking request on a pool sized to the bound (the remote
-    engine's page requests), and ``permit`` is the same bound as a plain slot (the CLI engine's one
-    command). Neither is taken by a Document body: the bound is held only for the duration of the call
-    itself, so a Document waiting for its own pages never occupies a slot its pages need.
+    Every shape of an engine call is bounded here, so "engine calls in flight" means the same thing for
+    every adapter: ``submit`` queues a blocking request on a pool sized to the bound (the remote
+    engine's page requests), and ``permit`` is the same bound as a plain slot (the one local command an
+    adapter runs, PaddleOCR-VL's, Docling's or MinerU's, and MinerU's one HTTP request). Neither is taken
+    by a Document body: the bound is held only for the duration of the call itself, so a Document
+    waiting for its own pages never occupies a slot its pages need. ``limit`` is the number's one home:
+    an adapter that sizes a window or a pool reads it here instead of keeping a copy.
     """
 
     def __init__(self, limit: int = DEFAULT_ENGINE_CONCURRENCY) -> None:
-        if limit < 1:
-            raise MisconfiguredEngineConcurrency(f"an engine gets at least one call in flight, not {limit!r}")
-        self.limit = limit
-        self._slots = threading.BoundedSemaphore(limit)
+        self.limit = _at_least_one_engine_call(limit, repr(limit))
+        self._slots = threading.BoundedSemaphore(self.limit)
         self._pool: ThreadPoolExecutor | None = None
         self._pool_lock = threading.Lock()
 

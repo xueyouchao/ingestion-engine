@@ -308,26 +308,49 @@ def test_paddleocr_vl_renders_every_page_on_the_extracting_thread(renders) -> No
     assert extracting_thread not in transport.threads, "the page requests did not leave the extracting thread"
 
 
-def test_a_page_that_fails_fails_its_document_and_frees_its_slot_on_the_run_s_bound(renders) -> None:
-    """A page that fails fails its Document (ADR-0010 Consequences) and does not cost the run a slot.
+def test_a_page_that_fails_fails_its_document_and_leaves_the_run_s_bound_intact(renders) -> None:
+    """A failed page fails its Document (ADR-0010 Consequences); the run's bound is two both sides of it.
 
-    The pool belongs to the Engine and now outlives a failed read, so what a failure must not do is keep
-    what it held: no request is left running, and the next Document is read with the bound unchanged.
+    What the code does about a failed page, exactly: the page's error is raised out of that Document's
+    read, so the Document fails and its siblings do not, and every request the failed read had sent has
+    already answered by the time the error leaves -- nothing it held is still running. The bound is the
+    run's and lives for the run (the pool is not rebuilt per Document), so the next Document reads under
+    the same two permits. What the code does *not* do is recall a request the pool has already started:
+    a request still in flight when another page fails runs to completion, so this test fails the read's
+    last page, where every request has answered before the error is raised. At a bound of two the second
+    Document has to reach two requests in flight at once, which is how a slot lost to the failure would
+    show -- at a bound of one that could never be observed either way.
     """
-    transport = CountingTransport(renders, gate=lambda _page_number: None)
+    reading = 1
+    both_in_flight = threading.Barrier(2, timeout=5)
+
+    def overlap_after_the_failure(_page_number: int) -> None:
+        if reading == 1:  # the read that fails is not asked to overlap anything
+            return
+        try:
+            both_in_flight.wait()
+        except threading.BrokenBarrierError:
+            raise AssertionError(
+                "the second Document never had two page requests in flight at once: the failed read kept "
+                "a permit of the run's bound"
+            ) from None
+
+    transport = CountingTransport(renders, gate=overlap_after_the_failure)
     transport.failures[2] = VlmTransportError("the model server answered 500")
-    engine = PaddleOcrVlEngine(transport=transport, dpi=72, concurrency=1)
+    engine = PaddleOcrVlEngine(transport=transport, dpi=72, concurrency=2)
 
     with pytest.raises(VlmTransportError, match="500"):
         engine.extract(Document(name="https://a.example/two.pdf", content=_two_page_pdf()))
 
     assert transport.running == 0, "the failed read left a page request running"
 
+    reading = 2
     transport.failures.clear()
     extracted = engine.extract(Document(name="https://a.example/two.pdf", content=_two_page_pdf()))
 
-    assert [page.number for page in extracted.pages] == [1, 2]
-    assert transport.peak == 1, f"{transport.peak} requests were in flight after the failure; the bound was one"
+    assert [(page.number, page.text) for page in extracted.pages] == [(1, "page 1 text"), (2, "page 2 text")]
+    assert transport.running == 0, "the second read left a page request running"
+    assert transport.peak == 2, f"{transport.peak} requests were ever in flight at once; the run's bound was two"
 
 
 def test_a_concurrency_of_one_still_reads_every_page_in_page_number_order(renders) -> None:
@@ -507,6 +530,17 @@ def test_the_mineru_command_line_engine_fails_loudly_when_nothing_was_written(tm
         engine.extract(Document(name="x", content=b"%PDF"))
 
 
+def test_how_many_mineru_calls_overlap_is_not_part_of_the_engine_identity() -> None:
+    """The knob is infrastructure wiring, not something the Engine is: the memo key must not carry it."""
+    serial_cli = MineruEngine(backend=MineruSubprocessBackend(concurrency=1))
+    overlapped_cli = MineruEngine(backend=MineruSubprocessBackend(concurrency=8))
+    serial_http = MineruEngine(backend=MineruHttpBackend(base_url="http://mineru.example:8080", concurrency=1))
+    overlapped_http = MineruEngine(backend=MineruHttpBackend(base_url="http://mineru.example:8080", concurrency=8))
+
+    assert overlapped_http.identity == serial_http.identity
+    assert overlapped_cli.identity == serial_cli.identity
+
+
 def test_content_list_from_response_refuses_an_answer_without_one() -> None:
     with pytest.raises(MineruError):
         content_list_from_response({"results": {"document.pdf": {"md_content": "only markdown"}}})
@@ -570,6 +604,15 @@ def test_the_docling_engine_fails_loudly_when_nothing_was_written(tmp_path) -> N
     runner = RecordingRunner(stdout="Docling version: 2.140.0\n")
     with pytest.raises(DoclingError):
         DoclingEngine(work_dir=tmp_path, runner=runner).extract(Document(name="x", content=b"%PDF"))
+
+
+def test_how_many_docling_commands_overlap_is_not_part_of_the_engine_identity() -> None:
+    """The knob is infrastructure wiring, not something the Engine is: the memo key must not carry it."""
+    serial = DoclingEngine(concurrency=1, runner=RecordingRunner(stdout="Docling version: 2.140.0\n"))
+    overlapped = DoclingEngine(concurrency=8, runner=RecordingRunner(stdout="Docling version: 2.140.0\n"))
+
+    assert overlapped.identity.detail == "cli:docling:v2.140.0"
+    assert overlapped.identity == serial.identity
 
 
 def test_the_docling_engine_refuses_json_it_cannot_parse(tmp_path) -> None:
