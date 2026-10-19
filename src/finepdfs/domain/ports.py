@@ -12,6 +12,7 @@ from typing import Protocol
 
 from finepdfs.domain.chunks import Chunk
 from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
+from finepdfs.domain.demo import UsageSnapshot
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, TextLayerQuality
 from finepdfs.domain.language import PageLanguage
 from finepdfs.domain.publishing import PageRecord
@@ -82,6 +83,28 @@ class SearchIndex(Protocol):
 
     def state(self) -> IndexState:
         """The fingerprint this index was built from and how many chunks it holds."""
+        ...
+
+
+class GateLedger(Protocol):
+    """What the demo's Spend Gates have already cost: the counters behind ``SpendGatePolicy``.
+
+    The ledger owns time, so the domain policy stays pure and reads a snapshot instead of a clock. A read
+    enters the client's rate-limit window when it is admitted; OCR pages are charged to the current day
+    when the work is admitted, because an admitted read spends the GPU whether or not it finishes. There
+    is deliberately no way to give a charge back.
+    """
+
+    def usage(self, client: str) -> UsageSnapshot:
+        """What ``client`` has read recently and how many OCR pages the demo has charged today."""
+        ...
+
+    def record_read(self, client: str) -> None:
+        """Count one admitted read against ``client``'s window."""
+        ...
+
+    def charge_ocr_pages(self, pages: int) -> None:
+        """Charge ``pages`` OCR pages to the current day's budget."""
         ...
 
 
