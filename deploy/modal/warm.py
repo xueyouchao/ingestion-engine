@@ -9,7 +9,7 @@ update changes without a redeploy. This command is the operator-facing half:
 
 ``status`` prints the serving URL already carrying the ``/v1`` base path, so an operator pastes it into a
 ``ChatEndpoint`` unchanged. It prints the pinned Engine Identity detail *without* a page-DPI suffix: the
-engine registry appends ``@dpi200`` itself (ADR-0011's rule for the demo), and printing it here as well
+engine registry appends ``@dpi200`` itself (ADR-0005 makes page DPI an identity input), and printing it here as well
 would produce ``@dpi200@dpi200``. The price comes from the shared contract, so this command and the
 runbook cannot disagree about the number. No action calls ``modal deploy``: ``status`` reads the current
 floor through an autoscaler update with no fields set, which is the read the installed SDK exposes.
