@@ -146,7 +146,7 @@ function nameOf(id) {
 }
 const pagesOf = (id) => Object.keys(DATA.pages).filter((key) => docOf(key) === id)
   .sort((a, b) => pageNo(a) - pageNo(b));
-const terms = (q) => q.toLowerCase().split(/\\s+/).filter(Boolean);
+const terms = (q) => fold(String(q)).lower.split(/\\s+/).filter(Boolean);
 
 function pageView(key) {
   const page = DATA.pages[key], id = docOf(key), reading = page.readings[state.label] || null;
@@ -217,16 +217,19 @@ function corpusSearch(query) {
 const HIT_LIMIT = 60;
 
 function fold(text) {
-  // A lowercased copy plus, for each character in it, the index of the original character it came from.
-  // Lowering can expand one character into several (the Turkish dotted capital I becomes i plus a
-  // combining dot), so this mapping is what lets a match in the lowered text be marked in the original.
+  // A lowercased copy plus, for every character in it, the UTF-16 range of the original character that
+  // produced it. Lowering can expand one character into several (the Turkish dotted capital I becomes i
+  // plus a combining dot), so a match in the lowered text needs a map to be marked in the original --
+  // and the ranges are UTF-16, because that is the unit `slice` counts.
   let lower = "";
   const map = [];
-  Array.from(text).forEach((part, index) => {
+  let at = 0;
+  for (const part of text) {
     const small = part.toLowerCase();
     lower += small;
-    for (let i = 0; i < small.length; i += 1) map.push(index);
-  });
+    for (let i = 0; i < small.length; i += 1) map.push([at, at + part.length]);
+    at += part.length;
+  }
   return { lower, map };
 }
 
@@ -238,7 +241,7 @@ function spansOf(text, wanted) {
   for (const term of wanted) {
     let at = lower.indexOf(term);
     while (at !== -1) {
-      spans.push([map[at], map[at + term.length - 1] + 1]);
+      spans.push([map[at][0], map[at + term.length - 1][1]]);
       at = lower.indexOf(term, at + term.length);
     }
   }
