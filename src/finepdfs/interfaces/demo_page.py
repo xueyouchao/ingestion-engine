@@ -22,27 +22,30 @@ DEMO_HTML = """<!doctype html>
 <link rel="icon" href="data:,">
 <title>Read your own document</title>
 <style>
+  /* The same palette as the reader bundle the live demo is linked from (bundle_page.py), so the two
+     pages read as one site: warm paper, thin warm rules, one green accent. The status colours are the
+     only additions -- a refusal, a failure and a healthy read have to differ from the accent. */
   :root {
     color-scheme: light dark;
-    --bg: #f7f7f5;
-    --panel: #ffffff;
-    --ink: #1d2433;
-    --muted: #5b6474;
-    --line: #d8dce3;
-    --accent: #225ea8;
-    --ok: #17663a;
+    --bg: #fbfaf7;
+    --panel: var(--bg);
+    --ink: #1b1a17;
+    --muted: #6b675e;
+    --line: #d9d4c8;
+    --accent: #0b6b4f;
+    --ok: #0b6b4f;
     --warn: #8a4b00;
-    --bad: #9c1c1c;
+    --bad: #9c2b1c;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #14181f;
-      --panel: #1d232d;
-      --ink: #e8ecf3;
-      --muted: #a9b3c2;
-      --line: #333c4a;
-      --accent: #78b7ff;
-      --ok: #7fd3a2;
+      --bg: #141412;
+      --panel: var(--bg);
+      --ink: #eeeae0;
+      --muted: #a09a8c;
+      --line: #33312c;
+      --accent: #5fd3a6;
+      --ok: #5fd3a6;
       --warn: #f2c078;
       --bad: #ff9c9c;
     }
@@ -54,7 +57,7 @@ DEMO_HTML = """<!doctype html>
     padding: 1.25rem;
     background: var(--bg);
     color: var(--ink);
-    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    font: 15px/1.5 ui-sans-serif, system-ui, sans-serif;
   }
   header h1 { margin: 0 0 .25rem; font-size: 1.65rem; }
   header p { margin: .2rem 0; color: var(--muted); }

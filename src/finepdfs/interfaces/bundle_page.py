@@ -103,7 +103,7 @@ footer code { color:var(--ink); }
 <body>
 <header>
   <h1>Page reader</h1>
-  <a class="live" href="/live/">Read your own document &rarr;</a>
+  <span id="live"></span>
   <span class="hint" id="hint"></span>
   <form id="corpus" role="search">
     <input id="q" type="search" placeholder="search every page — Danny, tribal consultation"
@@ -410,6 +410,15 @@ function renderLaneNote() {
   return note;
 }
 
+function renderLiveLink() {
+  // The live demo the deployment serves beside this bundle, if it serves one. It is a manifest field and
+  // not a hard-coded path: an exported bundle opens from file:// as well, and a link to a demo that is not
+  // there would be a dead end dressed as a feature.
+  const holder = $("#live");
+  if (!holder || !DATA.live) return;
+  holder.innerHTML = '<a class="live" href="' + esc(DATA.live) + '">Read your own document &rarr;</a>';
+}
+
 function imageMissing(view) {
   const offServer = !/^https?:$/.test(location.protocol);
   return '<div class="missing"><strong>The page image did not load.</strong> '
@@ -574,6 +583,7 @@ function boot() {
     applyCorpus(query);
     if (state.hits.length) { state.page = state.hits[0].key; state.doc = docOf(state.page); }
   }
+  renderLiveLink();
   render();
 }
 

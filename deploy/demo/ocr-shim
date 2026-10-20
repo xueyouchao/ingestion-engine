@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -37,6 +38,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("-l", "--lang", default="eng")
     options, _unknown = parser.parse_known_args(argv)
 
+    if shutil.which("tesseract") is None:
+        # The runner quotes this as the read's failure reason, so it says what is missing rather than
+        # ending in a traceback that reaches the page.
+        print("tesseract is not installed or not on PATH", file=sys.stderr)
+        return 1
+
     images = sorted(Path(options.images).glob("*.png"))
     output = Path(options.output)
     output.mkdir(parents=True, exist_ok=True)
@@ -45,12 +52,16 @@ def main(argv: list[str]) -> int:
         return 1
 
     for index, image in enumerate(images):
-        result = subprocess.run(
-            ["tesseract", str(image), "-", "-l", options.lang],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                ["tesseract", str(image), "-", "-l", options.lang],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as error:
+            print(f"tesseract could not run: {error}", file=sys.stderr)
+            return 1
         if result.returncode != 0:
             print(f"tesseract failed on {image}: {result.stderr.strip()}", file=sys.stderr)
             return 1

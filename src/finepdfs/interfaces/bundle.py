@@ -255,6 +255,7 @@ def build_bundle(
     quality: int = PAGE_QUALITY,
     inline: bool = False,
     link: str | None = None,
+    live: str | None = None,
 ) -> dict[str, Any]:
     """Write the bundle and return its contract. Refuses rather than shrinks when over budget."""
     if not runs:
@@ -271,6 +272,10 @@ def build_bundle(
         "dpi": dpi,
         "default_state": runs[0].label,
         "link": link,
+        # The live demo a deployment serves beside this bundle, if it serves one: the page links it from
+        # its header and omits the link when this is absent, so a bundle opened from file:// -- or served
+        # somewhere with no demo -- does not offer a dead end.
+        "live": live,
         "states": [_state_block(run) for run in runs],
         "documents": {},
         "pages": {},
@@ -367,6 +372,7 @@ def build_bundle(
         "dpi": dpi,
         "mode": "inline" if inline else "split",
         "link": link,
+        "live": live,
         "default_state": runs[0].label,
         "states": manifest["states"],
         "documents": len(manifest["documents"]),

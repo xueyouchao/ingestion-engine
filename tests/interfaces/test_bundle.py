@@ -459,3 +459,25 @@ def test_impossible_numbers_are_refused_before_anything_is_rendered(tmp_path, kw
 
     with pytest.raises(BundleError, match=message):
         build_bundle(tmp_path / "bundle", [read_state("pymupdf", out)], tmp_path / "corpus", **kwargs)
+
+
+def test_the_live_link_is_a_deployment_choice_not_a_page_constant(tmp_path) -> None:
+    """The page opens from ``file://`` too, so a link to a demo is only there when a build asks for it.
+
+    A bundle with no demo leaves the header slot empty; one built for the VPS carries the URL, and the
+    page renders the anchor from it -- never a ``/live/`` path that means nothing outside this host.
+    """
+    out = _write_run(tmp_path, "out", pages=(1,), engine="pymupdf@1.28.2")
+    runs = [read_state("pymupdf", out)]
+
+    plain = build_bundle(tmp_path / "plain", runs, tmp_path / "corpus")
+    served = build_bundle(
+        tmp_path / "served", runs, tmp_path / "corpus",
+        live="https://pdf-ingestion.example/live/",
+    )
+
+    assert plain["live"] is None
+    assert served["live"] == "https://pdf-ingestion.example/live/"
+    page = (tmp_path / "served" / "index.html").read_text(encoding="utf-8")
+    assert 'id="live"' in page, "the header has the slot the link is rendered into"
+    assert 'href="/live/"' not in page, "the asset keeps no path of its own"

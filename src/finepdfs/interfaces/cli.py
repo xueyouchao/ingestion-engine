@@ -167,6 +167,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="where this bundle is served; the page offers it when its own images/ folder is unreachable",
     )
     bundle.add_argument(
+        "--live",
+        default=None,
+        metavar="URL",
+        help="a live upload demo served beside this bundle, linked from the page's header; omit when "
+        "there is none, since a link to a demo that is not there is a dead end",
+    )
+    bundle.add_argument(
         "--check",
         action="store_true",
         help="verify the bundle still mirrors the declared outputs instead of writing one",
@@ -379,7 +386,7 @@ def _bundle(args: argparse.Namespace) -> int:
         corpus = args.corpus if args.corpus is not None else runs[0].out.parent / "corpus"
         contract = bundle_module.build_bundle(
             args.out, runs, corpus, dpi=args.dpi, max_bytes=args.max_bytes, inline=args.inline,
-            link=args.link,
+            link=args.link, live=args.live,
         )
     except bundle_module.BundleError as error:
         print(error, file=sys.stderr)
