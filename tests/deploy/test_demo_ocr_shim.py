@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -158,7 +159,8 @@ def test_a_hung_tesseract_fails_the_page_instead_of_outliving_the_read(tmp_path:
     )
 
     assert result.returncode == 1
-    assert "did not finish page-0001.png within 0.2s" in result.stderr
+    assert "did not finish page-0001.png within" in result.stderr
+    assert "0.2s budget" in result.stderr, "the message names the budget it was given"
 
 
 def test_the_bundle_rebuild_hint_keeps_the_live_link() -> None:
@@ -182,7 +184,7 @@ def test_the_shim_refuses_a_flag_it_does_not_know(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 2
-    assert "flags this shim does not know" in result.stderr
+    assert "unrecognized arguments: --layout_model x" in result.stderr, "argparse names the flag"
     assert not list((tmp_path / "r").glob("*_res.json"))
 
 
@@ -198,8 +200,8 @@ def test_the_subcommand_is_judged_before_the_hosts_tooling(tmp_path: Path) -> No
     assert "unknown subcommand 'parse'" in result.stderr
 
 
-def test_a_page_budget_is_a_share_of_the_engines_own_bound(tmp_path: Path) -> None:
-    """A fixed 60s per page would let a slow two-page read die on the engine's bound with no page named."""
+def test_the_read_is_budgeted_inside_the_engines_own_bound(tmp_path: Path) -> None:
+    """A fixed per-page bound, or one that sums to the bound, lets the engine's kill answer first."""
     images = _pages(tmp_path, 2)
     binary = tmp_path / "bin"
     binary.mkdir()
@@ -214,7 +216,8 @@ def test_a_page_budget_is_a_share_of_the_engines_own_bound(tmp_path: Path) -> No
     )
 
     assert result.returncode == 1
-    assert "did not finish page-0001.png within 0.2s" in result.stderr
+    assert "did not finish page-0001.png within" in result.stderr
+    assert "of its 0.4s budget" in result.stderr, "the budget is the engine's bound this run was given"
 
 
 def test_non_ascii_page_text_survives_a_plain_c_locale(tmp_path: Path) -> None:
@@ -237,3 +240,14 @@ def test_non_ascii_page_text_survives_a_plain_c_locale(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     written = json.loads((tmp_path / "r" / "page-0001_res.json").read_text(encoding="utf-8"))
     assert written["res"]["parsing_res_list"][0]["block_content"] == "扫描 页"
+
+
+def test_the_shims_default_bound_is_the_engines_own() -> None:
+    """A second copy of a default drifts: this one must equal `environment.DEFAULT_TIMEOUT_SECONDS`."""
+    from finepdfs.infrastructure.engines import environment
+
+    source = SHIM.read_text(encoding="utf-8")
+    stated = re.search(r"^DEFAULT_ENGINE_TIMEOUT = ([0-9.]+)$", source, re.M)
+
+    assert stated is not None
+    assert float(stated.group(1)) == environment.DEFAULT_TIMEOUT_SECONDS

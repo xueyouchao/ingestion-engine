@@ -27,12 +27,29 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-# The engine's own bound around this command (``FINEPDFS_ENGINE_TIMEOUT``, 120s in the unit). A page's
-# budget is a share of it, so this shim fails the read with its own message before that bound kills it.
+# The engine's own bound around this command: ``FINEPDFS_ENGINE_TIMEOUT``, whose absent default is
+# ``environment.DEFAULT_TIMEOUT_SECONDS``. The read is budgeted inside it so this shim fails first, with the
+# page named, instead of being killed by the runner. A test pins the default to the engine's own.
 ENGINE_TIMEOUT = "FINEPDFS_ENGINE_TIMEOUT"
-DEFAULT_ENGINE_TIMEOUT = 120.0
+DEFAULT_ENGINE_TIMEOUT = 300.0
+# The fraction of that bound this shim allows itself, so its message always arrives before the kill.
+ENGINE_MARGIN = 0.9
+
+
+class _UsageError(Exception):
+    """A command line this shim cannot accept, in argparse's words."""
+
+
+class _Parser(argparse.ArgumentParser):
+    """An ArgumentParser that reports instead of exiting, so the shim can name what it refused."""
+
+    def error(self, message: str) -> None:  # argparse's hook, not a public API
+        """Refuse a command line, carrying argparse's own words up to ``main``."""
+
+        raise _UsageError(message)
 
 
 def _engine_bound() -> float:
@@ -45,7 +62,7 @@ def _engine_bound() -> float:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(add_help=False)
+    parser = _Parser(add_help=False)
     parser.add_argument("mode", nargs="?")
     parser.add_argument("-i", "--input", dest="images", required=True)
     # Consumed only so the engine's argument list parses; this shim has one behaviour, and the version a
@@ -57,14 +74,15 @@ def main(argv: list[str]) -> int:
         "--timeout",
         type=float,
         default=None,
-        help="seconds a single page may take; default is the engine's bound shared between the pages",
+        help="seconds for the whole read; default is the engine's own bound",
     )
     # Strict, not ``parse_known_args``: this shim stands in for the engine's own command, so a flag the
     # engine learns to send must fail here loudly instead of being swallowed while the output shape drifts.
+    # argparse's own words are kept -- they name the offending flag, which a generic message would not.
     try:
         options = parser.parse_args(argv)
-    except SystemExit:
-        print(f"the engine passes flags this shim does not know: {argv}", file=sys.stderr)
+    except _UsageError as error:
+        print(f"this shim does not take that command line: {error}", file=sys.stderr)
         return 2
 
     if options.mode != "doc_parser":
@@ -87,12 +105,19 @@ def main(argv: list[str]) -> int:
         print(f"no page images under {options.images}", file=sys.stderr)
         return 1
 
-    budget = options.timeout if options.timeout is not None else _engine_bound() / len(images)
+    budget = options.timeout if options.timeout is not None else _engine_bound()
     if budget <= 0:
-        print(f"no time left for any page: {ENGINE_TIMEOUT}={_engine_bound():g}s", file=sys.stderr)
+        print(f"no time to read anything: the budget is {budget:g}s", file=sys.stderr)
         return 1
+    # A deadline rather than a share per page: a slow page may use what the fast ones left behind, and the
+    # read still ends inside the engine's bound with this shim's own message.
+    deadline = time.monotonic() + budget * ENGINE_MARGIN
 
     for index, image in enumerate(images):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(f"no time left for {image.name} (budget {budget:g}s)", file=sys.stderr)
+            return 1
         try:
             result = subprocess.run(
                 ["tesseract", str(image), "-", "-l", options.lang],
@@ -104,10 +129,13 @@ def main(argv: list[str]) -> int:
                 check=False,
                 # The engine's own bound kills this process, not the tesseract it spawned; a hung page
                 # would keep burning a core here. Bounded per page, it fails the read instead.
-                timeout=budget,
+                timeout=remaining,
             )
         except subprocess.TimeoutExpired:
-            print(f"tesseract did not finish {image.name} within {budget:g}s", file=sys.stderr)
+            print(
+                f"tesseract did not finish {image.name} within {remaining:g}s of its {budget:g}s budget",
+                file=sys.stderr,
+            )
             return 1
         except OSError as error:
             print(f"tesseract could not run: {error}", file=sys.stderr)
