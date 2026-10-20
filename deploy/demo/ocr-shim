@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -56,9 +57,11 @@ def _engine_bound() -> float:
     """The bound the engine holds around this command, as ``FINEPDFS_ENGINE_TIMEOUT`` sets it."""
     raw = os.environ.get(ENGINE_TIMEOUT, "").strip()
     try:
-        return float(raw) if raw else DEFAULT_ENGINE_TIMEOUT
+        bound = float(raw) if raw else DEFAULT_ENGINE_TIMEOUT
     except ValueError:
         return DEFAULT_ENGINE_TIMEOUT
+    # A bound that is not a positive finite number is no bound: the engine would have defaulted too.
+    return bound if math.isfinite(bound) and bound > 0 else DEFAULT_ENGINE_TIMEOUT
 
 
 def main(argv: list[str]) -> int:
@@ -105,10 +108,14 @@ def main(argv: list[str]) -> int:
         print(f"no page images under {options.images}", file=sys.stderr)
         return 1
 
-    budget = options.timeout if options.timeout is not None else _engine_bound()
-    if budget <= 0:
-        print(f"no time to read anything: the budget is {budget:g}s", file=sys.stderr)
+    requested = options.timeout if options.timeout is not None else _engine_bound()
+    if not math.isfinite(requested) or requested <= 0:
+        source = "--timeout" if options.timeout is not None else f"{ENGINE_TIMEOUT} or its default"
+        print(f"no time to read anything: the budget from {source} is {requested:g}", file=sys.stderr)
         return 1
+    # Never past the engine's own bound: beyond it the runner kills this process before it can name the
+    # page, which is the only reason to budget here at all.
+    budget = min(requested, _engine_bound())
     # A deadline rather than a share per page: a slow page may use what the fast ones left behind, and the
     # read still ends inside the engine's bound with this shim's own message.
     deadline = time.monotonic() + budget * ENGINE_MARGIN

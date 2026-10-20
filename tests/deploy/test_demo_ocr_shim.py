@@ -251,3 +251,39 @@ def test_the_shims_default_bound_is_the_engines_own() -> None:
 
     assert stated is not None
     assert float(stated.group(1)) == environment.DEFAULT_TIMEOUT_SECONDS
+
+
+def test_a_caller_cannot_outbudget_the_engine(tmp_path: Path) -> None:
+    """Past the engine's own bound the runner kills the shim before it can name the page."""
+    images = _pages(tmp_path, 1)
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    slow = binary / "tesseract"
+    slow.write_text("#!/bin/sh\n/bin/sleep 30\n", encoding="utf-8")
+    slow.chmod(0o755)
+
+    result = _run(
+        ["doc_parser", "-i", str(images), "--save_path", str(tmp_path / "r"), "--timeout", "600"],
+        binary,
+        FINEPDFS_ENGINE_TIMEOUT="0.4",
+    )
+
+    assert result.returncode == 1
+    assert "of its 0.4s budget" in result.stderr, "clamped to the bound, not 540s"
+
+
+@pytest.mark.parametrize("budget", ["nan", "inf", "0", "-1"])
+def test_an_unusable_budget_is_named_with_its_source(tmp_path: Path, budget: str) -> None:
+    """``float`` accepts these, and NaN would reach the subprocess timeout and end in a traceback."""
+    images = _pages(tmp_path, 1)
+    stub = _stub_tesseract(tmp_path)
+
+    result = _run(
+        ["doc_parser", "-i", str(images), "--save_path", str(tmp_path / "r"), "--timeout", budget],
+        stub,
+    )
+
+    assert result.returncode == 1
+    assert "no time to read anything" in result.stderr
+    assert "--timeout" in result.stderr, "the message names where the unusable budget came from"
+    assert not list((tmp_path / "r").glob("*_res.json"))
