@@ -67,7 +67,7 @@ jobs:
   code-review:
     name: code-review
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     if: |
       github.event_name == 'pull_request_target'
       || (
@@ -120,8 +120,11 @@ jobs:
           base_ref: ${{ steps.pr-context.outputs.base_ref }}
           head_sha: ${{ steps.pr-context.outputs.head_sha }}
           # Hard ceiling on input + output tokens for one review, so a runaway
-          # sub-agent cannot drain the LLM budget in a single run.
-          max_tokens_budget: '2000000'
+          # sub-agent cannot drain the LLM budget in a single run. The first
+          # live run (PR #25) used 2.0M and had to skip a final round at 2M, so
+          # the cap is doubled: it still bounds cost, but stops cutting a
+          # review short. A run of that size costs roughly $0.20.
+          max_tokens_budget: '4000000'
           # A pushed commit reviews only <last reviewed head>..<new head>
           # instead of the whole PR from the merge-base, so a long-lived PR is
           # not re-reviewed (and re-commented) in full on every push. Fail-closed:
