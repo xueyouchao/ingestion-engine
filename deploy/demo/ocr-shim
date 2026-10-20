@@ -54,14 +54,19 @@ class _Parser(argparse.ArgumentParser):
 
 
 def _engine_bound() -> float:
-    """The bound the engine holds around this command, as ``FINEPDFS_ENGINE_TIMEOUT`` sets it."""
+    """The bound the engine holds around this command, read exactly as ``environment.engine_config`` does.
+
+    An empty or unparsable variable defaults; any other value -- ``0``, a negative, a NaN -- is that bound,
+    because the engine takes it literally too. Substituting the default here would make this shim budget a
+    read the runner is about to kill.
+    """
     raw = os.environ.get(ENGINE_TIMEOUT, "").strip()
+    if not raw:
+        return DEFAULT_ENGINE_TIMEOUT
     try:
-        bound = float(raw) if raw else DEFAULT_ENGINE_TIMEOUT
+        return float(raw)
     except ValueError:
         return DEFAULT_ENGINE_TIMEOUT
-    # A bound that is not a positive finite number is no bound: the engine would have defaulted too.
-    return bound if math.isfinite(bound) and bound > 0 else DEFAULT_ENGINE_TIMEOUT
 
 
 def main(argv: list[str]) -> int:
@@ -108,14 +113,17 @@ def main(argv: list[str]) -> int:
         print(f"no page images under {options.images}", file=sys.stderr)
         return 1
 
-    requested = options.timeout if options.timeout is not None else _engine_bound()
+    engine_bound = _engine_bound()
+    requested = options.timeout if options.timeout is not None else engine_bound
+    source = "--timeout" if options.timeout is not None else ENGINE_TIMEOUT
     if not math.isfinite(requested) or requested <= 0:
-        source = "--timeout" if options.timeout is not None else f"{ENGINE_TIMEOUT} or its default"
+        # The engine would hold such a bound too rather than default it, so the read cannot succeed and
+        # the operator should hear which number made it impossible.
         print(f"no time to read anything: the budget from {source} is {requested:g}", file=sys.stderr)
         return 1
     # Never past the engine's own bound: beyond it the runner kills this process before it can name the
     # page, which is the only reason to budget here at all.
-    budget = min(requested, _engine_bound())
+    budget = min(requested, engine_bound)
     # A deadline rather than a share per page: a slow page may use what the fast ones left behind, and the
     # read still ends inside the engine's bound with this shim's own message.
     deadline = time.monotonic() + budget * ENGINE_MARGIN

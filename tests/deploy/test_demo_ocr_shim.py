@@ -287,3 +287,20 @@ def test_an_unusable_budget_is_named_with_its_source(tmp_path: Path, budget: str
     assert "no time to read anything" in result.stderr
     assert "--timeout" in result.stderr, "the message names where the unusable budget came from"
     assert not list((tmp_path / "r").glob("*_res.json"))
+
+
+@pytest.mark.parametrize("configured", ["0", "-5", "nan"])
+def test_an_unusable_engine_bound_is_taken_at_its_word(tmp_path: Path, configured: str) -> None:
+    """The engine does not default a configured 0 or NaN either, so the shim must not pretend it did."""
+    images = _pages(tmp_path, 1)
+    stub = _stub_tesseract(tmp_path)
+
+    result = _run(
+        ["doc_parser", "-i", str(images), "--save_path", str(tmp_path / "r")],
+        stub,
+        FINEPDFS_ENGINE_TIMEOUT=configured,
+    )
+
+    assert result.returncode == 1
+    assert "the budget from FINEPDFS_ENGINE_TIMEOUT is" in result.stderr
+    assert not list((tmp_path / "r").glob("*_res.json"))
