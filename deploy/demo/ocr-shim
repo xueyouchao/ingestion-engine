@@ -56,10 +56,9 @@ class _Parser(argparse.ArgumentParser):
 def _engine_bound() -> float:
     """The bound the engine holds around this command, as ``FINEPDFS_ENGINE_TIMEOUT`` configures it.
 
-    An empty or unparsable variable is the engine's default. ``inf`` means the engine holds no bound and
-    comes back as it is; ``main`` then clamps nothing, which is the same reading the runner gives it. NaN,
-    ``0`` and negatives come back as they are too, and ``main`` refuses the read: an engine that holds no
-    possible time cannot report a page, and a budget of zero is not a read.
+    An empty or unparsable variable is the engine's default; every other value is returned as written, so
+    ``main`` can refuse what is not a positive finite number of seconds instead of quietly substituting a
+    default the engine is not using.
     """
     raw = os.environ.get(ENGINE_TIMEOUT, "").strip()
     if not raw:
@@ -115,28 +114,27 @@ def main(argv: list[str]) -> int:
         return 1
 
     engine_bound = _engine_bound()
-    # One rule for both sources: ``inf`` is "no bound", anything else must be a positive number. Both are
+    # One rule for both sources: a budget is a positive, finite number. ``inf`` is not "no bound" here --
+    # ``subprocess.run(timeout=inf)`` raises OverflowError rather than waiting forever, so an infinite bound
+    # is a configuration the read cannot honour, and NaN is not a number of seconds at all. Both sources are
     # checked, not just the one that wins, because ``min(30, nan)`` is 30 in Python.
     for budget_source, value in ((ENGINE_TIMEOUT, engine_bound), ("--timeout", options.timeout)):
-        if value is not None and not math.isinf(value) and not value > 0:
+        if value is not None and not (math.isfinite(value) and value > 0):
             print(f"no time to read anything: the budget from {budget_source} is {value:g}", file=sys.stderr)
             return 1
     requested = options.timeout if options.timeout is not None else engine_bound
     # Past the engine's bound the runner kills this process before it can name the page, which is the only
-    # reason to budget here at all; an unbounded engine clamps nothing.
-    budget = requested if math.isinf(engine_bound) else min(requested, engine_bound)
+    # reason to budget here at all.
+    budget = min(requested, engine_bound)
     # A deadline rather than a share per page: a slow page may use what the fast ones left behind, and the
-    # read still ends inside the engine's bound with this shim's own message. With no bound there is no
-    # deadline, and tesseract is left to the state it was given.
-    deadline = None if math.isinf(budget) else time.monotonic() + budget * ENGINE_MARGIN
+    # read still ends inside the engine's bound with this shim's own message.
+    deadline = time.monotonic() + budget * ENGINE_MARGIN
 
     for index, image in enumerate(images):
-        remaining = None
-        if deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                print(f"no time left for {image.name} (budget {budget:g}s)", file=sys.stderr)
-                return 1
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(f"no time left for {image.name} (budget {budget:g}s)", file=sys.stderr)
+            return 1
         try:
             result = subprocess.run(
                 ["tesseract", str(image), "-", "-l", options.lang],
