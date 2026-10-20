@@ -856,3 +856,57 @@ def test_the_page_never_sends_a_media_type_it_made_up() -> None:
     assert "return null;" in guess.group(1), "an extension this page does not know claims nothing"
     assert "application/octet-stream" in function("uploadType"), "the header is always a string"
     assert "if (file.name)" in function("uploadHeaders"), "a nameless file is named by the server"
+
+
+def test_a_visitor_name_that_is_not_latin_1_still_arrives() -> None:
+    """A header value is a ByteString: the page percent-encodes the name, and the server decodes it.
+
+    A phone camera roll is full of names like ``扫描.png``; sent raw, fetch throws before a byte leaves the
+    browser, and the visitor sees a TypeError instead of a read.
+    """
+    class Naming(RecordingReader):
+        def __init__(self) -> None:
+            super().__init__()
+            self.names: list[str] = []
+
+        def __call__(self, content, client, on_stage, name):
+            self.names.append(name)
+            return super().__call__(content, client, on_stage, name)
+
+    reader = Naming()
+    app = DemoApp(environ={}, read=reader)
+    try:
+        with _serving(app) as base:
+            _upload(base, TEXT_LAYER_PDF, **{"X-Upload-Name": "%E6%89%AB%E6%8F%8F%20%E9%A1%B5.png"})
+    finally:
+        app.close()
+
+    assert reader.names == ["扫描 页.png"], "the name the visitor's file had, not its percent-encoding"
+
+
+def test_a_name_that_was_never_encoded_is_kept_as_it_is() -> None:
+    class Naming(RecordingReader):
+        def __init__(self) -> None:
+            super().__init__()
+            self.names: list[str] = []
+
+        def __call__(self, content, client, on_stage, name):
+            self.names.append(name)
+            return super().__call__(content, client, on_stage, name)
+
+    reader = Naming()
+    app = DemoApp(environ={}, read=reader)
+    try:
+        with _serving(app) as base:
+            _upload(base, TEXT_LAYER_PDF, **{"X-Upload-Name": "visitor's scan.png"})
+    finally:
+        app.close()
+
+    assert reader.names == ["visitor's scan.png"]
+
+
+def test_the_page_encodes_the_name_it_puts_in_a_header() -> None:
+    """The browser's Headers refuse any value above U+00FF, so the name is encoded before it is sent."""
+    page = demo_page.DEMO_HTML
+
+    assert 'headers["X-Upload-Name"] = encodeURIComponent(file.name);' in page

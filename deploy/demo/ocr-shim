@@ -36,6 +36,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--pipeline_version", default="v1")
     parser.add_argument("--save_path", dest="output", required=True)
     parser.add_argument("-l", "--lang", default="eng")
+    parser.add_argument("--timeout", type=float, default=60.0, help="seconds a single page may take")
     options, _unknown = parser.parse_known_args(argv)
 
     if shutil.which("tesseract") is None:
@@ -43,6 +44,12 @@ def main(argv: list[str]) -> int:
         # ending in a traceback that reaches the page.
         print("tesseract is not installed or not on PATH", file=sys.stderr)
         return 1
+
+    if options.mode != "doc_parser":
+        # The engine calls ``doc_parser``; answering any other invocation would dress an unknown request
+        # up as a successful read, which is worse than failing it.
+        print(f"unknown subcommand {options.mode!r}; this shim answers doc_parser", file=sys.stderr)
+        return 2
 
     images = sorted(Path(options.images).glob("*.png"))
     output = Path(options.output)
@@ -58,7 +65,13 @@ def main(argv: list[str]) -> int:
                 capture_output=True,
                 text=True,
                 check=False,
+                # The engine's own bound kills this process, not the tesseract it spawned; a hung page
+                # would keep burning a core here. Bounded per page, it fails the read instead.
+                timeout=options.timeout,
             )
+        except subprocess.TimeoutExpired:
+            print(f"tesseract did not finish {image.name} within {options.timeout}s", file=sys.stderr)
+            return 1
         except OSError as error:
             print(f"tesseract could not run: {error}", file=sys.stderr)
             return 1

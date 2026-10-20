@@ -126,3 +126,34 @@ def test_the_shim_refuses_a_directory_with_no_pages(tmp_path: Path) -> None:
 def test_the_shim_is_executable(name: str) -> None:
     """The engine runs it by path, so the executable bit is part of the contract."""
     assert os.access(ROOT / "deploy" / "demo" / name, os.X_OK)
+
+
+def test_the_shim_answers_only_the_subcommand_the_engine_calls(tmp_path: Path) -> None:
+    """Anything else would dress an unknown request up as a successful read."""
+    images = _pages(tmp_path, 1)
+    stub = _stub_tesseract(tmp_path)
+
+    result = _run(["parse", "-i", str(images), "--save_path", str(tmp_path / "results")], stub)
+
+    assert result.returncode == 2
+    assert "unknown subcommand 'parse'" in result.stderr
+    assert not list((tmp_path / "results").glob("*_res.json"))
+
+
+def test_a_hung_tesseract_fails_the_page_instead_of_outliving_the_read(tmp_path: Path) -> None:
+    """The engine's bound kills this process, not the tesseract it spawned."""
+    images = _pages(tmp_path, 1)
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    slow = binary / "tesseract"
+    # An absolute path: the shim runs with a PATH that holds nothing but this stub directory.
+    slow.write_text("#!/bin/sh\n/bin/sleep 30\n", encoding="utf-8")
+    slow.chmod(0o755)
+
+    result = _run(
+        ["doc_parser", "-i", str(images), "--save_path", str(tmp_path / "results"), "--timeout", "0.2"],
+        binary,
+    )
+
+    assert result.returncode == 1
+    assert "did not finish page-0001.png within 0.2s" in result.stderr

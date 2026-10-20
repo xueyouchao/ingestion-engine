@@ -453,7 +453,10 @@ function uploadHeaders(file) {
   // No name header when the file has none: the server then names it for its media type (``upload.png``),
   // which is truer than a bare ``upload`` with no extension.
   const headers = { "Content-Type": uploadType(file) };
-  if (file.name) headers["X-Upload-Name"] = file.name;
+  // Percent-encoded: a header value is a ByteString, so one character above U+00FF -- a Chinese or
+  // Japanese name, an emoji from a phone camera roll -- makes fetch throw before a byte is sent. The
+  // server decodes it again, so the job still shows the visitor's own name.
+  if (file.name) headers["X-Upload-Name"] = encodeURIComponent(file.name);
   return headers;
 }
 

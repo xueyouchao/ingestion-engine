@@ -481,7 +481,9 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         It names a record and never a path; an image named ``upload.pdf`` would be a small lie in the job
         answer, so the fallback follows the media type.
         """
-        name = self.headers.get(UPLOAD_NAME_HEADER, "").strip()
+        # The page percent-encodes the name (a header value is a ByteString), so a name that arrived
+        # encoded is decoded here; a header set by something else passes through unchanged.
+        name = unquote(self.headers.get(UPLOAD_NAME_HEADER, "")).strip()
         return name or DEFAULT_UPLOAD_NAMES[content_type]
 
     def _json(self, payload: Any, *, status: HTTPStatus = HTTPStatus.OK, head: bool = False) -> None:
