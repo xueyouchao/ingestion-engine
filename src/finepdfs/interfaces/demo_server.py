@@ -245,11 +245,9 @@ class DemoApp:
 
     def page_html(self) -> str:
         """The page, with the way back to the reader when one is configured."""
-        if not self._back_link:
+        if not self.back_link:
             return DEMO_HTML.replace("{{back}}", "")
-        link = (
-            f'<a href="{escape(self._back_link, quote=True)}">&larr; Page reader</a>'
-        )
+        link = f'<a href="{escape(self.back_link, quote=True)}">&larr; Page reader</a>'
         return DEMO_HTML.replace("{{back}}", link)
 
     @property

@@ -172,15 +172,6 @@ function laneName(routing) {
   return routing === "ocr" ? "OCR" : routing ? "text layer" : "not in this reading";
 }
 
-function laneCounts(label) {
-  const counts = { ocr: 0, "text-layer": 0, "": 0 };
-  for (const id of Object.keys(DATA.documents)) {
-    const read = (DATA.documents[id].reads || {})[label];
-    counts[read ? read.routing : ""] += 1;
-  }
-  return counts;
-}
-
 function readingDifference(key) {
   const readings = readingsOf(key);
   const labels = Object.keys(readings);
