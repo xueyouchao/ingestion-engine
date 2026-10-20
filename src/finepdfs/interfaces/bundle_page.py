@@ -406,8 +406,10 @@ function renderLiveLink() {
   // there would be a dead end dressed as a feature.
   const holder = $("#live");
   // A relative --live (``/live/``) means nothing without an origin: opened over file://, the documented
-  // "open dist/bundle/index.html from disk" case, it would point at file:///live/.
-  if (!holder || !DATA.live || !/^https?:$/.test(location.protocol)) return;
+  // "open dist/bundle/index.html from disk" case, it would point at file:///live/. An absolute URL needs
+  // no origin and works from disk, so only a relative one is held to the protocol.
+  const absolute = /^https?:/i.test(DATA.live || "");
+  if (!holder || !DATA.live || (!absolute && !/^https?:$/.test(location.protocol))) return;
   holder.innerHTML = '<a class="live" href="' + esc(DATA.live) + '">Read your own document &rarr;</a>';
 }
 

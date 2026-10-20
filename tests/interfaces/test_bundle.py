@@ -502,6 +502,6 @@ def test_the_live_slot_vanishes_for_a_bundle_with_no_demo(tmp_path) -> None:
     page = module.read_text(encoding="utf-8")
 
     assert "header #live:empty { display: none; }" in page
-    assert "!/^https?:$/.test(location.protocol)" in page, (
-        "a bundle opened from file:// has no origin a relative /live/ could reach"
+    assert "(!absolute && !/^https?:$/.test(location.protocol))" in page, (
+        "a relative /live/ has no origin over file://; an absolute URL does, and keeps its link"
     )

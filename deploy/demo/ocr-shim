@@ -23,10 +23,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+# The engine's own bound around this command (``FINEPDFS_ENGINE_TIMEOUT``, 120s in the unit). A page's
+# budget is a share of it, so this shim fails the read with its own message before that bound kills it.
+ENGINE_TIMEOUT = "FINEPDFS_ENGINE_TIMEOUT"
+DEFAULT_ENGINE_TIMEOUT = 120.0
+
+
+def _engine_bound() -> float:
+    """The bound the engine holds around this command, as ``FINEPDFS_ENGINE_TIMEOUT`` sets it."""
+    raw = os.environ.get(ENGINE_TIMEOUT, "").strip()
+    try:
+        return float(raw) if raw else DEFAULT_ENGINE_TIMEOUT
+    except ValueError:
+        return DEFAULT_ENGINE_TIMEOUT
 
 
 def main(argv: list[str]) -> int:
@@ -38,20 +53,32 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--pipeline_version", default="v1")
     parser.add_argument("--save_path", dest="output", required=True)
     parser.add_argument("-l", "--lang", default="eng")
-    parser.add_argument("--timeout", type=float, default=60.0, help="seconds a single page may take")
-    options, _unknown = parser.parse_known_args(argv)
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="seconds a single page may take; default is the engine's bound shared between the pages",
+    )
+    # Strict, not ``parse_known_args``: this shim stands in for the engine's own command, so a flag the
+    # engine learns to send must fail here loudly instead of being swallowed while the output shape drifts.
+    try:
+        options = parser.parse_args(argv)
+    except SystemExit:
+        print(f"the engine passes flags this shim does not know: {argv}", file=sys.stderr)
+        return 2
+
+    if options.mode != "doc_parser":
+        # The engine calls ``doc_parser``; answering any other invocation would dress an unknown request
+        # up as a successful read, which is worse than failing it. Checked before the tooling, because
+        # this contract does not depend on what the host has installed.
+        print(f"unknown subcommand {options.mode!r}; this shim answers doc_parser", file=sys.stderr)
+        return 2
 
     if shutil.which("tesseract") is None:
         # The runner quotes this as the read's failure reason, so it says what is missing rather than
         # ending in a traceback that reaches the page.
         print("tesseract is not installed or not on PATH", file=sys.stderr)
         return 1
-
-    if options.mode != "doc_parser":
-        # The engine calls ``doc_parser``; answering any other invocation would dress an unknown request
-        # up as a successful read, which is worse than failing it.
-        print(f"unknown subcommand {options.mode!r}; this shim answers doc_parser", file=sys.stderr)
-        return 2
 
     images = sorted(Path(options.images).glob("*.png"))
     output = Path(options.output)
@@ -60,19 +87,27 @@ def main(argv: list[str]) -> int:
         print(f"no page images under {options.images}", file=sys.stderr)
         return 1
 
+    budget = options.timeout if options.timeout is not None else _engine_bound() / len(images)
+    if budget <= 0:
+        print(f"no time left for any page: {ENGINE_TIMEOUT}={_engine_bound():g}s", file=sys.stderr)
+        return 1
+
     for index, image in enumerate(images):
         try:
             result = subprocess.run(
                 ["tesseract", str(image), "-", "-l", options.lang],
                 capture_output=True,
-                text=True,
+                # Tesseract writes UTF-8; decoding with the host's locale would raise on exactly the
+                # non-ASCII text this lane exists for.
+                encoding="utf-8",
+                errors="replace",
                 check=False,
                 # The engine's own bound kills this process, not the tesseract it spawned; a hung page
                 # would keep burning a core here. Bounded per page, it fails the read instead.
-                timeout=options.timeout,
+                timeout=budget,
             )
         except subprocess.TimeoutExpired:
-            print(f"tesseract did not finish {image.name} within {options.timeout}s", file=sys.stderr)
+            print(f"tesseract did not finish {image.name} within {budget:g}s", file=sys.stderr)
             return 1
         except OSError as error:
             print(f"tesseract could not run: {error}", file=sys.stderr)

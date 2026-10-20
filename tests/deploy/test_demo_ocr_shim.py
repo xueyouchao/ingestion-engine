@@ -49,10 +49,12 @@ def _stub_tesseract(tmp_path: Path, *, output: str = "Scanned page", status: int
     return binary
 
 
-def _run(shim_arguments: list[str], path: Path) -> subprocess.CompletedProcess[str]:
+def _run(
+    shim_arguments: list[str], path: Path, **extra: str
+) -> subprocess.CompletedProcess[str]:
     # ``PATH`` is only the directory under test: the shim must find the stub there and nothing else, so
     # "tesseract is missing" is a state this test can actually reach on a machine that has tesseract.
-    environment = {**os.environ, "PATH": str(path)}
+    environment = {**os.environ, "PATH": str(path), **extra}
     return subprocess.run(
         [sys.executable, str(SHIM), *shim_arguments],
         capture_output=True,
@@ -167,3 +169,71 @@ def test_the_bundle_rebuild_hint_keeps_the_live_link() -> None:
     assert "--live /live/" in runbook
     assert "--live /live/" in readme
     assert "--link https://$HOST/" in runbook, "the hint follows NAME/HOST, not a frozen hostname"
+
+
+def test_the_shim_refuses_a_flag_it_does_not_know(tmp_path: Path) -> None:
+    """It stands in for the engine's command, so a contract change must fail loudly rather than drift."""
+    images = _pages(tmp_path, 1)
+    stub = _stub_tesseract(tmp_path)
+
+    result = _run(
+        ["doc_parser", "-i", str(images), "--save_path", str(tmp_path / "r"), "--layout_model", "x"],
+        stub,
+    )
+
+    assert result.returncode == 2
+    assert "flags this shim does not know" in result.stderr
+    assert not list((tmp_path / "r").glob("*_res.json"))
+
+
+def test_the_subcommand_is_judged_before_the_hosts_tooling(tmp_path: Path) -> None:
+    """A wrong invocation is a contract error, not a missing tesseract, and says so even where it is absent."""
+    images = _pages(tmp_path, 1)
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+
+    result = _run(["parse", "-i", str(images), "--save_path", str(tmp_path / "r")], empty)
+
+    assert result.returncode == 2
+    assert "unknown subcommand 'parse'" in result.stderr
+
+
+def test_a_page_budget_is_a_share_of_the_engines_own_bound(tmp_path: Path) -> None:
+    """A fixed 60s per page would let a slow two-page read die on the engine's bound with no page named."""
+    images = _pages(tmp_path, 2)
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    slow = binary / "tesseract"
+    slow.write_text("#!/bin/sh\n/bin/sleep 30\n", encoding="utf-8")
+    slow.chmod(0o755)
+
+    result = _run(
+        ["doc_parser", "-i", str(images), "--save_path", str(tmp_path / "r")],
+        binary,
+        FINEPDFS_ENGINE_TIMEOUT="0.4",
+    )
+
+    assert result.returncode == 1
+    assert "did not finish page-0001.png within 0.2s" in result.stderr
+
+
+def test_non_ascii_page_text_survives_a_plain_c_locale(tmp_path: Path) -> None:
+    """Tesseract writes UTF-8; decoding it as the host's locale would raise on the text this lane is for."""
+    images = _pages(tmp_path, 1)
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    stub = binary / "tesseract"
+    stub.write_text("#!/bin/sh\nprintf '%s\\n' '扫描 页'\n", encoding="utf-8")
+    stub.chmod(0o755)
+
+    result = _run(
+        ["doc_parser", "-i", str(images), "--save_path", str(tmp_path / "r")],
+        binary,
+        LC_ALL="C",
+        PYTHONUTF8="0",
+        PYTHONCOERCECLOCALE="0",
+    )
+
+    assert result.returncode == 0, result.stderr
+    written = json.loads((tmp_path / "r" / "page-0001_res.json").read_text(encoding="utf-8"))
+    assert written["res"]["parsing_res_list"][0]["block_content"] == "扫描 页"

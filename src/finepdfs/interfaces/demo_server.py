@@ -563,7 +563,10 @@ def build_parser() -> argparse.ArgumentParser:
     """The console script's flags: where to bind, and an override for every demo limit."""
     parser = argparse.ArgumentParser(
         prog="finepdfs-live-demo",
-        description="Serve the live upload demo: one PDF in, its OCR Decision and the page text out.",
+        description=(
+            "Serve the live upload demo: one document in -- a PDF, or a PNG, JPEG or TIFF scan -- and its "
+            "OCR Decision and page text out."
+        ),
     )
     parser.add_argument("--host", default=DEFAULT_HOST, help=f"address to bind (default {DEFAULT_HOST})")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"port to bind (default {DEFAULT_PORT})")
