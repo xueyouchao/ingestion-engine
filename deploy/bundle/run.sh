@@ -18,7 +18,7 @@ if [ ! -f "$ROOT/dist/bundle/index.html" ]; then
   echo "  PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli bundle \\" >&2
   echo "    --out dist/bundle --state paddleocr-vl=.demo-gpu/out --state pymupdf=.demo/out \\" >&2
   echo "    --corpus .demo-gpu/corpus \\" >&2
-  echo "    --link https://pdf-ingestion.srv1567269.hstgr.cloud/ \\" >&2
+  echo "    --link https://$HOST/ \\" >&2
   echo "    --live /live/" >&2
   exit 1
 fi

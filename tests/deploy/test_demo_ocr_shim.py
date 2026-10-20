@@ -166,3 +166,4 @@ def test_the_bundle_rebuild_hint_keeps_the_live_link() -> None:
 
     assert "--live /live/" in runbook
     assert "--live /live/" in readme
+    assert "--link https://$HOST/" in runbook, "the hint follows NAME/HOST, not a frozen hostname"
