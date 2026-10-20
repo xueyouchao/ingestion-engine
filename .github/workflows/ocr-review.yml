@@ -1,0 +1,129 @@
+# OpenCodeReview (OCR) -- AI review of every pull request.
+#
+# Recipe: https://open-codereview.ai/docs/cicd (upstream example:
+# alibaba/open-code-review/examples/github_actions/ocr-review.yml).
+#
+# Two runs are possible:
+#   * automatically, on every PR revision (opened / new commits / reopened);
+#   * on demand, when a MEMBER / OWNER / COLLABORATOR comments
+#     `/open-code-review` or `@open-code-review` on a PR.
+#
+# Required repository configuration (Settings -> Secrets and variables -> Actions):
+#   secret    OCR_LLM_URL            LLM chat-completions endpoint
+#   secret    OCR_LLM_AUTH_TOKEN     LLM API key
+#   variable  OCR_LLM_MODEL          model id
+#   variable  OCR_LLM_USE_ANTHROPIC  'true' for Anthropic, 'false' for OpenAI-compatible
+#
+# `GITHUB_TOKEN` is provided by Actions; the `pull-requests: write` permission
+# below is what lets the job post its findings back onto the PR.
+
+name: OpenCodeReview PR Review
+
+# Conditional concurrency group.
+#
+# Actions evaluates concurrency BEFORE job-level `if:`, so a flat `ocr-<pr>`
+# group would let an unrelated conversation comment cancel a running review.
+# Matching events share the per-PR group; anything else lands in a unique
+# `noop-<run_id>` group that can never collide with a real review.
+concurrency:
+  group: >-
+    ${{
+      (
+        github.event_name == 'pull_request_target'
+        || (
+          github.event_name == 'issue_comment'
+          && github.event.issue.pull_request
+          && github.event.comment.user.type != 'Bot'
+          && (
+            github.event.comment.author_association == 'MEMBER'
+            || github.event.comment.author_association == 'OWNER'
+            || github.event.comment.author_association == 'COLLABORATOR'
+          )
+          && (
+            startsWith(github.event.comment.body, '/open-code-review')
+            || startsWith(github.event.comment.body, '@open-code-review')
+          )
+        )
+      )
+      && format('ocr-{0}', github.event.pull_request.number || github.event.issue.number)
+      || format('noop-{0}', github.run_id)
+    }}
+  cancel-in-progress: true
+
+on:
+  # pull_request_target (not pull_request) so the LLM secrets are available for
+  # PRs opened from forks. It is safe here because OCR only reads the diff: it
+  # checks out no PR code and runs none.
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  code-review:
+    name: code-review
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: |
+      github.event_name == 'pull_request_target'
+      || (
+        github.event_name == 'issue_comment'
+        && github.event.issue.pull_request
+        && github.event.comment.user.type != 'Bot'
+        && (
+          github.event.comment.author_association == 'MEMBER'
+          || github.event.comment.author_association == 'OWNER'
+          || github.event.comment.author_association == 'COLLABORATOR'
+        )
+        && (
+          startsWith(github.event.comment.body, '/open-code-review')
+          || startsWith(github.event.comment.body, '@open-code-review')
+        )
+      )
+    steps:
+      - name: Get PR context
+        id: pr-context
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // issue_comment payloads carry no top-level pull_request fields, so
+            // resolve the base ref / head sha / title the action needs.
+            const prNumber = context.issue.number;
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            core.setOutput('base_ref', pullRequest.base.ref);
+            core.setOutput('head_sha', pullRequest.head.sha);
+            core.setOutput('pr_title', pullRequest.title);
+
+      - name: Run OpenCodeReview
+        # Pinned rather than @main: a moving ref would let a third-party
+        # repository change the code that runs with this repo's secrets.
+        uses: alibaba/open-code-review@v1.13.1
+        with:
+          llm_url: ${{ secrets.OCR_LLM_URL }}
+          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          llm_model: ${{ vars.OCR_LLM_MODEL }}
+          llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
+          # The PR title is the cheapest useful context for the reviewer;
+          # semantic titles ("fix(demo): ...") steer it well.
+          background: ${{ github.event.pull_request.title || steps.pr-context.outputs.pr_title }}
+          # For issue_comment triggers, pass the refs resolved above; for
+          # pull_request_target the action resolves them from the event itself.
+          base_ref: ${{ steps.pr-context.outputs.base_ref }}
+          head_sha: ${{ steps.pr-context.outputs.head_sha }}
+          # Hard ceiling on input + output tokens for one review, so a runaway
+          # sub-agent cannot drain the LLM budget in a single run.
+          max_tokens_budget: '2000000'
+          # A pushed commit reviews only <last reviewed head>..<new head>
+          # instead of the whole PR from the merge-base, so a long-lived PR is
+          # not re-reviewed (and re-commented) in full on every push. Fail-closed:
+          # anything in doubt falls back to the full merge-base review.
+          checkpoint_range: 'true'
