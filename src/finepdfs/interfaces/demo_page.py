@@ -130,7 +130,8 @@ DEMO_HTML = """<!doctype html>
 
 <section class="statements" id="statements">
   <p><strong>Where your bytes go:</strong> when the decision chooses the OCR lane, the page images are
-  sent to a rented GPU to be read.</p>
+  sent to whichever OCR worker the demo is wired to &mdash; the deployed one on a rented GPU, or an engine
+  this host runs when the demo is started with one &mdash; and read there.</p>
   <p><strong>What is kept:</strong> nothing is kept after the response &mdash; no uploaded file, no page
   image, no extracted text and no job state across a restart.</p>
 </section>

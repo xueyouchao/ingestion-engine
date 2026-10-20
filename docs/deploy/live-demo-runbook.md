@@ -340,6 +340,12 @@ a text-layer read and a refused upload never start a GPU container. An engine th
 (`FINEPDFS_ENGINE_COMMAND` set, so no address) needs no worker at all -- it reports no `warming` stage and
 a `warmed_ms` of zero, because there was no server to wait for.
 
+That last door is how the OCR lane can be tried without a GPU: point `FINEPDFS_ENGINE_COMMAND` at any
+command that speaks the CLI engine's contract (`doc_parser -i <pages> --pipeline_version <v> --save_path
+<out>`, writing one `*_res.json` per page). The Engine Identity on the page then names that command, which
+is how a reader can tell whose text they are looking at -- a wrapper around a local OCR binary proves the
+lane end to end, but it is not the demo's model and its text is not evidence of what the model returns.
+
 The page is a view: it never curates, never publishes and never writes (§11).
 
 ## 6. The three Spend Gates, and how to change them
