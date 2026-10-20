@@ -33,7 +33,10 @@ DEMO_HTML = """<!doctype html>
     --muted: #6b675e;
     --line: #d9d4c8;
     --accent: #0b6b4f;
-    --ok: #0b6b4f;
+    /* The label colour a filled control needs; the accent is too light to carry white in dark mode. */
+    --on-accent: #ffffff;
+    /* Deeper than the accent on purpose: a finished stage must not look like the stage in progress. */
+    --ok: #145c43;
     --warn: #8a4b00;
     --bad: #9c2b1c;
   }
@@ -45,7 +48,8 @@ DEMO_HTML = """<!doctype html>
       --muted: #a09a8c;
       --line: #33312c;
       --accent: #5fd3a6;
-      --ok: #5fd3a6;
+      --on-accent: #10201a;
+      --ok: #a6ead0;
       --warn: #f2c078;
       --bad: #ff9c9c;
     }
@@ -89,7 +93,7 @@ DEMO_HTML = """<!doctype html>
     border-radius: .4rem;
     border: 1px solid var(--accent);
     background: var(--accent);
-    color: #ffffff;
+    color: var(--on-accent);
     cursor: pointer;
   }
   button:disabled { opacity: .55; cursor: progress; }

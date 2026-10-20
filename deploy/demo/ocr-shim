@@ -66,15 +66,16 @@ def main(argv: list[str]) -> int:
             print(f"tesseract failed on {image}: {result.stderr.strip()}", file=sys.stderr)
             return 1
         text = result.stdout.strip()
+        # The shape ``page_from_paddle_result`` reads. Provenance is not carried here: the Engine
+        # Identity the page shows already names the command, and a field no consumer reads is a promise
+        # with nothing behind it.
         payload = {
             "res": {
                 "page_index": index,
                 "parsing_res_list": [{"block_content": text, "block_label": "text", "block_order": 0}]
                 if text
                 else [],
-            },
-            # Named so nobody mistakes which engine read the page.
-            "engine": "tesseract",
+            }
         }
         (output / f"{image.stem}_res.json").write_text(json.dumps(payload), encoding="utf-8")
     return 0
