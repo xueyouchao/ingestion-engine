@@ -417,16 +417,31 @@ function poll(jobId) {
 const ADMITTED_TYPES = ["application/pdf", "image/png", "image/jpeg", "image/tiff"];
 
 function guessType(name) {
-  // The extension is what a dropped file still carries when its type is missing or unhelpful.
+  // What the extension says, when this page knows it. ``null`` means "no idea", so nothing is ever
+  // uploaded claiming to be a PDF by default -- a .webp or a .docx would then reach the reader as a
+  // broken PDF and be reported as unreadable instead of being refused for what it is.
   const lower = (name || "").toLowerCase();
+  if (lower.endsWith(".pdf")) return "application/pdf";
   if (lower.endsWith(".png")) return "image/png";
   if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
   if (lower.endsWith(".tif") || lower.endsWith(".tiff")) return "image/tiff";
-  return "application/pdf";
+  return null;
 }
 
 function uploadType(file) {
-  return ADMITTED_TYPES.includes(file.type) ? file.type : guessType(file.name);
+  // The browser's own type when the server admits it; the extension when it does not (``image/jpg``,
+  // ``application/octet-stream`` for a .tif); and then the browser's answer again, so the refusal names
+  // the type the file really is rather than a guess. Never ``null``: a header cannot be undefined.
+  if (ADMITTED_TYPES.includes(file.type)) return file.type;
+  return guessType(file.name) || file.type || "application/octet-stream";
+}
+
+function uploadHeaders(file) {
+  // No name header when the file has none: the server then names it for its media type (``upload.png``),
+  // which is truer than a bare ``upload`` with no extension.
+  const headers = { "Content-Type": uploadType(file) };
+  if (file.name) headers["X-Upload-Name"] = file.name;
+  return headers;
 }
 
 async function upload(file) {
@@ -437,7 +452,7 @@ async function upload(file) {
   try {
     const response = await fetch("/api/read", {
       method: "POST",
-      headers: { "Content-Type": uploadType(file), "X-Upload-Name": file.name || "upload" },
+      headers: uploadHeaders(file),
       body: file,
     });
     const payload = await response.json();

@@ -817,3 +817,22 @@ def test_every_admitted_media_type_has_a_fallback_name() -> None:
     """One table answers both questions, so an admitted type without a name is not expressible."""
     assert set(demo_server.ADMITTED_MEDIA_TYPES) == set(demo_server.DEFAULT_UPLOAD_NAMES)
     assert demo_server.ADMITTED_MEDIA_TYPES[0] == demo_server.PDF_MEDIA_TYPE
+
+
+def test_the_page_never_sends_a_media_type_it_made_up() -> None:
+    """The page picks the type in three steps, and each step is what keeps a refusal honest.
+
+    An unknown extension says "no idea" instead of claiming a PDF (a .webp would otherwise reach the
+    reader as a broken PDF and be reported unreadable); the last resort is still a real type, never a
+    null header; and a nameless file sends no name at all, so the server names it for its media type.
+    """
+    def function(name: str) -> str:
+        found = re.search(rf"function {name}\(file\) \{{(.*?)\n\}}", demo_page.DEMO_HTML, re.S)
+        return found.group(1) if found else ""
+
+    guess = re.search(r"function guessType\(name\) \{(.*?)\n\}", demo_page.DEMO_HTML, re.S)
+    assert guess is not None
+
+    assert "return null;" in guess.group(1), "an extension this page does not know claims nothing"
+    assert "application/octet-stream" in function("uploadType"), "the header is always a string"
+    assert "if (file.name)" in function("uploadHeaders"), "a nameless file is named by the server"
