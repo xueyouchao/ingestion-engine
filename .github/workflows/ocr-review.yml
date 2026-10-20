@@ -122,3 +122,8 @@ jobs:
           # Hard ceiling on input + output tokens for one review, so a runaway
           # sub-agent cannot drain the LLM budget in a single run.
           max_tokens_budget: '2000000'
+          # A pushed commit reviews only <last reviewed head>..<new head>
+          # instead of the whole PR from the merge-base, so a long-lived PR is
+          # not re-reviewed (and re-commented) in full on every push. Fail-closed:
+          # anything in doubt falls back to the full merge-base review.
+          checkpoint_range: 'true'
