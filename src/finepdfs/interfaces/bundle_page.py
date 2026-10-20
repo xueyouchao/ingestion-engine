@@ -29,7 +29,9 @@ body { margin:0; background:var(--bg); color:var(--ink);
 header { display:flex; gap:1rem; align-items:center; padding:.9rem 1.2rem;
   border-bottom:1px solid var(--line); flex-wrap:wrap; }
 header h1 { font-size:1.05rem; margin:0; letter-spacing:.01em; }
-header .hint { color:var(--muted); font-size:.82rem; }
+header .live { color:var(--ink); font-size:.82rem; text-decoration:none; padding:.25rem .55rem;
+  border:1px solid var(--line); border-radius:.4rem; white-space:nowrap; }
+header .live:hover { border-color:var(--ink); }
 header form { display:flex; gap:.5rem; align-items:center; flex:1 1 20rem; min-width:12rem; margin:0; }
 header form input { flex:1; min-width:0; font:inherit; padding:.4rem .55rem; border:1px solid var(--line);
   border-radius:.45rem; background:var(--bg); color:var(--ink); }
@@ -100,7 +102,7 @@ footer code { color:var(--ink); }
 <body>
 <header>
   <h1>Page reader</h1>
-  <span class="hint" id="hint"></span>
+  <span id="live"></span>
   <form id="corpus" role="search">
     <input id="q" type="search" placeholder="search every page — Danny, tribal consultation"
       aria-label="search the accepted text of every page">
@@ -168,15 +170,6 @@ function laneOf(id) {
 
 function laneName(routing) {
   return routing === "ocr" ? "OCR" : routing ? "text layer" : "not in this reading";
-}
-
-function laneCounts(label) {
-  const counts = { ocr: 0, "text-layer": 0, "": 0 };
-  for (const id of Object.keys(DATA.documents)) {
-    const read = (DATA.documents[id].reads || {})[label];
-    counts[read ? read.routing : ""] += 1;
-  }
-  return counts;
 }
 
 function readingDifference(key) {
@@ -406,6 +399,15 @@ function renderLaneNote() {
   return note;
 }
 
+function renderLiveLink() {
+  // The live demo the deployment serves beside this bundle, if it serves one. It is a manifest field and
+  // not a hard-coded path: an exported bundle opens from file:// as well, and a link to a demo that is not
+  // there would be a dead end dressed as a feature.
+  const holder = $("#live");
+  if (!holder || !DATA.live) return;
+  holder.innerHTML = '<a class="live" href="' + esc(DATA.live) + '">Read your own document &rarr;</a>';
+}
+
 function imageMissing(view) {
   const offServer = !/^https?:$/.test(location.protocol);
   return '<div class="missing"><strong>The page image did not load.</strong> '
@@ -469,13 +471,6 @@ function hitCount() {
     + (state.hits.length > HIT_LIMIT ? " (nearest " + HIT_LIMIT + " listed)" : "");
 }
 
-function renderHint() {
-  const counts = laneCounts(state.label);
-  $("#hint").textContent = "static · no server, no upload · " + Object.keys(DATA.pages).length
-    + " pages from a real run · readings: " + DATA.states.map((run) => run.label).join(" / ")
-    + " · this reading: " + counts.ocr + " documents by OCR, " + counts["text-layer"] + " by the text layer";
-}
-
 function renderStates() {
   const box = $("#states");
   box.textContent = "reading:";
@@ -493,7 +488,6 @@ function renderStates() {
       $("#hits").textContent = hitCount();
       renderStates();
       renderDocuments();
-      renderHint();
       render();
     });
     box.appendChild(button);
@@ -535,7 +529,6 @@ function boot() {
   const first = Object.keys(DATA.documents)[0];
   state.doc = first;
   state.page = pagesOf(first)[0];
-  renderHint();
   $("#dpi").textContent = "rendered at " + DATA.dpi + " dpi";
   buildIndex();
   renderDocuments();
@@ -570,6 +563,7 @@ function boot() {
     applyCorpus(query);
     if (state.hits.length) { state.page = state.hits[0].key; state.doc = docOf(state.page); }
   }
+  renderLiveLink();
   render();
 }
 

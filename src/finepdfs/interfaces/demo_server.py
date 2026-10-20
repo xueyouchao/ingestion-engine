@@ -32,6 +32,7 @@ from collections.abc import Callable, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -86,6 +87,9 @@ RATE_LIMIT_WINDOW_SECONDS = "FINEPDFS_DEMO_RATE_LIMIT_WINDOW_SECONDS"
 DAILY_OCR_PAGES = "FINEPDFS_DEMO_DAILY_OCR_PAGES"
 UPLOAD_BYTES = "FINEPDFS_DEMO_UPLOAD_BYTES"
 QUEUE_DEPTH = "FINEPDFS_DEMO_QUEUE_DEPTH"
+# Where this deployment's reader lives, so the page can offer a way back to it. A deployment fact, not a
+# page constant: the demo is also served on its own, and a back link to nothing would be a dead end.
+BACK_LINK = "FINEPDFS_DEMO_BACK_LINK"
 WARM_TIMEOUT_SECONDS = "FINEPDFS_DEMO_WARM_TIMEOUT_SECONDS"
 POLL_INTERVAL_SECONDS = "FINEPDFS_DEMO_POLL_INTERVAL_SECONDS"
 
@@ -223,6 +227,7 @@ class DemoApp:
         # The environment is the demo's configuration and, for a leased worker, the place the lease
         # publishes the endpoint ``engine_config`` and the probe are then built from.
         self._environ = environ if environ is not None else os.environ
+        self._back_link = self._environ.get(BACK_LINK, "").strip()
         self._limits = limits if limits is not None else demo_limits(self._environ)
         self._engine_name = engine_name if engine_name is not None else configured_engine(self._environ)
         self._ledger = ledger if ledger is not None else InMemoryGateLedger(clock=clock, limits=self._limits)
@@ -232,6 +237,18 @@ class DemoApp:
     @property
     def limits(self) -> DemoLimits:
         return self._limits
+
+    @property
+    def back_link(self) -> str:
+        """The reader this deployment is linked from, or empty when the demo is served on its own."""
+        return self._back_link
+
+    def page_html(self) -> str:
+        """The page, with the way back to the reader when one is configured."""
+        if not self.back_link:
+            return DEMO_HTML.replace("{{back}}", "")
+        link = f'<a href="{escape(self.back_link, quote=True)}">&larr; Page reader</a>'
+        return DEMO_HTML.replace("{{back}}", link)
 
     @property
     def engine_name(self) -> str:
@@ -391,7 +408,7 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not found", head=head)
             return
         if path in ("/", "/index.html"):
-            self._html(DEMO_HTML, head=head)
+            self._html(self.app.page_html(), head=head)
         elif path == "/api/status":
             self._json(self.app.status(), head=head)
         elif path.startswith("/api/read/"):
@@ -555,6 +572,13 @@ def build_parser() -> argparse.ArgumentParser:
             type=int if limit.whole else float,
             help=f"{limit.noun} (default {limit.default:g})",
         )
+    parser.add_argument(
+        "--back-link",
+        dest="back_link",
+        default=None,
+        metavar="URL",
+        help=f"the reader this page links back to ({BACK_LINK}); omit when the demo is served on its own",
+    )
     return parser
 
 
@@ -565,6 +589,8 @@ def _environment_from_args(args: argparse.Namespace) -> dict[str, str]:
         configured = getattr(args, field, None)
         if configured is not None:
             values[_LIMITS[field].variable] = str(configured)
+    if getattr(args, "back_link", None):
+        values[BACK_LINK] = args.back_link
     return values
 
 

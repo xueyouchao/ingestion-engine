@@ -347,10 +347,30 @@ def test_the_page_states_where_the_bytes_go_and_what_is_kept_before_the_upload()
 
 
 def test_the_page_asset_is_its_own_module() -> None:
-    with _serving(_app(FakeProbe(HEALTHY), FakeEndpoint())) as base:
-        assert _get(base + "/").read().decode("utf-8") == demo_page.DEMO_HTML
+    app = _app(FakeProbe(HEALTHY), FakeEndpoint())
+    with _serving(app) as base:
+        assert _get(base + "/").read().decode("utf-8") == app.page_html()
 
     assert demo_server.DEMO_HTML is demo_page.DEMO_HTML
+    assert "{{back}}" in demo_page.DEMO_HTML, "the asset carries the slot; the app fills it"
+
+
+def test_the_page_offers_a_way_back_only_when_the_deployment_names_one() -> None:
+    """The demo is also served on its own, so the way back is a deployment fact, not a page constant."""
+    alone = _app(FakeProbe(HEALTHY), FakeEndpoint())
+    with _serving(alone) as base:
+        bare = _get(base + "/").read().decode("utf-8")
+
+    joined = _app(
+        FakeProbe(HEALTHY), FakeEndpoint(),
+        environ={demo_server.BACK_LINK: "https://pdf-ingestion.example/"},
+    )
+    with _serving(joined) as base:
+        linked = _get(base + "/").read().decode("utf-8")
+
+    assert '<p class="back"></p>' in bare, "no reader to go back to: the slot stays empty"
+    assert "<a href=" not in bare
+    assert '<a href="https://pdf-ingestion.example/">&larr; Page reader</a>' in linked
 
 
 def test_the_status_answer_carries_the_limits_the_budget_and_the_depth_but_no_secret() -> None:
