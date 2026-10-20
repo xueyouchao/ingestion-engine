@@ -32,7 +32,6 @@ header h1 { font-size:1.05rem; margin:0; letter-spacing:.01em; }
 header .live { color:var(--ink); font-size:.82rem; text-decoration:none; padding:.25rem .55rem;
   border:1px solid var(--line); border-radius:.4rem; white-space:nowrap; }
 header .live:hover { border-color:var(--ink); }
-header .hint { color:var(--muted); font-size:.82rem; }
 header form { display:flex; gap:.5rem; align-items:center; flex:1 1 20rem; min-width:12rem; margin:0; }
 header form input { flex:1; min-width:0; font:inherit; padding:.4rem .55rem; border:1px solid var(--line);
   border-radius:.45rem; background:var(--bg); color:var(--ink); }
@@ -104,7 +103,6 @@ footer code { color:var(--ink); }
 <header>
   <h1>Page reader</h1>
   <span id="live"></span>
-  <span class="hint" id="hint"></span>
   <form id="corpus" role="search">
     <input id="q" type="search" placeholder="search every page — Danny, tribal consultation"
       aria-label="search the accepted text of every page">
@@ -482,13 +480,6 @@ function hitCount() {
     + (state.hits.length > HIT_LIMIT ? " (nearest " + HIT_LIMIT + " listed)" : "");
 }
 
-function renderHint() {
-  const counts = laneCounts(state.label);
-  $("#hint").textContent = "static · no server, no upload · " + Object.keys(DATA.pages).length
-    + " pages from a real run · readings: " + DATA.states.map((run) => run.label).join(" / ")
-    + " · this reading: " + counts.ocr + " documents by OCR, " + counts["text-layer"] + " by the text layer";
-}
-
 function renderStates() {
   const box = $("#states");
   box.textContent = "reading:";
@@ -506,7 +497,6 @@ function renderStates() {
       $("#hits").textContent = hitCount();
       renderStates();
       renderDocuments();
-      renderHint();
       render();
     });
     box.appendChild(button);
@@ -548,7 +538,6 @@ function boot() {
   const first = Object.keys(DATA.documents)[0];
   state.doc = first;
   state.page = pagesOf(first)[0];
-  renderHint();
   $("#dpi").textContent = "rendered at " + DATA.dpi + " dpi";
   buildIndex();
   renderDocuments();

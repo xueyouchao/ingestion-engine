@@ -21,6 +21,9 @@ ExecStart=/home/ubuntu/ingestion-engine/.venv/bin/finepdfs-live-demo --host 172.
 Environment=FINEPDFS_ENGINE=paddleocr-vl
 Environment=FINEPDFS_ENGINE_COMMAND=/home/ubuntu/ingestion-engine/deploy/demo/ocr-shim
 Environment=FINEPDFS_ENGINE_TIMEOUT=120
+# The reader the site is entered from: the page offers a way back to it, and the demo served alone
+# (no reader) simply shows no link.
+Environment=FINEPDFS_DEMO_BACK_LINK=https://pdf-ingestion.srv1567269.hstgr.cloud/
 Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=3

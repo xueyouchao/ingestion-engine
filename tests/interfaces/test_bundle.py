@@ -481,3 +481,16 @@ def test_the_live_link_is_a_deployment_choice_not_a_page_constant(tmp_path) -> N
     page = (tmp_path / "served" / "index.html").read_text(encoding="utf-8")
     assert 'id="live"' in page, "the header has the slot the link is rendered into"
     assert 'href="/live/"' not in page, "the asset keeps no path of its own"
+
+
+def test_the_reader_no_longer_sums_itself_up_in_the_header(tmp_path) -> None:
+    """The header carried "static · no server, no upload · … pages from a real run …": a summary that a
+    deployment with a live demo makes false, and that the footer's per-page provenance already covers."""
+    out = _write_run(tmp_path, "out", pages=(1,), engine="pymupdf@1.28.2")
+
+    build_bundle(tmp_path / "bundle", [read_state("pymupdf", out)], tmp_path / "corpus")
+
+    page = (tmp_path / "bundle" / "index.html").read_text(encoding="utf-8")
+    assert "no server, no upload" not in page
+    assert 'id="hint"' not in page
+    assert "this reading:" not in page

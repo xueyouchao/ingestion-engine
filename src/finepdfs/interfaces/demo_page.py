@@ -35,8 +35,6 @@ DEMO_HTML = """<!doctype html>
     --accent: #0b6b4f;
     /* The label colour a filled control needs; the accent is too light to carry white in dark mode. */
     --on-accent: #ffffff;
-    /* Deeper than the accent on purpose: a finished stage must not look like the stage in progress. */
-    --ok: #145c43;
     --warn: #8a4b00;
     --bad: #9c2b1c;
   }
@@ -49,7 +47,6 @@ DEMO_HTML = """<!doctype html>
       --line: #33312c;
       --accent: #5fd3a6;
       --on-accent: #10201a;
-      --ok: #a6ead0;
       --warn: #f2c078;
       --bad: #ff9c9c;
     }
@@ -63,6 +60,9 @@ DEMO_HTML = """<!doctype html>
     color: var(--ink);
     font: 15px/1.5 ui-sans-serif, system-ui, sans-serif;
   }
+  header .back { margin: 0 0 .5rem; min-height: 1.2em; }
+  header .back a { color: var(--muted); text-decoration: none; font-size: .85rem; }
+  header .back a:hover { color: var(--ink); }
   header h1 { margin: 0 0 .25rem; font-size: 1.65rem; }
   header p { margin: .2rem 0; color: var(--muted); }
   section, .panel {
@@ -107,7 +107,12 @@ DEMO_HTML = """<!doctype html>
     font-size: .88rem;
   }
   .timeline li[data-state=active] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
-  .timeline li[data-state=done] { border-color: var(--ok); color: var(--ok); }
+  /* A finished stage recedes and is ticked: the accent's own green would read as "in progress", and no
+     second green sits far enough from it to tell the two apart at a glance (WCAG 1.4.11 wants ~3:1
+     between colours that carry meaning, which two greens of one hue cannot give). One colour for the
+     current stage, grey and a glyph for the ones behind it. */
+  .timeline li[data-state=done] { border-color: var(--line); color: var(--muted); }
+  .timeline li[data-state=done]::before { content: "✓  "; }
   .timeline li[data-state=skipped] { opacity: .55; text-decoration: line-through; }
   .warm { margin: .6rem 0 0; color: var(--muted); font-size: .9rem; }
   .warm strong { color: var(--warn); }
@@ -130,6 +135,7 @@ DEMO_HTML = """<!doctype html>
 </head>
 <body>
 <header>
+  <p class="back">{{back}}</p>
   <h1>Read your own document</h1>
   <p>Upload a document &mdash; a PDF, or a scan as PNG, JPEG or TIFF &mdash; and watch the pipeline decide
   how to read it, then read it.</p>
