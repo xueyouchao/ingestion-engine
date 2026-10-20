@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""A local stand-in for `paddleocr doc_parser`, so a scan can be read on a machine with no GPU.
+
+It accepts the exact command line the paddleocr-vl CLI engine builds:
+
+    <this> doc_parser -i <pages-dir> --pipeline_version <v> --save_path <out-dir>
+
+and writes one ``*_res.json`` per page in the shape ``page_from_paddle_result`` reads. The OCR is real
+tesseract, not the deployed PaddleOCR-VL model, so the text this prints is tesseract's reading of the
+page -- useful for proving the lane end to end, never evidence of what the demo's model returns.
+
+Wired in with:
+
+    FINEPDFS_ENGINE=paddleocr-vl FINEPDFS_ENGINE_COMMAND=/path/to/this
+
+The demo's own deploy uses it (``deploy/demo/finepdfs-live-demo.service``) because this VPS has no GPU and
+the Modal worker app is not deployed: the site then reads a scan with tesseract, and the Engine Identity
+on the page names this command, so a reader can see whose text they are looking at. When the Modal worker
+is deployed, point ``FINEPDFS_ENGINE_BASE_URL``/``FINEPDFS_ENGINE_API_KEY`` at it instead and drop this.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("mode", nargs="?")
+    parser.add_argument("-i", "--input", dest="images", required=True)
+    parser.add_argument("--pipeline_version", default="v1")
+    parser.add_argument("--save_path", dest="output", required=True)
+    parser.add_argument("-l", "--lang", default="eng")
+    options, _unknown = parser.parse_known_args(argv)
+
+    images = sorted(Path(options.images).glob("*.png"))
+    output = Path(options.output)
+    output.mkdir(parents=True, exist_ok=True)
+    if not images:
+        print(f"no page images under {options.images}", file=sys.stderr)
+        return 1
+
+    for index, image in enumerate(images):
+        result = subprocess.run(
+            ["tesseract", str(image), "-", "-l", options.lang],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            print(f"tesseract failed on {image}: {result.stderr.strip()}", file=sys.stderr)
+            return 1
+        text = result.stdout.strip()
+        payload = {
+            "res": {
+                "page_index": index,
+                "parsing_res_list": [{"block_content": text, "block_label": "text", "block_order": 0}]
+                if text
+                else [],
+            },
+            # Named so nobody mistakes which engine read the page.
+            "engine": "tesseract",
+        }
+        (output / f"{image.stem}_res.json").write_text(json.dumps(payload), encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

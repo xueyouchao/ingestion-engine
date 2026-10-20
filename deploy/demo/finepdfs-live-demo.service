@@ -1,0 +1,29 @@
+[Unit]
+Description=The live upload demo (ADR-0012): one document in, its OCR Decision and text out
+Documentation=file:///home/ubuntu/ingestion-engine/docs/deploy/live-demo-runbook.md
+After=network-online.target
+Wants=network-online.target
+# A refusal or a failed read is a 202 and a job, so the demo itself should not die; if it does, it comes
+# back without a human. These two guards keep a bad restart loop from filling the journal instead.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/ingestion-engine
+# Bound to the docker bridge, not to 0.0.0.0: the site reaches it as host.docker.internal and the
+# public internet cannot, so every visitor arrives through the nginx that sets X-Forwarded-For -- which
+# is what the rate limit counts, and it cannot be spoofed from outside (ADR-0012).
+ExecStart=/home/ubuntu/ingestion-engine/.venv/bin/finepdfs-live-demo --host 172.17.0.1 --port 8766
+# The OCR lane runs this host's engine: no Modal app is deployed here, so a scan is read by the local
+# ocr-shim (tesseract behind the CLI engine's contract) and the page's Engine Identity names it.
+Environment=FINEPDFS_ENGINE=paddleocr-vl
+Environment=FINEPDFS_ENGINE_COMMAND=/home/ubuntu/ingestion-engine/deploy/demo/ocr-shim
+Environment=FINEPDFS_ENGINE_TIMEOUT=120
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

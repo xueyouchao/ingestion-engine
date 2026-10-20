@@ -29,6 +29,9 @@ body { margin:0; background:var(--bg); color:var(--ink);
 header { display:flex; gap:1rem; align-items:center; padding:.9rem 1.2rem;
   border-bottom:1px solid var(--line); flex-wrap:wrap; }
 header h1 { font-size:1.05rem; margin:0; letter-spacing:.01em; }
+header .live { color:var(--ink); font-size:.82rem; text-decoration:none; padding:.25rem .55rem;
+  border:1px solid var(--line); border-radius:.4rem; white-space:nowrap; }
+header .live:hover { border-color:var(--ink); }
 header .hint { color:var(--muted); font-size:.82rem; }
 header form { display:flex; gap:.5rem; align-items:center; flex:1 1 20rem; min-width:12rem; margin:0; }
 header form input { flex:1; min-width:0; font:inherit; padding:.4rem .55rem; border:1px solid var(--line);
@@ -100,6 +103,7 @@ footer code { color:var(--ink); }
 <body>
 <header>
   <h1>Page reader</h1>
+  <a class="live" href="/live/">Read your own document &rarr;</a>
   <span class="hint" id="hint"></span>
   <form id="corpus" role="search">
     <input id="q" type="search" placeholder="search every page — Danny, tribal consultation"
