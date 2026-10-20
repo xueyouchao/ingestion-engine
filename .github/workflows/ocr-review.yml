@@ -33,8 +33,11 @@ name: OpenCodeReview PR Review
 # while the review that actually posted its findings ran under the
 # issue_comment workflow, whose check lands on master instead (PR #25, run
 # 39356993686 vs 39357018139). Two groups mean the review you asked for always
-# completes; `incremental` below keeps a concurrent pair from posting the same
-# finding twice.
+# completes. The cost: a push followed within the review window by a manual
+# re-review can post the same finding twice, since nothing dedupes two runs
+# that start together. That duplicate is deliberate and visible, unlike
+# `incremental` (see the note further down), which suppresses findings that
+# reappear on lines an earlier review already commented on.
 concurrency:
   group: >-
     ${{
@@ -136,11 +139,15 @@ jobs:
           # the cap is doubled: it still bounds cost, but stops cutting a
           # review short. A run of that size costs roughly $0.20.
           max_tokens_budget: '4000000'
-          # Never post a finding whose (path, line range) a previous bot review
-          # already covers. History is never deleted; this only suppresses
-          # duplicates, which matters now that a manual review and a push
-          # review can run at the same time without cancelling each other.
-          incremental: 'true'
+          # incremental stays off (its default) on purpose. It suppresses any
+          # inline comment whose (path, line range) overlaps an earlier bot
+          # comment, permanently -- so a defect reintroduced on lines that were
+          # once commented on would be silently dropped, and it does not
+          # reliably prevent the duplicate it was enabled for either: two
+          # concurrent runs both read the existing comments before either posts.
+          # A rare duplicate comment from a push-then-comment race is the
+          # cheaper failure.
+          incremental: 'false'
           # A pushed commit reviews only <last reviewed head>..<new head>
           # instead of the whole PR from the merge-base, so a long-lived PR is
           # not re-reviewed (and re-commented) in full on every push. Fail-closed:
