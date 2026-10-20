@@ -8,3 +8,7 @@ two review runs. This branch is deleted after the test.
 
 That the automatic review of a push and a manual review of the same head can
 complete at the same time instead of cancelling each other.
+
+## Round 2
+
+A second push, made while the first review is still running.
