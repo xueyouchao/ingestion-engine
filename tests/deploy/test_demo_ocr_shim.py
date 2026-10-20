@@ -272,7 +272,7 @@ def test_a_caller_cannot_outbudget_the_engine(tmp_path: Path) -> None:
     assert "of its 0.4s budget" in result.stderr, "clamped to the bound, not 540s"
 
 
-@pytest.mark.parametrize("budget", ["nan", "inf", "0", "-1"])
+@pytest.mark.parametrize("budget", ["nan", "0", "-1"])
 def test_an_unusable_budget_is_named_with_its_source(tmp_path: Path, budget: str) -> None:
     """``float`` accepts these, and NaN would reach the subprocess timeout and end in a traceback."""
     images = _pages(tmp_path, 1)
@@ -306,8 +306,8 @@ def test_an_unusable_engine_bound_is_taken_at_its_word(tmp_path: Path, configure
     assert not list((tmp_path / "r").glob("*_res.json"))
 
 
-def test_an_unbounded_engine_leaves_the_shim_its_own_default(tmp_path: Path) -> None:
-    """``inf`` is a legitimate "no bound"; with nothing to budget against, the shim reads as usual."""
+def test_an_unbounded_engine_reads_as_usual(tmp_path: Path) -> None:
+    """``inf`` is a legitimate "no bound"; with nothing to bound, the shim reads as usual."""
     images = _pages(tmp_path, 1)
     stub = _stub_tesseract(tmp_path)
 
@@ -335,3 +335,36 @@ def test_a_nan_engine_bound_does_not_quietly_widen_an_explicit_budget(tmp_path: 
     assert result.returncode == 1
     assert "the budget from FINEPDFS_ENGINE_TIMEOUT is nan" in result.stderr
     assert not list((tmp_path / "r").glob("*_res.json"))
+
+
+def test_an_unbounded_engine_does_not_shrink_an_explicit_budget(tmp_path: Path) -> None:
+    """``inf`` means no bound, so the caller's 0.2s stands as the shim's budget; 300s or 108s would not."""
+    images = _pages(tmp_path, 1)
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    slow = binary / "tesseract"
+    slow.write_text("#!/bin/sh\n/bin/sleep 30\n", encoding="utf-8")
+    slow.chmod(0o755)
+
+    result = _run(
+        ["doc_parser", "-i", str(images), "--save_path", str(tmp_path / "r"), "--timeout", "0.2"],
+        binary,
+        FINEPDFS_ENGINE_TIMEOUT="inf",
+    )
+
+    assert result.returncode == 1
+    assert "of its 0.2s budget" in result.stderr
+
+
+def test_an_explicit_unbounded_budget_has_one_meaning(tmp_path: Path) -> None:
+    """``--timeout inf`` is the same value as the environment's ``inf``, so it is read the same way."""
+    images = _pages(tmp_path, 1)
+    stub = _stub_tesseract(tmp_path)
+
+    result = _run(
+        ["doc_parser", "-i", str(images), "--save_path", str(tmp_path / "r"), "--timeout", "inf"],
+        stub,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "r" / "page-0001_res.json").exists()
