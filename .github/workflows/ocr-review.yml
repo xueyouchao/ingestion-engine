@@ -19,33 +19,44 @@
 
 name: OpenCodeReview PR Review
 
-# Conditional concurrency group.
+# Concurrency: automatic and manual reviews get separate groups.
 #
-# Actions evaluates concurrency BEFORE job-level `if:`, so a flat `ocr-<pr>`
-# group would let an unrelated conversation comment cancel a running review.
-# Matching events share the per-PR group; anything else lands in a unique
-# `noop-<run_id>` group that can never collide with a real review.
+# Actions evaluates concurrency BEFORE job-level `if:`, so the non-matching
+# case needs its own never-colliding group.
+#
+# Automatic reviews (pull_request_target) share `ocr-<pr>`: a new push
+# supersedes the review of a diff that no longer exists, which is the point.
+#
+# Manual reviews (`/open-code-review`) use `ocr-manual-<pr>` instead. Pushing
+# and then asking for a review is normal, and with one shared group the comment
+# run cancelled the push run -- leaving a red "cancelled" check on the PR head
+# while the review that actually posted its findings ran under the
+# issue_comment workflow, whose check lands on master instead (PR #25, run
+# 39356993686 vs 39357018139). Two groups mean the review you asked for always
+# completes; `incremental` below keeps a concurrent pair from posting the same
+# finding twice.
 concurrency:
   group: >-
     ${{
       (
         github.event_name == 'pull_request_target'
-        || (
-          github.event_name == 'issue_comment'
-          && github.event.issue.pull_request
-          && github.event.comment.user.type != 'Bot'
-          && (
-            github.event.comment.author_association == 'MEMBER'
-            || github.event.comment.author_association == 'OWNER'
-            || github.event.comment.author_association == 'COLLABORATOR'
-          )
-          && (
-            startsWith(github.event.comment.body, '/open-code-review')
-            || startsWith(github.event.comment.body, '@open-code-review')
-          )
-        )
+        && format('ocr-{0}', github.event.pull_request.number)
       )
-      && format('ocr-{0}', github.event.pull_request.number || github.event.issue.number)
+      || (
+        github.event_name == 'issue_comment'
+        && github.event.issue.pull_request
+        && github.event.comment.user.type != 'Bot'
+        && (
+          github.event.comment.author_association == 'MEMBER'
+          || github.event.comment.author_association == 'OWNER'
+          || github.event.comment.author_association == 'COLLABORATOR'
+        )
+        && (
+          startsWith(github.event.comment.body, '/open-code-review')
+          || startsWith(github.event.comment.body, '@open-code-review')
+        )
+        && format('ocr-manual-{0}', github.event.issue.number)
+      )
       || format('noop-{0}', github.run_id)
     }}
   cancel-in-progress: true
@@ -125,6 +136,11 @@ jobs:
           # the cap is doubled: it still bounds cost, but stops cutting a
           # review short. A run of that size costs roughly $0.20.
           max_tokens_budget: '4000000'
+          # Never post a finding whose (path, line range) a previous bot review
+          # already covers. History is never deleted; this only suppresses
+          # duplicates, which matters now that a manual review and a push
+          # review can run at the same time without cancelling each other.
+          incremental: 'true'
           # A pushed commit reviews only <last reviewed head>..<new head>
           # instead of the whole PR from the merge-base, so a long-lived PR is
           # not re-reviewed (and re-commented) in full on every push. Fail-closed:
