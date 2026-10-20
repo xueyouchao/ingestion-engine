@@ -304,3 +304,34 @@ def test_an_unusable_engine_bound_is_taken_at_its_word(tmp_path: Path, configure
     assert result.returncode == 1
     assert "the budget from FINEPDFS_ENGINE_TIMEOUT is" in result.stderr
     assert not list((tmp_path / "r").glob("*_res.json"))
+
+
+def test_an_unbounded_engine_leaves_the_shim_its_own_default(tmp_path: Path) -> None:
+    """``inf`` is a legitimate "no bound"; with nothing to budget against, the shim reads as usual."""
+    images = _pages(tmp_path, 1)
+    stub = _stub_tesseract(tmp_path)
+
+    result = _run(
+        ["doc_parser", "-i", str(images), "--save_path", str(tmp_path / "r")],
+        stub,
+        FINEPDFS_ENGINE_TIMEOUT="inf",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "r" / "page-0001_res.json").exists()
+
+
+def test_a_nan_engine_bound_does_not_quietly_widen_an_explicit_budget(tmp_path: Path) -> None:
+    """``min(30, nan)`` is 30 in Python: the clamp would pass a read the runner is about to kill."""
+    images = _pages(tmp_path, 1)
+    stub = _stub_tesseract(tmp_path)
+
+    result = _run(
+        ["doc_parser", "-i", str(images), "--save_path", str(tmp_path / "r"), "--timeout", "30"],
+        stub,
+        FINEPDFS_ENGINE_TIMEOUT="nan",
+    )
+
+    assert result.returncode == 1
+    assert "the budget from FINEPDFS_ENGINE_TIMEOUT is nan" in result.stderr
+    assert not list((tmp_path / "r").glob("*_res.json"))
