@@ -33,8 +33,11 @@ name: OpenCodeReview PR Review
 # while the review that actually posted its findings ran under the
 # issue_comment workflow, whose check lands on master instead (PR #25, run
 # 39356993686 vs 39357018139). Two groups mean the review you asked for always
-# completes; `incremental` below keeps a concurrent pair from posting the same
-# finding twice.
+# completes. The cost: a push followed within the review window by a manual
+# re-review can post the same finding twice, since nothing dedupes two runs
+# that start together. That duplicate is deliberate and visible, unlike
+# `incremental` (see the note further down), which suppresses findings that
+# reappear on lines an earlier review already commented on.
 concurrency:
   group: >-
     ${{
