@@ -1,9 +1,10 @@
 """The live upload demo's HTTP server, and the composition root that puts its GPU in reach.
 
-A visitor uploads a PDF, the demo routes it with the pipeline's own policy, and the page shows the
-decision and the text the chosen lane read. Uploads are jobs, not long requests (ADR-0012): the POST
-answers ``202`` with an id, the page polls that id for its stage, and the Reading Queue beside this
-module runs one Reading at a time so the per-Reading environment lease is safe.
+A visitor uploads a document -- a PDF, or a scan as PNG, JPEG or TIFF -- the demo routes it with the
+pipeline's own policy, and the page shows the decision and the text the chosen lane read. Uploads are
+jobs, not long requests (ADR-0012): the POST answers ``202`` with an id, the page polls that id for its
+stage, and the Reading Queue beside this module runs one Reading at a time so the per-Reading
+environment lease is safe.
 
 This module is the composition root. It reads the demo's own limits from ``FINEPDFS_DEMO_*``, leases the
 GPU this demo was configured for, and builds the engine, the routing thresholds and the endpoint probe
@@ -88,11 +89,24 @@ QUEUE_DEPTH = "FINEPDFS_DEMO_QUEUE_DEPTH"
 WARM_TIMEOUT_SECONDS = "FINEPDFS_DEMO_WARM_TIMEOUT_SECONDS"
 POLL_INTERVAL_SECONDS = "FINEPDFS_DEMO_POLL_INTERVAL_SECONDS"
 
-# What the upload answers before it is a Reading: the media type a browser sends for a PDF, and the name
-# the engine's record carries while the document is in memory.
+# What the upload accepts: a PDF, and the formats a scanner or a phone writes. A picture of a page is a
+# page to this demo -- the reader takes one page per image frame, an image-only page has no text layer,
+# and that is exactly the case the OCR lane exists for. WebP is deliberately absent: the reader cannot
+# open one, and admitting a format the reader cannot read would be a promise this demo does not keep.
 PDF_MEDIA_TYPE = "application/pdf"
 UPLOAD_NAME_HEADER = "X-Upload-Name"
-DEFAULT_UPLOAD_NAME = "upload.pdf"
+
+# One table, three answers from it: which media types the edge admits, what each one is called when the
+# visitor sends no file name, and -- through ``ADMITTED_MEDIA_TYPES`` being the dict's own keys -- the
+# guarantee that an admitted type always has a name. A second hand-kept list could admit a type the
+# handler then failed to name.
+DEFAULT_UPLOAD_NAMES = {
+    PDF_MEDIA_TYPE: "upload.pdf",
+    "image/png": "upload.png",
+    "image/jpeg": "upload.jpg",
+    "image/tiff": "upload.tiff",
+}
+ADMITTED_MEDIA_TYPES = tuple(DEFAULT_UPLOAD_NAMES)
 
 # The refusals the handler raises before the use case ever sees the bytes. ``upload`` is "this is not an
 # upload the demo accepts" -- the wrong media type, no declared length, over the byte cap, empty, or short
@@ -245,7 +259,7 @@ class DemoApp:
             "ocr_endpoint_configured": _endpoint_configured(self._environ),
         }
 
-    def submit(self, content: bytes, client: str, name: str = DEFAULT_UPLOAD_NAME) -> ReadingJob:
+    def submit(self, content: bytes, client: str, name: str = DEFAULT_UPLOAD_NAMES[PDF_MEDIA_TYPE]) -> ReadingJob:
         """Queue one upload; ``QueueFull`` is the handler's 503 and nothing else is refused here."""
         return self._queue.submit(content, client, name)
 
@@ -398,11 +412,11 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         to look at; a body whose length is not declared cannot be bounded, so it is refused too.
         """
         content_type = self.headers.get_content_type()
-        if content_type != PDF_MEDIA_TYPE:
+        if content_type not in ADMITTED_MEDIA_TYPES:
             self._refuse(
                 HTTPStatus.BAD_REQUEST,
                 UPLOAD,
-                f"the demo reads {PDF_MEDIA_TYPE}, not {content_type}",
+                f"the demo reads a PDF or a PNG, JPEG or TIFF image, not {content_type}",
             )
             return
         length = self._declared_length()
@@ -428,7 +442,7 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            job = self.app.submit(content, _client(self), self._upload_name())
+            job = self.app.submit(content, _client(self), self._upload_name(content_type))
         except QueueFull as full:
             self._refuse(HTTPStatus.SERVICE_UNAVAILABLE, full.kind, full.reason)
             return
@@ -444,10 +458,14 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             return None
         return length if length >= 0 else None
 
-    def _upload_name(self) -> str:
-        """The visitor's own file name, or a neutral one; it names a record and never a path."""
+    def _upload_name(self, content_type: str) -> str:
+        """The visitor's own file name, or a neutral one for the kind of file it is.
+
+        It names a record and never a path; an image named ``upload.pdf`` would be a small lie in the job
+        answer, so the fallback follows the media type.
+        """
         name = self.headers.get(UPLOAD_NAME_HEADER, "").strip()
-        return name or DEFAULT_UPLOAD_NAME
+        return name or DEFAULT_UPLOAD_NAMES[content_type]
 
     def _json(self, payload: Any, *, status: HTTPStatus = HTTPStatus.OK, head: bool = False) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

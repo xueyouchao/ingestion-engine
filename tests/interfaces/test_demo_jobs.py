@@ -243,7 +243,7 @@ def test_a_read_job_carries_the_decision_the_pages_and_the_measured_warm_up() ->
 def test_a_refused_job_carries_the_gates_kind_and_reason() -> None:
     refusal = Refusal(
         kind="page-cap",
-        reason="this PDF has 30 pages; the demo reads up to 25",
+        reason="this document has 30 pages; the demo reads up to 25",
         plan=PLAN,
         thresholds=OcrRoutingPolicy(),
     )

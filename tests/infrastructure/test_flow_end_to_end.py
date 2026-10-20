@@ -361,7 +361,7 @@ def test_a_run_publishes_real_text_records_and_exclusions(monkeypatch, tmp_path,
 
     broken = _exclusion(out_dir, BROKEN)
     assert broken["kind"] == "failed"
-    assert "not a readable PDF" in broken["reason"] or "PdfReadError" in broken["reason"]
+    assert "not a readable PDF" in broken["reason"] or "DocumentReadError" in broken["reason"]
 
 
 def test_a_second_run_reprocesses_nothing(monkeypatch, tmp_path, corpus) -> None:
