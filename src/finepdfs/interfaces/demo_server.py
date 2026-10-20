@@ -481,8 +481,9 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         It names a record and never a path; an image named ``upload.pdf`` would be a small lie in the job
         answer, so the fallback follows the media type.
         """
-        # The page percent-encodes the name (a header value is a ByteString), so a name that arrived
-        # encoded is decoded here; a header set by something else passes through unchanged.
+        # The page always percent-encodes the name, because a header value is a ByteString and a name
+        # above U+00FF would make fetch throw. So every ``%XX`` in this header is decoded, including one
+        # another client meant literally; the demo's own page is the only sender of this header.
         name = unquote(self.headers.get(UPLOAD_NAME_HEADER, "")).strip()
         return name or DEFAULT_UPLOAD_NAMES[content_type]
 

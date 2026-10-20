@@ -157,3 +157,12 @@ def test_a_hung_tesseract_fails_the_page_instead_of_outliving_the_read(tmp_path:
 
     assert result.returncode == 1
     assert "did not finish page-0001.png within 0.2s" in result.stderr
+
+
+def test_the_bundle_rebuild_hint_keeps_the_live_link() -> None:
+    """An operator who rebuilds from these instructions must keep the two pages pointing at each other."""
+    runbook = (ROOT / "deploy" / "bundle" / "run.sh").read_text(encoding="utf-8")
+    readme = (ROOT / "deploy" / "bundle" / "README.md").read_text(encoding="utf-8")
+
+    assert "--live /live/" in runbook
+    assert "--live /live/" in readme

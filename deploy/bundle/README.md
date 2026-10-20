@@ -24,9 +24,15 @@ Regenerate and republish:
 ```bash
 PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli bundle \
   --out dist/bundle --state paddleocr-vl=.demo-gpu/out --state pymupdf=.demo/out \
-  --corpus .demo-gpu/corpus --link https://pdf-ingestion.srv1567269.hstgr.cloud/
+  --corpus .demo-gpu/corpus --link https://pdf-ingestion.srv1567269.hstgr.cloud/ \
+  --live /live/
 ./deploy/bundle/run.sh   # only when the container itself needs replacing
 ```
+
+`--live` is what puts the header link to the demo on the page, and it is a build argument because the
+same page opens from `file://` and from hosts that serve no demo. This deployment serves `/live/`, so the
+rebuild passes `/live/` as a relative URL: the page resolves it against whatever origin it was served
+from, and a bundle built without the flag simply has no link.
 
 `--link` is recorded in `bundle.json` and printed by the page whenever a page image cannot load: a copy
 opened in a preview pane (or any context that cannot read the sibling `images/` folder) then says where the

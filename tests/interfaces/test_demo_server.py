@@ -905,6 +905,28 @@ def test_a_name_that_was_never_encoded_is_kept_as_it_is() -> None:
     assert reader.names == ["visitor's scan.png"]
 
 
+def test_a_percent_escape_in_a_name_is_decoded_like_the_page_meant_it() -> None:
+    """Documented, not accidental: the demo's page always encodes, so every %XX in this header is read as one."""
+    class Naming(RecordingReader):
+        def __init__(self) -> None:
+            super().__init__()
+            self.names: list[str] = []
+
+        def __call__(self, content, client, on_stage, name):
+            self.names.append(name)
+            return super().__call__(content, client, on_stage, name)
+
+    reader = Naming()
+    app = DemoApp(environ={}, read=reader)
+    try:
+        with _serving(app) as base:
+            _upload(base, TEXT_LAYER_PDF, **{"X-Upload-Name": "report%20final.pdf"})
+    finally:
+        app.close()
+
+    assert reader.names == ["report final.pdf"], "the %20 the page would have sent for a space"
+
+
 def test_the_page_encodes_the_name_it_puts_in_a_header() -> None:
     """The browser's Headers refuse any value above U+00FF, so the name is encoded before it is sent."""
     page = demo_page.DEMO_HTML
