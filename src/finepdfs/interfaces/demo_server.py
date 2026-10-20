@@ -94,15 +94,19 @@ POLL_INTERVAL_SECONDS = "FINEPDFS_DEMO_POLL_INTERVAL_SECONDS"
 # and that is exactly the case the OCR lane exists for. WebP is deliberately absent: the reader cannot
 # open one, and admitting a format the reader cannot read would be a promise this demo does not keep.
 PDF_MEDIA_TYPE = "application/pdf"
-IMAGE_MEDIA_TYPES = ("image/png", "image/jpeg", "image/tiff")
-ADMITTED_MEDIA_TYPES = (PDF_MEDIA_TYPE, *IMAGE_MEDIA_TYPES)
 UPLOAD_NAME_HEADER = "X-Upload-Name"
+
+# One table, three answers from it: which media types the edge admits, what each one is called when the
+# visitor sends no file name, and -- through ``ADMITTED_MEDIA_TYPES`` being the dict's own keys -- the
+# guarantee that an admitted type always has a name. A second hand-kept list could admit a type the
+# handler then failed to name.
 DEFAULT_UPLOAD_NAMES = {
-    "application/pdf": "upload.pdf",
+    PDF_MEDIA_TYPE: "upload.pdf",
     "image/png": "upload.png",
     "image/jpeg": "upload.jpg",
     "image/tiff": "upload.tiff",
 }
+ADMITTED_MEDIA_TYPES = tuple(DEFAULT_UPLOAD_NAMES)
 
 # The refusals the handler raises before the use case ever sees the bytes. ``upload`` is "this is not an
 # upload the demo accepts" -- the wrong media type, no declared length, over the byte cap, empty, or short

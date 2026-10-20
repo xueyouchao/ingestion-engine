@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -793,3 +794,26 @@ def test_a_format_the_reader_cannot_open_is_refused_at_the_edge() -> None:
     assert status == 400
     assert answer["refusal"]["kind"] == "upload"
     assert "a PDF or a PNG, JPEG or TIFF image" in answer["refusal"]["reason"]
+
+
+def test_the_page_and_the_server_agree_on_what_an_upload_may_be() -> None:
+    """Three places could drift: the input's ``accept``, the page's admitted list, and the edge's own.
+
+    The page picks the browser's type only when the server admits it, so the two lists have to be the
+    same list -- a page that offers a type the edge refuses, or sends one it does not, is a 400 for a
+    document the demo can read.
+    """
+    page_types = re.search(r'const ADMITTED_TYPES = \[(.*?)\];', demo_page.DEMO_HTML, re.S)
+    assert page_types is not None, "the page names the types it may send"
+    named_in_page = tuple(re.findall(r'"([^"]+)"', page_types.group(1)))
+    accept = re.search(r'accept="([^"]+)"', demo_page.DEMO_HTML)
+    assert accept is not None
+
+    assert named_in_page == demo_server.ADMITTED_MEDIA_TYPES
+    assert tuple(accept.group(1).split(",")) == demo_server.ADMITTED_MEDIA_TYPES
+
+
+def test_every_admitted_media_type_has_a_fallback_name() -> None:
+    """One table answers both questions, so an admitted type without a name is not expressible."""
+    assert set(demo_server.ADMITTED_MEDIA_TYPES) == set(demo_server.DEFAULT_UPLOAD_NAMES)
+    assert demo_server.ADMITTED_MEDIA_TYPES[0] == demo_server.PDF_MEDIA_TYPE

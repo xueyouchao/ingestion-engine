@@ -409,14 +409,23 @@ function poll(jobId) {
   ask();
 }
 
+// What the server admits, kept beside the input's ``accept`` list. A browser or an OS can report a type
+// this demo does not admit for a file it does -- ``application/octet-stream`` for a .tif on Windows,
+// ``image/jpg`` or ``image/x-tiff`` -- and sending that would earn a 400 for a scan the server can read.
+// So the browser's own type is used only when the server admits it, and the extension decides otherwise.
+const ADMITTED_TYPES = ["application/pdf", "image/png", "image/jpeg", "image/tiff"];
+
 function guessType(name) {
-  // A browser sets ``file.type`` for the formats the input accepts, but an empty one is better answered
-  // with the right name than with a refusal: the extension is what a dropped file still carries.
+  // The extension is what a dropped file still carries when its type is missing or unhelpful.
   const lower = (name || "").toLowerCase();
   if (lower.endsWith(".png")) return "image/png";
   if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
   if (lower.endsWith(".tif") || lower.endsWith(".tiff")) return "image/tiff";
   return "application/pdf";
+}
+
+function uploadType(file) {
+  return ADMITTED_TYPES.includes(file.type) ? file.type : guessType(file.name);
 }
 
 async function upload(file) {
@@ -427,7 +436,7 @@ async function upload(file) {
   try {
     const response = await fetch("/api/read", {
       method: "POST",
-      headers: { "Content-Type": file.type || guessType(file.name), "X-Upload-Name": file.name || "upload" },
+      headers: { "Content-Type": uploadType(file), "X-Upload-Name": file.name || "upload" },
       body: file,
     });
     const payload = await response.json();
