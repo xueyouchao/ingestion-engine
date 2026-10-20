@@ -29,6 +29,7 @@ body { margin:0; background:var(--bg); color:var(--ink);
 header { display:flex; gap:1rem; align-items:center; padding:.9rem 1.2rem;
   border-bottom:1px solid var(--line); flex-wrap:wrap; }
 header h1 { font-size:1.05rem; margin:0; letter-spacing:.01em; }
+header #live:empty { display: none; }
 header .live { color:var(--ink); font-size:.82rem; text-decoration:none; padding:.25rem .55rem;
   border:1px solid var(--line); border-radius:.4rem; white-space:nowrap; }
 header .live:hover { border-color:var(--ink); }
@@ -404,7 +405,9 @@ function renderLiveLink() {
   // not a hard-coded path: an exported bundle opens from file:// as well, and a link to a demo that is not
   // there would be a dead end dressed as a feature.
   const holder = $("#live");
-  if (!holder || !DATA.live) return;
+  // A relative --live (``/live/``) means nothing without an origin: opened over file://, the documented
+  // "open dist/bundle/index.html from disk" case, it would point at file:///live/.
+  if (!holder || !DATA.live || !/^https?:$/.test(location.protocol)) return;
   holder.innerHTML = '<a class="live" href="' + esc(DATA.live) + '">Read your own document &rarr;</a>';
 }
 

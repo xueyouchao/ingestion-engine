@@ -163,3 +163,16 @@ def test_the_policy_module_keeps_no_clock_a_file_or_a_socket() -> None:
     } | {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
 
     assert not [name for name in imported if name.split(".")[0] in {"time", "datetime", "socket", "pathlib", "os"}]
+
+
+def test_a_one_page_refusal_is_worded_for_one_page() -> None:
+    """The common case is a single-page scan, so the reason has to read as one page, not "1 pages"."""
+    policy = SpendGatePolicy(DemoLimits(page_cap=1, daily_ocr_page_budget=1))
+
+    over_cap = policy.decide(2, UsageSnapshot())
+    budget = policy.decide(1, UsageSnapshot(ocr_pages_today=1), ocr_pages=1)
+
+    assert over_cap.reason == "this document has 2 pages; the demo reads up to 1"
+    assert budget.reason == (
+        "the OCR budget for today is spent: 1 of 1 page used and this document needs 1 more"
+    )

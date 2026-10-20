@@ -494,3 +494,14 @@ def test_the_reader_no_longer_sums_itself_up_in_the_header(tmp_path) -> None:
     assert "no server, no upload" not in page
     assert 'id="hint"' not in page
     assert "this reading:" not in page
+
+
+def test_the_live_slot_vanishes_for_a_bundle_with_no_demo(tmp_path) -> None:
+    """An empty flex item still takes its gap, so a bundle built without --live must not show the slot."""
+    module = Path(__file__).resolve().parents[2] / "src" / "finepdfs" / "interfaces" / "bundle_page.py"
+    page = module.read_text(encoding="utf-8")
+
+    assert "header #live:empty { display: none; }" in page
+    assert "!/^https?:$/.test(location.protocol)" in page, (
+        "a bundle opened from file:// has no origin a relative /live/ could reach"
+    )

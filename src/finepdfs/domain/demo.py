@@ -90,7 +90,10 @@ class SpendGatePolicy:
             return GateDecision(
                 open=False,
                 gate="page-cap",
-                reason=f"this document has {page_count} pages; the demo reads up to {self.limits.page_cap}",
+                reason=(
+                    f"this document has {_count(page_count, 'page')}; "
+                    f"the demo reads up to {self.limits.page_cap}"
+                ),
             )
         if usage.reads_in_window >= self.limits.rate_limit_reads:
             return GateDecision(
@@ -108,7 +111,8 @@ class SpendGatePolicy:
                 gate="daily-budget",
                 reason=(
                     f"the OCR budget for today is spent: {usage.ocr_pages_today} of "
-                    f"{self.limits.daily_ocr_page_budget} pages used and this document needs {ocr_pages} more"
+                    f"{_count(self.limits.daily_ocr_page_budget, 'page')} used and this document "
+                    f"needs {ocr_pages} more"
                 ),
             )
         return GateDecision(open=True)
