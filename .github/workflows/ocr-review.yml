@@ -136,11 +136,15 @@ jobs:
           # the cap is doubled: it still bounds cost, but stops cutting a
           # review short. A run of that size costs roughly $0.20.
           max_tokens_budget: '4000000'
-          # Never post a finding whose (path, line range) a previous bot review
-          # already covers. History is never deleted; this only suppresses
-          # duplicates, which matters now that a manual review and a push
-          # review can run at the same time without cancelling each other.
-          incremental: 'true'
+          # incremental stays off (its default) on purpose. It suppresses any
+          # inline comment whose (path, line range) overlaps an earlier bot
+          # comment, permanently -- so a defect reintroduced on lines that were
+          # once commented on would be silently dropped, and it does not
+          # reliably prevent the duplicate it was enabled for either: two
+          # concurrent runs both read the existing comments before either posts.
+          # A rare duplicate comment from a push-then-comment race is the
+          # cheaper failure.
+          incremental: 'false'
           # A pushed commit reviews only <last reviewed head>..<new head>
           # instead of the whole PR from the merge-base, so a long-lived PR is
           # not re-reviewed (and re-commented) in full on every push. Fail-closed:
