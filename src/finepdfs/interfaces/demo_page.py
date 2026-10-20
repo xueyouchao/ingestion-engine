@@ -22,27 +22,31 @@ DEMO_HTML = """<!doctype html>
 <link rel="icon" href="data:,">
 <title>Read your own document</title>
 <style>
+  /* The same palette as the reader bundle the live demo is linked from (bundle_page.py), so the two
+     pages read as one site: warm paper, thin warm rules, one green accent. The status colours are the
+     only additions -- a refusal, a failure and a healthy read have to differ from the accent. */
   :root {
     color-scheme: light dark;
-    --bg: #f7f7f5;
-    --panel: #ffffff;
-    --ink: #1d2433;
-    --muted: #5b6474;
-    --line: #d8dce3;
-    --accent: #225ea8;
-    --ok: #17663a;
+    --bg: #fbfaf7;
+    --panel: var(--bg);
+    --ink: #1b1a17;
+    --muted: #6b675e;
+    --line: #d9d4c8;
+    --accent: #0b6b4f;
+    /* The label colour a filled control needs; the accent is too light to carry white in dark mode. */
+    --on-accent: #ffffff;
     --warn: #8a4b00;
-    --bad: #9c1c1c;
+    --bad: #9c2b1c;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #14181f;
-      --panel: #1d232d;
-      --ink: #e8ecf3;
-      --muted: #a9b3c2;
-      --line: #333c4a;
-      --accent: #78b7ff;
-      --ok: #7fd3a2;
+      --bg: #141412;
+      --panel: var(--bg);
+      --ink: #eeeae0;
+      --muted: #a09a8c;
+      --line: #33312c;
+      --accent: #5fd3a6;
+      --on-accent: #10201a;
       --warn: #f2c078;
       --bad: #ff9c9c;
     }
@@ -54,8 +58,11 @@ DEMO_HTML = """<!doctype html>
     padding: 1.25rem;
     background: var(--bg);
     color: var(--ink);
-    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    font: 15px/1.5 ui-sans-serif, system-ui, sans-serif;
   }
+  header .back { margin: 0 0 .5rem; min-height: 1.2em; }
+  header .back a { color: var(--muted); text-decoration: none; font-size: .85rem; }
+  header .back a:hover { color: var(--ink); }
   header h1 { margin: 0 0 .25rem; font-size: 1.65rem; }
   header p { margin: .2rem 0; color: var(--muted); }
   section, .panel {
@@ -86,7 +93,7 @@ DEMO_HTML = """<!doctype html>
     border-radius: .4rem;
     border: 1px solid var(--accent);
     background: var(--accent);
-    color: #ffffff;
+    color: var(--on-accent);
     cursor: pointer;
   }
   button:disabled { opacity: .55; cursor: progress; }
@@ -100,7 +107,12 @@ DEMO_HTML = """<!doctype html>
     font-size: .88rem;
   }
   .timeline li[data-state=active] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
-  .timeline li[data-state=done] { border-color: var(--ok); color: var(--ok); }
+  /* A finished stage recedes and is ticked: the accent's own green would read as "in progress", and no
+     second green sits far enough from it to tell the two apart at a glance (WCAG 1.4.11 wants ~3:1
+     between colours that carry meaning, which two greens of one hue cannot give). One colour for the
+     current stage, grey and a glyph for the ones behind it. */
+  .timeline li[data-state=done] { border-color: var(--line); color: var(--muted); }
+  .timeline li[data-state=done]::before { content: "✓  "; }
   .timeline li[data-state=skipped] { opacity: .55; text-decoration: line-through; }
   .warm { margin: .6rem 0 0; color: var(--muted); font-size: .9rem; }
   .warm strong { color: var(--warn); }
@@ -123,6 +135,7 @@ DEMO_HTML = """<!doctype html>
 </head>
 <body>
 <header>
+  <p class="back">{{back}}</p>
   <h1>Read your own document</h1>
   <p>Upload a document &mdash; a PDF, or a scan as PNG, JPEG or TIFF &mdash; and watch the pipeline decide
   how to read it, then read it.</p>

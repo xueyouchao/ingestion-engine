@@ -23,10 +23,16 @@ fi
 
 # Prove the config before taking the site down: a rejected config in a throwaway container costs nothing,
 # while starting the real one with it would leave the host unrouted.
-docker run --rm -v "$ROOT/deploy/bundle/nginx.conf:/etc/nginx/conf.d/default.conf:ro" "$IMAGE" nginx -t >/dev/null
+# ``--add-host`` here too: the config names host.docker.internal for the live demo's upstream, and nginx
+# refuses to load a config whose upstream name it cannot resolve.
+docker run --rm --add-host=host.docker.internal:host-gateway \
+  -v "$ROOT/deploy/bundle/nginx.conf:/etc/nginx/conf.d/default.conf:ro" "$IMAGE" nginx -t >/dev/null
 
 docker rm -f "$NAME" >/dev/null 2>&1 || true
+# --add-host: the live demo answers on the docker bridge (deploy/demo/), and this name is how the
+# container's nginx reaches it. A comment inside the continued command would swallow the rest of it.
 docker run -d --name "$NAME" --restart unless-stopped \
+  --add-host=host.docker.internal:host-gateway \
   -v "$ROOT/dist/bundle:/usr/share/nginx/html:ro" \
   -v "$ROOT/deploy/bundle/nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
   --label traefik.enable=true \
