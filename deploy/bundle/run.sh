@@ -17,16 +17,24 @@ if [ ! -f "$ROOT/dist/bundle/index.html" ]; then
   echo "no bundle at $ROOT/dist/bundle; build it first:" >&2
   echo "  PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.cli bundle \\" >&2
   echo "    --out dist/bundle --state paddleocr-vl=.demo-gpu/out --state pymupdf=.demo/out \\" >&2
-  echo "    --corpus .demo-gpu/corpus" >&2
+  echo "    --corpus .demo-gpu/corpus \\" >&2
+  echo "    --link https://$HOST/ \\" >&2
+  echo "    --live /live/" >&2
   exit 1
 fi
 
 # Prove the config before taking the site down: a rejected config in a throwaway container costs nothing,
 # while starting the real one with it would leave the host unrouted.
-docker run --rm -v "$ROOT/deploy/bundle/nginx.conf:/etc/nginx/conf.d/default.conf:ro" "$IMAGE" nginx -t >/dev/null
+# ``--add-host`` here too: the config names host.docker.internal for the live demo's upstream, and nginx
+# refuses to load a config whose upstream name it cannot resolve.
+docker run --rm --add-host=host.docker.internal:host-gateway \
+  -v "$ROOT/deploy/bundle/nginx.conf:/etc/nginx/conf.d/default.conf:ro" "$IMAGE" nginx -t >/dev/null
 
 docker rm -f "$NAME" >/dev/null 2>&1 || true
+# --add-host: the live demo answers on the docker bridge (deploy/demo/), and this name is how the
+# container's nginx reaches it. A comment inside the continued command would swallow the rest of it.
 docker run -d --name "$NAME" --restart unless-stopped \
+  --add-host=host.docker.internal:host-gateway \
   -v "$ROOT/dist/bundle:/usr/share/nginx/html:ro" \
   -v "$ROOT/deploy/bundle/nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
   --label traefik.enable=true \

@@ -40,3 +40,33 @@ and must never be presented as such.
   ```
 
 The other files in this directory predate the Corpus coverage work and are unchanged.
+
+## Scanned image fixtures
+
+A scan is a picture of a page, so it carries no text layer at all — MuPDF reads an image as one page
+per frame, and the demo routes it to the OCR lane. These are **constructed, not photographed**: white
+pages with three lines of text drawn in Pillow's default font, written by the system Pillow
+(`/usr/bin/python3`, Pillow 10.2.0) on 2026-10-19 with:
+
+```python
+from PIL import Image, ImageDraw
+
+frames = []
+for number in (1, 2, 3):
+    image = Image.new("L", (480, 640), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((40, 60), f"Scanned page {number}.", fill="black")
+    draw.text((40, 100), "This page carries no text layer: only a picture of", fill="black")
+    draw.text((40, 120), "words, so it has to be sent to the OCR worker.", fill="black")
+    frames.append(image)
+frames[0].save("tests/fixtures/scan.png")
+frames[0].save("tests/fixtures/scan.jpg", quality=75)
+frames[0].save("tests/fixtures/scan-3-pages.tiff", compression="tiff_lzw", save_all=True, append_images=frames[1:])
+```
+
+- **`scan.png`** (~3.6 KB) and **`scan.jpg`** (~7.2 KB) — one frame each: one page, no text, routed to OCR.
+- **`scan-3-pages.tiff`** (~13 KB) — three LZW frames, read as three pages, so the page cap and the OCR
+  budget count three (`tests/infrastructure/test_pdf_adapters.py`, `tests/interfaces/test_demo_server.py`).
+
+Their text is legible to a model, which is deliberate — a real cold-start rehearsal sends one — but the
+default suite never runs an engine on them.

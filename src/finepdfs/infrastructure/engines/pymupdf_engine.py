@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText, TextLayerQuality
-from finepdfs.infrastructure.engines.pdf_document import PdfDocument, pymupdf_version
+from finepdfs.infrastructure.engines.pdf_document import MuPDFDocument, pymupdf_version
 
 
 class PymupdfTextLayerProbe:
     """Measures the embedded text of a PDF."""
 
     def measure(self, content: bytes) -> TextLayerQuality:
-        with PdfDocument(content) as pdf:
+        with MuPDFDocument(content) as pdf:
             return pdf.measure_text_layer()
 
 
@@ -25,6 +25,6 @@ class PymupdfTextEngine:
         return self._identity
 
     def extract(self, document: Document) -> ExtractedDocument:
-        with PdfDocument(document.content) as pdf:
+        with MuPDFDocument(document.content) as pdf:
             pages: tuple[PageText, ...] = pdf.page_texts()
         return ExtractedDocument(pages=pages, engine=self._identity)

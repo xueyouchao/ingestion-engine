@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -346,10 +347,30 @@ def test_the_page_states_where_the_bytes_go_and_what_is_kept_before_the_upload()
 
 
 def test_the_page_asset_is_its_own_module() -> None:
-    with _serving(_app(FakeProbe(HEALTHY), FakeEndpoint())) as base:
-        assert _get(base + "/").read().decode("utf-8") == demo_page.DEMO_HTML
+    app = _app(FakeProbe(HEALTHY), FakeEndpoint())
+    with _serving(app) as base:
+        assert _get(base + "/").read().decode("utf-8") == app.page_html()
 
     assert demo_server.DEMO_HTML is demo_page.DEMO_HTML
+    assert "{{back}}" in demo_page.DEMO_HTML, "the asset carries the slot; the app fills it"
+
+
+def test_the_page_offers_a_way_back_only_when_the_deployment_names_one() -> None:
+    """The demo is also served on its own, so the way back is a deployment fact, not a page constant."""
+    alone = _app(FakeProbe(HEALTHY), FakeEndpoint())
+    with _serving(alone) as base:
+        bare = _get(base + "/").read().decode("utf-8")
+
+    joined = _app(
+        FakeProbe(HEALTHY), FakeEndpoint(),
+        environ={demo_server.BACK_LINK: "https://pdf-ingestion.example/"},
+    )
+    with _serving(joined) as base:
+        linked = _get(base + "/").read().decode("utf-8")
+
+    assert '<p class="back"></p>' in bare, "no reader to go back to: the slot stays empty"
+    assert "<a href=" not in bare
+    assert '<a href="https://pdf-ingestion.example/">&larr; Page reader</a>' in linked
 
 
 def test_the_status_answer_carries_the_limits_the_budget_and_the_depth_but_no_secret() -> None:
@@ -733,3 +754,181 @@ def test_a_failure_reason_never_carries_the_worker_address_or_the_bearer() -> No
 def test_the_engine_is_named_by_the_run_variable_not_by_a_demo_copy() -> None:
     assert demo_server.configured_engine({"FINEPDFS_ENGINE": "docling"}) == "docling"
     assert demo_server.configured_engine({"FINEPDFS_ENGINE": ""}) == OCR_ENGINE
+
+
+def test_a_scan_is_a_document_the_page_accepts() -> None:
+    """A scanned page is a document: the page offers the formats, and the reason for a refusal names them."""
+    html = demo_page.DEMO_HTML
+
+    assert 'accept="application/pdf,image/png,image/jpeg,image/tiff"' in html
+    assert "a PDF, or a scan as PNG, JPEG or TIFF" in html
+
+
+@pytest.mark.parametrize(
+    ("media_type", "name"),
+    [("image/png", "scan.png"), ("image/jpeg", "scan.jpg"), ("image/tiff", "scan-3-pages.tiff")],
+)
+def test_an_uploaded_scan_is_accepted_and_goes_to_the_ocr_lane(media_type: str, name: str) -> None:
+    """The real composition, the real reader: an image has no text layer, so the demo routes it to OCR.
+
+    No OCR worker is configured here, so the read fails in the OCR lane -- which is the point: the image
+    was admitted, measured as pages, routed, and charged as OCR pages, exactly like a scanned PDF.
+    """
+    settings = DemoLimits()
+    app = DemoApp(limits=settings, environ={})
+    content = (FIXTURES / name).read_bytes()
+    try:
+        with _serving(app) as base:
+            status, answer = _post(base, content, headers={"Content-Type": media_type})
+            assert status == 202, answer
+            job = _wait_for_job(base, answer["job"])
+            budget = _json(base + "/api/status")["ocr_pages_remaining"]
+    finally:
+        app.close()
+
+    pages = 3 if name.endswith(".tiff") else 1
+    assert job["outcome"] == "failed", "no worker is wired here, so the OCR lane is where it stops"
+    assert job["failure"]["lane"] == "ocr"
+    assert budget == settings.daily_ocr_page_budget - pages, "a scan is charged by the frames it has"
+
+
+def test_a_multi_frame_scan_is_counted_page_by_page() -> None:
+    """A three-frame TIFF is three pages, so the page cap sees three and refuses it like any other three."""
+    app = DemoApp(limits=DemoLimits(page_cap=1), environ={})
+    content = (FIXTURES / "scan-3-pages.tiff").read_bytes()
+    try:
+        with _serving(app) as base:
+            job = _upload(base, content, **{"Content-Type": "image/tiff"})
+    finally:
+        app.close()
+
+    assert job["outcome"] == "refused"
+    assert job["refusal"]["kind"] == "page-cap"
+    assert "3 pages" in job["refusal"]["reason"]
+
+
+def test_a_format_the_reader_cannot_open_is_refused_at_the_edge() -> None:
+    with _serving(_app(FakeProbe(HEALTHY), FakeEndpoint(), environ={})) as base:
+        status, answer = _post(base, b"RIFF....WEBP", headers={"Content-Type": "image/webp"})
+
+    assert status == 400
+    assert answer["refusal"]["kind"] == "upload"
+    assert "a PDF or a PNG, JPEG or TIFF image" in answer["refusal"]["reason"]
+
+
+def test_the_page_and_the_server_agree_on_what_an_upload_may_be() -> None:
+    """Three places could drift: the input's ``accept``, the page's admitted list, and the edge's own.
+
+    The page picks the browser's type only when the server admits it, so the two lists have to be the
+    same list -- a page that offers a type the edge refuses, or sends one it does not, is a 400 for a
+    document the demo can read.
+    """
+    page_types = re.search(r'const ADMITTED_TYPES = \[(.*?)\];', demo_page.DEMO_HTML, re.S)
+    assert page_types is not None, "the page names the types it may send"
+    named_in_page = tuple(re.findall(r'"([^"]+)"', page_types.group(1)))
+    accept = re.search(r'accept="([^"]+)"', demo_page.DEMO_HTML)
+    assert accept is not None
+
+    assert named_in_page == demo_server.ADMITTED_MEDIA_TYPES
+    assert tuple(accept.group(1).split(",")) == demo_server.ADMITTED_MEDIA_TYPES
+
+
+def test_every_admitted_media_type_has_a_fallback_name() -> None:
+    """One table answers both questions, so an admitted type without a name is not expressible."""
+    assert set(demo_server.ADMITTED_MEDIA_TYPES) == set(demo_server.DEFAULT_UPLOAD_NAMES)
+    assert demo_server.ADMITTED_MEDIA_TYPES[0] == demo_server.PDF_MEDIA_TYPE
+
+
+def test_the_page_never_sends_a_media_type_it_made_up() -> None:
+    """The page picks the type in three steps, and each step is what keeps a refusal honest.
+
+    An unknown extension says "no idea" instead of claiming a PDF (a .webp would otherwise reach the
+    reader as a broken PDF and be reported unreadable); the last resort is still a real type, never a
+    null header; and a nameless file sends no name at all, so the server names it for its media type.
+    """
+    def function(name: str) -> str:
+        found = re.search(rf"function {name}\(file\) \{{(.*?)\n\}}", demo_page.DEMO_HTML, re.S)
+        return found.group(1) if found else ""
+
+    guess = re.search(r"function guessType\(name\) \{(.*?)\n\}", demo_page.DEMO_HTML, re.S)
+    assert guess is not None
+
+    assert "return null;" in guess.group(1), "an extension this page does not know claims nothing"
+    assert "application/octet-stream" in function("uploadType"), "the header is always a string"
+    assert "if (file.name)" in function("uploadHeaders"), "a nameless file is named by the server"
+
+
+def test_a_visitor_name_that_is_not_latin_1_still_arrives() -> None:
+    """A header value is a ByteString: the page percent-encodes the name, and the server decodes it.
+
+    A phone camera roll is full of names like ``扫描.png``; sent raw, fetch throws before a byte leaves the
+    browser, and the visitor sees a TypeError instead of a read.
+    """
+    class Naming(RecordingReader):
+        def __init__(self) -> None:
+            super().__init__()
+            self.names: list[str] = []
+
+        def __call__(self, content, client, on_stage, name):
+            self.names.append(name)
+            return super().__call__(content, client, on_stage, name)
+
+    reader = Naming()
+    app = DemoApp(environ={}, read=reader)
+    try:
+        with _serving(app) as base:
+            _upload(base, TEXT_LAYER_PDF, **{"X-Upload-Name": "%E6%89%AB%E6%8F%8F%20%E9%A1%B5.png"})
+    finally:
+        app.close()
+
+    assert reader.names == ["扫描 页.png"], "the name the visitor's file had, not its percent-encoding"
+
+
+def test_a_name_that_was_never_encoded_is_kept_as_it_is() -> None:
+    class Naming(RecordingReader):
+        def __init__(self) -> None:
+            super().__init__()
+            self.names: list[str] = []
+
+        def __call__(self, content, client, on_stage, name):
+            self.names.append(name)
+            return super().__call__(content, client, on_stage, name)
+
+    reader = Naming()
+    app = DemoApp(environ={}, read=reader)
+    try:
+        with _serving(app) as base:
+            _upload(base, TEXT_LAYER_PDF, **{"X-Upload-Name": "visitor's scan.png"})
+    finally:
+        app.close()
+
+    assert reader.names == ["visitor's scan.png"]
+
+
+def test_a_percent_escape_in_a_name_is_decoded_like_the_page_meant_it() -> None:
+    """Documented, not accidental: the demo's page always encodes, so every %XX in this header is read as one."""
+    class Naming(RecordingReader):
+        def __init__(self) -> None:
+            super().__init__()
+            self.names: list[str] = []
+
+        def __call__(self, content, client, on_stage, name):
+            self.names.append(name)
+            return super().__call__(content, client, on_stage, name)
+
+    reader = Naming()
+    app = DemoApp(environ={}, read=reader)
+    try:
+        with _serving(app) as base:
+            _upload(base, TEXT_LAYER_PDF, **{"X-Upload-Name": "report%20final.pdf"})
+    finally:
+        app.close()
+
+    assert reader.names == ["report final.pdf"], "the %20 the page would have sent for a space"
+
+
+def test_the_page_encodes_the_name_it_puts_in_a_header() -> None:
+    """The browser's Headers refuse any value above U+00FF, so the name is encoded before it is sent."""
+    page = demo_page.DEMO_HTML
+
+    assert 'headers["X-Upload-Name"] = encodeURIComponent(file.name);' in page

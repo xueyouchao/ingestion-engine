@@ -112,12 +112,18 @@ keeps nothing: no uploaded PDF, no extracted text, no page image survives the re
 
 The entry point is the console script `finepdfs-live-demo` (`finepdfs.interfaces.demo_server:main`;
 `python -m finepdfs.interfaces.demo_server` is the module fallback), binding `127.0.0.1:8766` by default. Its
-HTTP surface is `GET /` (the page), `GET /api/status`, `POST /api/read` (the PDF as the body,
-`Content-Type: application/pdf`, answering `202 {"job": ...}`) and `GET /api/read/<id>` (the job JSON).
+HTTP surface is `GET /` (the page), `GET /api/status`, `POST /api/read` (the document as the body,
+`Content-Type: application/pdf`, `image/png`, `image/jpeg` or `image/tiff`, answering `202 {"job": ...}`)
+and `GET /api/read/<id>` (the job JSON).
 
-The edge checks what an edge can check before it reads a body: a media type that is `application/pdf`, a
-declared `Content-Length`, and that length against the byte cap (`413`, kind `upload`, decided before the
-body is pulled). Whether the bytes are a readable PDF is not an edge question -- the probe is the one
+A scan is a document too. A picture of a page carries no text layer, so it is exactly the case the OCR
+lane exists for: the reader MuPDF gives one page per image frame (a three-frame TIFF is three pages), the
+Routing Decision measures that, and the page cap and the OCR budget count those pages. WebP is
+deliberately not admitted, because the reader cannot open one.
+
+The edge checks what an edge can check before it reads a body: a media type from that list, a declared
+`Content-Length`, and that length against the byte cap (`413`, kind `upload`, decided before the body is
+pulled). Whether the bytes are a readable PDF is not an edge question -- the probe is the one
 place that decides it, so those bytes are accepted as a job and refused a moment later with kind
 `unreadable` and the probe's own words. That keeps one rule for "this is not a PDF" instead of two that
 could disagree, and the visitor still does not wait for a read that cannot happen: routing happens before
@@ -206,7 +212,7 @@ a refusal: the gate did not close, the worker did not come up.
 
 ### Only page images leave the host, and nothing is kept
 
-The demo server opens the uploaded bytes as a PDF in memory. The OCR lane renders page images into a
+The demo server opens the uploaded bytes as a document in memory -- a PDF, or an image read as pages. The OCR lane renders page images into a
 scratch directory that the engine removes before the response returns -- that scratch directory is the one
 way a Reading touches a disk, and both lanes' retention tests assert that nothing survives it: no uploaded
 PDF, no page image, no engine result, nothing under the working directory or `TMPDIR`. Finished jobs are

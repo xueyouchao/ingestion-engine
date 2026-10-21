@@ -1,9 +1,10 @@
 """The live upload demo's HTTP server, and the composition root that puts its GPU in reach.
 
-A visitor uploads a PDF, the demo routes it with the pipeline's own policy, and the page shows the
-decision and the text the chosen lane read. Uploads are jobs, not long requests (ADR-0012): the POST
-answers ``202`` with an id, the page polls that id for its stage, and the Reading Queue beside this
-module runs one Reading at a time so the per-Reading environment lease is safe.
+A visitor uploads a document -- a PDF, or a scan as PNG, JPEG or TIFF -- the demo routes it with the
+pipeline's own policy, and the page shows the decision and the text the chosen lane read. Uploads are
+jobs, not long requests (ADR-0012): the POST answers ``202`` with an id, the page polls that id for its
+stage, and the Reading Queue beside this module runs one Reading at a time so the per-Reading
+environment lease is safe.
 
 This module is the composition root. It reads the demo's own limits from ``FINEPDFS_DEMO_*``, leases the
 GPU this demo was configured for, and builds the engine, the routing thresholds and the endpoint probe
@@ -31,6 +32,7 @@ from collections.abc import Callable, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -85,14 +87,30 @@ RATE_LIMIT_WINDOW_SECONDS = "FINEPDFS_DEMO_RATE_LIMIT_WINDOW_SECONDS"
 DAILY_OCR_PAGES = "FINEPDFS_DEMO_DAILY_OCR_PAGES"
 UPLOAD_BYTES = "FINEPDFS_DEMO_UPLOAD_BYTES"
 QUEUE_DEPTH = "FINEPDFS_DEMO_QUEUE_DEPTH"
+# Where this deployment's reader lives, so the page can offer a way back to it. A deployment fact, not a
+# page constant: the demo is also served on its own, and a back link to nothing would be a dead end.
+BACK_LINK = "FINEPDFS_DEMO_BACK_LINK"
 WARM_TIMEOUT_SECONDS = "FINEPDFS_DEMO_WARM_TIMEOUT_SECONDS"
 POLL_INTERVAL_SECONDS = "FINEPDFS_DEMO_POLL_INTERVAL_SECONDS"
 
-# What the upload answers before it is a Reading: the media type a browser sends for a PDF, and the name
-# the engine's record carries while the document is in memory.
+# What the upload accepts: a PDF, and the formats a scanner or a phone writes. A picture of a page is a
+# page to this demo -- the reader takes one page per image frame, an image-only page has no text layer,
+# and that is exactly the case the OCR lane exists for. WebP is deliberately absent: the reader cannot
+# open one, and admitting a format the reader cannot read would be a promise this demo does not keep.
 PDF_MEDIA_TYPE = "application/pdf"
 UPLOAD_NAME_HEADER = "X-Upload-Name"
-DEFAULT_UPLOAD_NAME = "upload.pdf"
+
+# One table, three answers from it: which media types the edge admits, what each one is called when the
+# visitor sends no file name, and -- through ``ADMITTED_MEDIA_TYPES`` being the dict's own keys -- the
+# guarantee that an admitted type always has a name. A second hand-kept list could admit a type the
+# handler then failed to name.
+DEFAULT_UPLOAD_NAMES = {
+    PDF_MEDIA_TYPE: "upload.pdf",
+    "image/png": "upload.png",
+    "image/jpeg": "upload.jpg",
+    "image/tiff": "upload.tiff",
+}
+ADMITTED_MEDIA_TYPES = tuple(DEFAULT_UPLOAD_NAMES)
 
 # The refusals the handler raises before the use case ever sees the bytes. ``upload`` is "this is not an
 # upload the demo accepts" -- the wrong media type, no declared length, over the byte cap, empty, or short
@@ -209,6 +227,7 @@ class DemoApp:
         # The environment is the demo's configuration and, for a leased worker, the place the lease
         # publishes the endpoint ``engine_config`` and the probe are then built from.
         self._environ = environ if environ is not None else os.environ
+        self._back_link = self._environ.get(BACK_LINK, "").strip()
         self._limits = limits if limits is not None else demo_limits(self._environ)
         self._engine_name = engine_name if engine_name is not None else configured_engine(self._environ)
         self._ledger = ledger if ledger is not None else InMemoryGateLedger(clock=clock, limits=self._limits)
@@ -218,6 +237,18 @@ class DemoApp:
     @property
     def limits(self) -> DemoLimits:
         return self._limits
+
+    @property
+    def back_link(self) -> str:
+        """The reader this deployment is linked from, or empty when the demo is served on its own."""
+        return self._back_link
+
+    def page_html(self) -> str:
+        """The page, with the way back to the reader when one is configured."""
+        if not self.back_link:
+            return DEMO_HTML.replace("{{back}}", "")
+        link = f'<a href="{escape(self.back_link, quote=True)}">&larr; Page reader</a>'
+        return DEMO_HTML.replace("{{back}}", link)
 
     @property
     def engine_name(self) -> str:
@@ -245,7 +276,7 @@ class DemoApp:
             "ocr_endpoint_configured": _endpoint_configured(self._environ),
         }
 
-    def submit(self, content: bytes, client: str, name: str = DEFAULT_UPLOAD_NAME) -> ReadingJob:
+    def submit(self, content: bytes, client: str, name: str = DEFAULT_UPLOAD_NAMES[PDF_MEDIA_TYPE]) -> ReadingJob:
         """Queue one upload; ``QueueFull`` is the handler's 503 and nothing else is refused here."""
         return self._queue.submit(content, client, name)
 
@@ -377,7 +408,7 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not found", head=head)
             return
         if path in ("/", "/index.html"):
-            self._html(DEMO_HTML, head=head)
+            self._html(self.app.page_html(), head=head)
         elif path == "/api/status":
             self._json(self.app.status(), head=head)
         elif path.startswith("/api/read/"):
@@ -398,11 +429,11 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         to look at; a body whose length is not declared cannot be bounded, so it is refused too.
         """
         content_type = self.headers.get_content_type()
-        if content_type != PDF_MEDIA_TYPE:
+        if content_type not in ADMITTED_MEDIA_TYPES:
             self._refuse(
                 HTTPStatus.BAD_REQUEST,
                 UPLOAD,
-                f"the demo reads {PDF_MEDIA_TYPE}, not {content_type}",
+                f"the demo reads a PDF or a PNG, JPEG or TIFF image, not {content_type}",
             )
             return
         length = self._declared_length()
@@ -428,7 +459,7 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            job = self.app.submit(content, _client(self), self._upload_name())
+            job = self.app.submit(content, _client(self), self._upload_name(content_type))
         except QueueFull as full:
             self._refuse(HTTPStatus.SERVICE_UNAVAILABLE, full.kind, full.reason)
             return
@@ -444,10 +475,17 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             return None
         return length if length >= 0 else None
 
-    def _upload_name(self) -> str:
-        """The visitor's own file name, or a neutral one; it names a record and never a path."""
-        name = self.headers.get(UPLOAD_NAME_HEADER, "").strip()
-        return name or DEFAULT_UPLOAD_NAME
+    def _upload_name(self, content_type: str) -> str:
+        """The visitor's own file name, or a neutral one for the kind of file it is.
+
+        It names a record and never a path; an image named ``upload.pdf`` would be a small lie in the job
+        answer, so the fallback follows the media type.
+        """
+        # The page always percent-encodes the name, because a header value is a ByteString and a name
+        # above U+00FF would make fetch throw. So every ``%XX`` in this header is decoded, including one
+        # another client meant literally; the demo's own page is the only sender of this header.
+        name = unquote(self.headers.get(UPLOAD_NAME_HEADER, "")).strip()
+        return name or DEFAULT_UPLOAD_NAMES[content_type]
 
     def _json(self, payload: Any, *, status: HTTPStatus = HTTPStatus.OK, head: bool = False) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -525,7 +563,10 @@ def build_parser() -> argparse.ArgumentParser:
     """The console script's flags: where to bind, and an override for every demo limit."""
     parser = argparse.ArgumentParser(
         prog="finepdfs-live-demo",
-        description="Serve the live upload demo: one PDF in, its OCR Decision and the page text out.",
+        description=(
+            "Serve the live upload demo: one document in -- a PDF, or a PNG, JPEG or TIFF scan -- and its "
+            "OCR Decision and page text out."
+        ),
     )
     parser.add_argument("--host", default=DEFAULT_HOST, help=f"address to bind (default {DEFAULT_HOST})")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"port to bind (default {DEFAULT_PORT})")
@@ -537,6 +578,13 @@ def build_parser() -> argparse.ArgumentParser:
             type=int if limit.whole else float,
             help=f"{limit.noun} (default {limit.default:g})",
         )
+    parser.add_argument(
+        "--back-link",
+        dest="back_link",
+        default=None,
+        metavar="URL",
+        help=f"the reader this page links back to ({BACK_LINK}); omit when the demo is served on its own",
+    )
     return parser
 
 
@@ -547,6 +595,8 @@ def _environment_from_args(args: argparse.Namespace) -> dict[str, str]:
         configured = getattr(args, field, None)
         if configured is not None:
             values[_LIMITS[field].variable] = str(configured)
+    if getattr(args, "back_link", None):
+        values[BACK_LINK] = args.back_link
     return values
 
 

@@ -20,29 +20,33 @@ DEMO_HTML = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:,">
-<title>Read your own PDF</title>
+<title>Read your own document</title>
 <style>
+  /* The same palette as the reader bundle the live demo is linked from (bundle_page.py), so the two
+     pages read as one site: warm paper, thin warm rules, one green accent. The status colours are the
+     only additions -- a refusal, a failure and a healthy read have to differ from the accent. */
   :root {
     color-scheme: light dark;
-    --bg: #f7f7f5;
-    --panel: #ffffff;
-    --ink: #1d2433;
-    --muted: #5b6474;
-    --line: #d8dce3;
-    --accent: #225ea8;
-    --ok: #17663a;
+    --bg: #fbfaf7;
+    --panel: var(--bg);
+    --ink: #1b1a17;
+    --muted: #6b675e;
+    --line: #d9d4c8;
+    --accent: #0b6b4f;
+    /* The label colour a filled control needs; the accent is too light to carry white in dark mode. */
+    --on-accent: #ffffff;
     --warn: #8a4b00;
-    --bad: #9c1c1c;
+    --bad: #9c2b1c;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #14181f;
-      --panel: #1d232d;
-      --ink: #e8ecf3;
-      --muted: #a9b3c2;
-      --line: #333c4a;
-      --accent: #78b7ff;
-      --ok: #7fd3a2;
+      --bg: #141412;
+      --panel: var(--bg);
+      --ink: #eeeae0;
+      --muted: #a09a8c;
+      --line: #33312c;
+      --accent: #5fd3a6;
+      --on-accent: #10201a;
       --warn: #f2c078;
       --bad: #ff9c9c;
     }
@@ -54,8 +58,11 @@ DEMO_HTML = """<!doctype html>
     padding: 1.25rem;
     background: var(--bg);
     color: var(--ink);
-    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    font: 15px/1.5 ui-sans-serif, system-ui, sans-serif;
   }
+  header .back { margin: 0 0 .5rem; min-height: 1.2em; }
+  header .back a { color: var(--muted); text-decoration: none; font-size: .85rem; }
+  header .back a:hover { color: var(--ink); }
   header h1 { margin: 0 0 .25rem; font-size: 1.65rem; }
   header p { margin: .2rem 0; color: var(--muted); }
   section, .panel {
@@ -86,7 +93,7 @@ DEMO_HTML = """<!doctype html>
     border-radius: .4rem;
     border: 1px solid var(--accent);
     background: var(--accent);
-    color: #ffffff;
+    color: var(--on-accent);
     cursor: pointer;
   }
   button:disabled { opacity: .55; cursor: progress; }
@@ -100,7 +107,12 @@ DEMO_HTML = """<!doctype html>
     font-size: .88rem;
   }
   .timeline li[data-state=active] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
-  .timeline li[data-state=done] { border-color: var(--ok); color: var(--ok); }
+  /* A finished stage recedes and is ticked: the accent's own green would read as "in progress", and no
+     second green sits far enough from it to tell the two apart at a glance (WCAG 1.4.11 wants ~3:1
+     between colours that carry meaning, which two greens of one hue cannot give). One colour for the
+     current stage, grey and a glyph for the ones behind it. */
+  .timeline li[data-state=done] { border-color: var(--line); color: var(--muted); }
+  .timeline li[data-state=done]::before { content: "✓  "; }
   .timeline li[data-state=skipped] { opacity: .55; text-decoration: line-through; }
   .warm { margin: .6rem 0 0; color: var(--muted); font-size: .9rem; }
   .warm strong { color: var(--warn); }
@@ -123,14 +135,17 @@ DEMO_HTML = """<!doctype html>
 </head>
 <body>
 <header>
-  <h1>Read your own PDF</h1>
-  <p>Upload a document and watch the pipeline decide how to read it, then read it.</p>
+  <p class="back">{{back}}</p>
+  <h1>Read your own document</h1>
+  <p>Upload a document &mdash; a PDF, or a scan as PNG, JPEG or TIFF &mdash; and watch the pipeline decide
+  how to read it, then read it.</p>
 </header>
 
 <section class="statements" id="statements">
-  <p><strong>Where your bytes go:</strong> the PDF is sent to a rented GPU to be read when the decision
-  chooses the OCR lane.</p>
-  <p><strong>What is kept:</strong> nothing is kept after the response &mdash; no uploaded PDF, no page
+  <p><strong>Where your bytes go:</strong> when the decision chooses the OCR lane, the page images are
+  sent to whichever OCR worker the demo is wired to &mdash; the deployed one on a rented GPU, or an engine
+  this host runs when the demo is started with one &mdash; and read there.</p>
+  <p><strong>What is kept:</strong> nothing is kept after the response &mdash; no uploaded file, no page
   image, no extracted text and no job state across a restart.</p>
 </section>
 
@@ -150,10 +165,12 @@ DEMO_HTML = """<!doctype html>
 <section>
   <h2>Upload</h2>
   <form class="upload" id="upload-form">
-    <input type="file" id="upload-file" accept="application/pdf" required>
-    <button type="submit" id="upload-button">Read this PDF</button>
+    <input type="file" id="upload-file" accept="application/pdf,image/png,image/jpeg,image/tiff" required>
+    <button type="submit" id="upload-button">Read this document</button>
   </form>
-  <p class="note" id="upload-note">One PDF at a time. The server answers a job and this page polls it.</p>
+  <p class="note" id="upload-note">One document at a time. A scan is read as a page, so it goes to the OCR
+  lane &mdash; a three-page TIFF is three pages, and the page cap counts them. The server answers a job and
+  this page polls it.</p>
 </section>
 
 <section id="timeline">
@@ -406,6 +423,43 @@ function poll(jobId) {
   ask();
 }
 
+// What the server admits, kept beside the input's ``accept`` list. A browser or an OS can report a type
+// this demo does not admit for a file it does -- ``application/octet-stream`` for a .tif on Windows,
+// ``image/jpg`` or ``image/x-tiff`` -- and sending that would earn a 400 for a scan the server can read.
+// So the browser's own type is used only when the server admits it, and the extension decides otherwise.
+const ADMITTED_TYPES = ["application/pdf", "image/png", "image/jpeg", "image/tiff"];
+
+function guessType(name) {
+  // What the extension says, when this page knows it. ``null`` means "no idea", so nothing is ever
+  // uploaded claiming to be a PDF by default -- a .webp or a .docx would then reach the reader as a
+  // broken PDF and be reported as unreadable instead of being refused for what it is.
+  const lower = (name || "").toLowerCase();
+  if (lower.endsWith(".pdf")) return "application/pdf";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".tif") || lower.endsWith(".tiff")) return "image/tiff";
+  return null;
+}
+
+function uploadType(file) {
+  // The browser's own type when the server admits it; the extension when it does not (``image/jpg``,
+  // ``application/octet-stream`` for a .tif); and then the browser's answer again, so the refusal names
+  // the type the file really is rather than a guess. Never ``null``: a header cannot be undefined.
+  if (ADMITTED_TYPES.includes(file.type)) return file.type;
+  return guessType(file.name) || file.type || "application/octet-stream";
+}
+
+function uploadHeaders(file) {
+  // No name header when the file has none: the server then names it for its media type (``upload.png``),
+  // which is truer than a bare ``upload`` with no extension.
+  const headers = { "Content-Type": uploadType(file) };
+  // Percent-encoded: a header value is a ByteString, so one character above U+00FF -- a Chinese or
+  // Japanese name, an emoji from a phone camera roll -- makes fetch throw before a byte is sent. The
+  // server decodes it again, so the job still shows the visitor's own name.
+  if (file.name) headers["X-Upload-Name"] = encodeURIComponent(file.name);
+  return headers;
+}
+
 async function upload(file) {
   hideResults();
   state.seen = new Set();
@@ -414,7 +468,7 @@ async function upload(file) {
   try {
     const response = await fetch("/api/read", {
       method: "POST",
-      headers: { "Content-Type": "application/pdf", "X-Upload-Name": file.name || "upload.pdf" },
+      headers: uploadHeaders(file),
       body: file,
     });
     const payload = await response.json();
@@ -435,7 +489,7 @@ byId("upload-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const file = byId("upload-file").files[0];
   if (!file) {
-    showError("choose a PDF first");
+    showError("choose a document first");
     return;
   }
   upload(file);

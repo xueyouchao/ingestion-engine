@@ -62,13 +62,13 @@ def test_a_document_one_page_over_the_cap_is_refused_in_the_visitor_s_terms() ->
 
     assert decision.refused is True
     assert decision.gate == "page-cap"
-    assert decision.reason == "this PDF has 26 pages; the demo reads up to 25"
+    assert decision.reason == "this document has 26 pages; the demo reads up to 25"
 
 
 def test_the_page_cap_quotes_the_document_and_the_limit_that_closed() -> None:
     decision = SpendGatePolicy(DemoLimits(page_cap=25)).decide(84, UsageSnapshot())
 
-    assert decision.reason == "this PDF has 84 pages; the demo reads up to 25"
+    assert decision.reason == "this document has 84 pages; the demo reads up to 25"
 
 
 @pytest.mark.parametrize("reads_in_window", [0, 4])
@@ -131,7 +131,7 @@ def test_an_ocr_read_that_would_exceed_the_budget_is_refused_in_the_visitor_s_te
     assert decision.refused is True
     assert decision.gate == "daily-budget"
     assert decision.reason == (
-        f"the OCR budget for today is spent: {ocr_pages_today} of 300 pages used and this PDF needs 25 more"
+        f"the OCR budget for today is spent: {ocr_pages_today} of 300 pages used and this document needs 25 more"
     )
 
 
@@ -163,3 +163,16 @@ def test_the_policy_module_keeps_no_clock_a_file_or_a_socket() -> None:
     } | {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
 
     assert not [name for name in imported if name.split(".")[0] in {"time", "datetime", "socket", "pathlib", "os"}]
+
+
+def test_a_one_page_refusal_is_worded_for_one_page() -> None:
+    """The common case is a single-page scan, so the reason has to read as one page, not "1 pages"."""
+    policy = SpendGatePolicy(DemoLimits(page_cap=1, daily_ocr_page_budget=1))
+
+    over_cap = policy.decide(2, UsageSnapshot())
+    budget = policy.decide(1, UsageSnapshot(ocr_pages_today=1), ocr_pages=1)
+
+    assert over_cap.reason == "this document has 2 pages; the demo reads up to 1"
+    assert budget.reason == (
+        "the OCR budget for today is spent: 1 of 1 page used and this document needs 1 more"
+    )
