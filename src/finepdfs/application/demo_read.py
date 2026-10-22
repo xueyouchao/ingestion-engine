@@ -36,6 +36,7 @@ from finepdfs.domain.ports import (
     OcrEndpointUnavailable,
     OcrEngine,
     OcrWorker,
+    ReadSink,
     TextLayerProbe,
 )
 
@@ -152,8 +153,13 @@ class DemoRead:
         client: str,
         on_stage: Callable[[ReadingStage], None],
         name: str = "upload.pdf",
+        sink: ReadSink | None = None,
     ) -> ReadingOutcome:
-        """Route the upload, pass the gates, read it with the lane the decision chose."""
+        """Route the upload, pass the gates, read it with the lane the decision chose.
+
+        ``sink`` watches the chosen lane's read (ADR-0014); every outcome is the same with or without one,
+        and a caller that leaves it out -- the batch flow, every existing test -- is served as before.
+        """
         started = self._clock()
         on_stage("routing")
         try:
@@ -174,12 +180,14 @@ class DemoRead:
             return closed
 
         if ocr_pages is not None:
-            return self._read_ocr(plan, content, name, on_stage, started, client, ocr_pages)
+            return self._read_ocr(plan, content, name, on_stage, started, client, ocr_pages, sink)
 
         self._ledger.record_read(client)
         on_stage("reading")
         try:
-            extracted = self._extraction.extract_with(Document(name=name, content=content), plan.engine_name)
+            extracted = self._extraction.extract_with(
+                Document(name=name, content=content), plan.engine_name, sink
+            )
         except Exception as error:  # a failed lane is reported, not raised: the demo answers either way
             return self._failed(plan, error)
         on_stage("done")
@@ -201,6 +209,7 @@ class DemoRead:
         started: float,
         client: str,
         pages: int,
+        sink: ReadSink | None = None,
     ) -> ReadingOutcome:
         """The OCR lane, and the only place a worker is entered: admitted, then warmed, then read.
 
@@ -236,7 +245,7 @@ class DemoRead:
             else:
                 on_stage("reading")
                 try:
-                    extracted = engine.extract(Document(name=name, content=content))
+                    extracted = engine.extract(Document(name=name, content=content), sink)
                 except Exception as error:  # a failed lane is reported, not raised
                     outcome = self._failed(plan, error)
                 else:

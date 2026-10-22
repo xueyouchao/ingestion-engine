@@ -74,7 +74,7 @@ class BlockingReader:
         self.clients: list[str] = []
         self.names: list[str] = []
 
-    def __call__(self, content, client, on_stage, name) -> Reading:
+    def __call__(self, content, client, on_stage, name, sink=None) -> Reading:
         self.content_seen.append(content)
         self.clients.append(client)
         self.names.append(name)
@@ -148,7 +148,7 @@ def test_a_job_is_never_shown_finished_before_its_answer_is_stored() -> None:
     answered = threading.Event()
     holding = threading.Event()
 
-    def reader(content, client, on_stage, name):
+    def reader(content, client, on_stage, name, sink=None):
         on_stage("routing")
         on_stage("reading")
         on_stage("done")
@@ -186,7 +186,7 @@ def test_a_full_waiting_list_is_refused_with_the_busy_kind() -> None:
 
 
 def test_a_finished_job_is_still_readable_for_a_late_poll() -> None:
-    with _queue(lambda content, client, on_stage, name: _reading()) as queue:
+    with _queue(lambda content, client, on_stage, name, sink=None: _reading()) as queue:
         job = queue.submit(b"one", "203.0.113.7")
 
         answer = _done(queue, job.id)
@@ -196,7 +196,7 @@ def test_a_finished_job_is_still_readable_for_a_late_poll() -> None:
 
 
 def test_only_the_most_recent_finished_jobs_are_kept() -> None:
-    with _queue(lambda content, client, on_stage, name: _reading(), retained_jobs=1) as queue:
+    with _queue(lambda content, client, on_stage, name, sink=None: _reading(), retained_jobs=1) as queue:
         first = queue.submit(b"one", "203.0.113.7")
         _done(queue, first.id)
         second = queue.submit(b"two", "203.0.113.7")
@@ -207,7 +207,7 @@ def test_only_the_most_recent_finished_jobs_are_kept() -> None:
 
 
 def test_a_read_job_carries_the_decision_the_pages_and_the_measured_warm_up() -> None:
-    with _queue(lambda content, client, on_stage, name: _reading(warm_ms=2000)) as queue:
+    with _queue(lambda content, client, on_stage, name, sink=None: _reading(warm_ms=2000)) as queue:
         job = queue.submit(b"one", "203.0.113.7", "mine.pdf")
 
         answer = _done(queue, job.id)
@@ -247,7 +247,7 @@ def test_a_refused_job_carries_the_gates_kind_and_reason() -> None:
         plan=PLAN,
         thresholds=OcrRoutingPolicy(),
     )
-    with _queue(lambda content, client, on_stage, name: refusal) as queue:
+    with _queue(lambda content, client, on_stage, name, sink=None: refusal) as queue:
         answer = _done(queue, queue.submit(b"one", "203.0.113.7").id)
 
     assert answer["stage"] == "done"
@@ -266,7 +266,7 @@ def test_a_failed_job_quotes_the_lane_and_the_reason() -> None:
         plan=PLAN,
         thresholds=OcrRoutingPolicy(),
     )
-    with _queue(lambda content, client, on_stage, name: failure) as queue:
+    with _queue(lambda content, client, on_stage, name, sink=None: failure) as queue:
         answer = _done(queue, queue.submit(b"one", "203.0.113.7").id)
 
     assert answer["outcome"] == "failed"

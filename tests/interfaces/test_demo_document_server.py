@@ -107,7 +107,7 @@ def _reading(pages: tuple[PageText, ...]) -> Reading:
 
 
 def _reads(pages: tuple[PageText, ...]) -> Callable:
-    def read(content, client, on_stage, name):
+    def read(content, client, on_stage, name, sink=None):
         on_stage("routing")
         on_stage("reading")
         on_stage("done")
@@ -124,7 +124,7 @@ class BlockingReader:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def __call__(self, content, client, on_stage, name):
+    def __call__(self, content, client, on_stage, name, sink=None):
         on_stage("routing")
         on_stage("reading")
         self.started.set()

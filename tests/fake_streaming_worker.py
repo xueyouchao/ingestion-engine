@@ -61,12 +61,16 @@ class FakeStreamingWorker:
         *,
         fail_after: int | None = None,
         end_after: int | None = None,
+        hold_after: int | None = None,
+        hold: threading.Event | None = None,
         error: str = "the worker ran out of memory",
     ) -> None:
         self.frames = list(frames if frames is not None else recorded_frames())
         self.requests: list[dict] = []
         self._fail_after = fail_after
         self._end_after = end_after
+        self._hold_after = hold_after
+        self._hold = hold
         self._error = error
         worker = self
 
@@ -102,6 +106,9 @@ class FakeStreamingWorker:
         handler.send_header("Content-Type", "text/event-stream")
         handler.end_headers()
         for index, frame in enumerate(self.frames):
+            if index == self._hold_after and self._hold is not None:
+                # A live subscriber needs time to attach and read before the rest of the page lands.
+                self._hold.wait(10)
             if index == self._fail_after:
                 self._write(handler, json.dumps({"error": {"message": self._error, "code": 500}}))
                 return

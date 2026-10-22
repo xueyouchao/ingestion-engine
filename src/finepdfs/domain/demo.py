@@ -23,6 +23,10 @@ DEFAULT_UPLOAD_BYTES = 20 * 1024 * 1024
 DEFAULT_QUEUE_DEPTH = 3
 DEFAULT_WARM_TIMEOUT_SECONDS = 900
 DEFAULT_POLL_INTERVAL_SECONDS = 2
+# ADR-0014's raw transcript: how many raw bytes one page may keep in memory, and how long a quiet
+# event stream waits before a heartbeat. Both are demo settings, so they live beside the rest.
+DEFAULT_TRANSCRIPT_BYTES = 256 * 1024
+DEFAULT_HEARTBEAT_SECONDS = 15
 
 # The gate that closed, what the page refuses with, and where a Reading stands. These are the page's
 # vocabulary: the kinds and stage names are the exact strings the demo server and the page exchange.
@@ -45,6 +49,8 @@ class DemoLimits:
     queue_depth: int = DEFAULT_QUEUE_DEPTH
     warm_timeout_seconds: float = DEFAULT_WARM_TIMEOUT_SECONDS
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
+    transcript_bytes: int = DEFAULT_TRANSCRIPT_BYTES
+    heartbeat_seconds: float = DEFAULT_HEARTBEAT_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
