@@ -116,7 +116,7 @@ class ExtractionStep:
         caller that passes none -- every batch run -- is served exactly as before.
         """
         engine = resolve_engine(self._engines, engine_name)
-        return engine.extract(document) if sink is None else engine.extract(document, sink)
+        return engine.extract(document, sink)
 
     def extract(self, document: Document) -> ExtractionResult:
         plan = self.route(document.content)

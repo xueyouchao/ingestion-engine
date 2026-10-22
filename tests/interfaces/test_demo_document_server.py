@@ -26,7 +26,7 @@ from finepdfs.application.curate import RoutingPlan
 from finepdfs.application.demo_read import FailedReading, Reading
 from finepdfs.domain.document import EngineIdentity, PageText, TextLayerQuality
 from finepdfs.domain.ocr import OcrRoutingPolicy, RoutingDecision
-from finepdfs.domain.publishing import PageRecord, document_markdown
+from finepdfs.domain.publishing import PAGE_SEPARATOR, PageRecord
 from finepdfs.interfaces.demo_server import DemoApp, make_server
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -78,10 +78,6 @@ class Document:
             if section[0] == number:
                 return section
         raise AssertionError(f"no page {number} in {self.fragment!r}")
-
-
-def _words(text: str) -> list[str]:
-    return text.split()
 
 
 def _reading(pages: tuple[PageText, ...]) -> Reading:
@@ -211,6 +207,15 @@ def test_the_document_carries_the_page_records_bytes_in_page_order_with_page_sep
             markdown = response.read().decode("utf-8")
             markdown_type = response.headers["Content-Type"]
 
+    # The `.md` is the corpus's projection, byte for byte: the fixture's own page texts in page order,
+    # joined by the shared separator -- nothing normalized, re-wrapped or added.
+    assert markdown_type.startswith("text/markdown")
+    assert markdown == PAGE_SEPARATOR.join(record.text for record in records), (
+        "the .md answer is the page records' bytes, joined exactly as the corpus joins them"
+    )
+
+    # The HTML pane is that text *rendered*, so it carries no claim about bytes: what it controls is
+    # which page is which -- one section per page, in numeric order, each behind its own "Page N".
     document = Document(html)
     assert content_type.startswith("text/html")
     assert headers["X-Document-Pages"] == "3"
@@ -220,13 +225,13 @@ def test_the_document_carries_the_page_records_bytes_in_page_order_with_page_sep
     for number, page in enumerate(records, start=1):
         _, _, section_text = document.section(str(number))
         assert f'<h2 class="document-page-number">Page {number}</h2>' in html
-        # The section holds the pane's separator ("Page N") and then exactly the record's Page Text.
-        carried = section_text.replace(f"Page {number}", "", 1)
-        assert _words(carried) == _words(page.text), "the page's own bytes, in its own place"
-
-    assert markdown_type.startswith("text/markdown")
-    projection = document_markdown(tuple(PageText(record.page_number, record.text) for record in records))
-    assert markdown == projection, "the .md is the corpus's projection, byte for byte"
+        first_line = page.text.splitlines()[0]
+        assert first_line in section_text, f"page {number}'s own words are in its own section"
+        for other in records:
+            if other.page_number != number:
+                assert other.text.splitlines()[0] not in section_text, (
+                    f"page {other.page_number}'s text is not in page {number}'s section"
+                )
 
 
 def test_a_page_still_being_read_is_only_a_skeleton_and_a_delta_never_reaches_the_pane() -> None:

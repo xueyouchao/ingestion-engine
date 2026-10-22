@@ -15,7 +15,12 @@ import pymupdf
 import pytest
 
 from finepdfs.domain.document import Document
-from finepdfs.infrastructure.engines.paddleocr_vl import OCR_PROMPT, PaddleOcrVlCliEngine, PaddleOcrVlEngine
+from finepdfs.infrastructure.engines.paddleocr_vl import (
+    OCR_PROMPT,
+    PaddleOcrError,
+    PaddleOcrVlCliEngine,
+    PaddleOcrVlEngine,
+)
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextEngine
 from finepdfs.infrastructure.engines.subprocess_support import CommandResult
 from finepdfs.infrastructure.engines.vlm_chat import (
@@ -24,7 +29,7 @@ from finepdfs.infrastructure.engines.vlm_chat import (
     VlmTransportError,
     strip_model_preamble,
 )
-from tests.fake_streaming_worker import FakeStreamingWorker, recorded_frames
+from tests.fake_streaming_worker import FakeStreamingWorker, delta_text, recorded_frames
 
 # What the recorded page says, verbatim as the worker emitted it: the prompt echoed back and the
 # markdown fence the model wrapped its answer in, neither of which survives normalization.
@@ -212,6 +217,45 @@ def test_each_page_is_reported_as_it_completes_in_page_number_order() -> None:
     assert [page.number for page in sink.pages] == [1, 2]
     assert tuple(sink.pages) == extracted.pages
     assert {number for number, _ in sink.deltas} == {1, 2}
+
+
+def _cut_at_the_token_limit() -> list[str]:
+    """The recorded page, ended the way a worker cut off by its own token limit ends a stream.
+
+    Every frame of the page is sent, the model's own fence is never closed, and the server says why it
+    stopped: ``finish_reason: "length"``, then ``[DONE]``. It is a complete stream of an incomplete page.
+    """
+    return [frame for frame in recorded_frames() if delta_text(frame)] + [
+        'data: {"choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]}',
+        "data: [DONE]",
+    ]
+
+
+def test_a_page_cut_off_at_the_token_limit_fails_the_read_in_the_worker_s_own_words() -> None:
+    """ADR-0014: a page the model was cut off from is never exported as a short whole page."""
+    sink = RecordingSink()
+    with FakeStreamingWorker(_cut_at_the_token_limit()) as worker:
+        engine = PaddleOcrVlEngine(transport=_transport(worker), dpi=72)
+
+        with pytest.raises(PaddleOcrError) as raised:
+            engine.extract(Document(name="https://a.example/scan.pdf", content=_scanned_pdf()), sink)
+
+    words = str(raised.value)
+    assert "page 1" in words, "the failure names the page that was cut off"
+    assert "token limit" in words and "length" in words, "the failure names the truncation and its reason"
+    assert sink.pages == [], "a page cut short is never reported to a watcher as a completed page"
+
+
+def test_a_page_whose_stream_ended_with_stop_is_the_whole_page_it_always_was() -> None:
+    """The reason a whole page ends with is not a failure: the exported page is the recorded one."""
+    sink = RecordingSink()
+    with FakeStreamingWorker() as worker:
+        engine = PaddleOcrVlEngine(transport=_transport(worker), dpi=72)
+
+        extracted = engine.extract(Document(name="https://a.example/scan.pdf", content=_scanned_pdf()), sink)
+
+    assert extracted.pages[0].text == PAGE_TEXT, "a stop is a whole page, and normalization is unchanged"
+    assert sink.pages == list(extracted.pages)
 
 
 def test_a_worker_that_fails_mid_stream_fails_the_read_and_reports_no_page() -> None:

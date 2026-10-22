@@ -84,6 +84,12 @@ command engine (Docling, MinerU) writes process output, not page tokens, and sho
 states which case it is in -- "this lane does not stream" -- rather than animating a fake one or
 inventing a token cadence.
 
+**A page the worker cut off is a failure, not a short page.** A streamed page ends when the worker says
+it did: `stop`, or nothing named before `[DONE]`, is a whole page; any other `finish_reason` -- the
+model's token limit above all -- ended the stream before the page was finished, and the read fails in
+the worker's own words rather than exporting what arrived. A truncated page in both panes would be a
+reading the product does not have.
+
 **The transcript is ephemeral and bounded.** The job keeps a per-page ring buffer of raw deltas (a
 ceiling in bytes, truncation marked explicitly with a `truncated` event rather than silently dropping
 the start), serves it over `text/event-stream` at `/api/read/<id>/events`, and frees it when the job
@@ -146,7 +152,7 @@ stream.
 | The document pane's text equals the `out/pages/<key>.jsonl` entry for the same document, engine and page (a golden test, not a screenshot) | `tests/interfaces/test_demo_document_server.py::test_the_document_carries_the_page_records_bytes_in_page_order_with_page_separators`, over the hand-written records in `tests/fixtures/pages/ba02d52504f527bb.jsonl` |
 | A reload mid-stream replays from the beginning and converges on the same final document | `tests/interfaces/test_demo_page_raw.py::test_a_reload_mid_stream_replays_from_the_start_and_converges_on_the_jobs_answer` and `tests/interfaces/test_demo_transcript.py::test_the_real_server_streams_the_raw_read_and_a_reload_replays_it_from_the_start` |
 | A job that fails mid-page emits `error`, the document pane keeps the pages already completed, and the failure panel still names the lane and the reason | `tests/interfaces/test_demo_transcript.py::test_a_failed_read_ends_the_stream_with_its_kind_lane_and_redacted_words`, `tests/interfaces/test_demo_document_server.py::test_a_failed_read_keeps_the_pages_that_already_completed`, `tests/interfaces/test_demo_page_document.py::test_a_failed_read_keeps_the_completed_pages_and_the_failure_names_the_lane` |
-| The page budget is charged once per OCR page, including when the visitor closes the tab mid-stream | `tests/interfaces/test_demo_transcript.py::test_closing_the_connection_mid_stream_charges_exactly_one_read_and_its_pages` |
+| The page budget is charged once per OCR page, including when the visitor closes the tab mid-stream | `tests/interfaces/test_demo_transcript.py::test_closing_the_connection_mid_stream_charges_exactly_one_read_and_its_pages`, and for a read of several pages `::test_an_admitted_multi_page_ocr_read_charges_exactly_its_pages_once` and `::test_a_multi_page_read_disconnected_mid_stream_still_charges_every_page_once` |
 | A hostile page cannot execute script through the rendered pane | `tests/interfaces/test_demo_render.py::test_a_hostile_page_renders_inert_markup_only`, `tests/interfaces/test_demo_document_server.py::test_a_hostile_page_renders_inert_and_the_job_json_still_carries_text_not_html`, and for the raw pane's escape `tests/interfaces/test_demo_page_raw.py::test_a_hostile_delta_reaches_the_raw_pane_as_text` |
 
 **"Recorded raw fixture" means the wire shape, not a capture.** `tests/fixtures/paddleocr_stream_page.sse`

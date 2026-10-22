@@ -148,7 +148,8 @@ DEMO_HTML = """<!doctype html>
   }
   .raw-controls button, .document-controls button { padding: .3rem .7rem; font-size: .85rem; }
   /* The rendered pane is the product: the document's own typography, not the transcribed look of the
-     raw pane. Every element here is in the server's allowlist; nothing is styled that cannot arrive. */
+     raw transcript pane. Every element here is in the server's allowlist; nothing is styled that cannot
+     arrive. */
   #document { overflow-x: auto; }
   .document-page { border: 1px solid var(--line); border-radius: .4rem; padding: .65rem .75rem; margin: .7rem 0; }
   .document-page-number {
@@ -172,9 +173,9 @@ DEMO_HTML = """<!doctype html>
     border-left: 2px solid var(--line);
     color: var(--muted);
   }
-  .skeleton, .document-empty { color: var(--muted); font-style: italic; }
-  /* The raw pane is the worker's own output, so it is monospaced and scrollable: markers and broken
-     table syntax must look unlike the published page the right-hand pane will carry. */
+  .skeleton, .document-empty, .unread { color: var(--muted); font-style: italic; }
+  /* The raw transcript pane is the worker's own output, so it is monospaced and scrollable: markers and
+     broken table syntax must look unlike the published page the right-hand pane will carry. */
   .raw-page { border: 1px solid var(--line); border-radius: .4rem; padding: .55rem .7rem; margin: .55rem 0; }
   .raw-page header { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
   .raw-truncated { color: var(--warn); font-size: .85rem; margin: .35rem 0 .1rem; }
@@ -248,7 +249,7 @@ DEMO_HTML = """<!doctype html>
 </section>
 
 <section id="raw" class="pane hidden" role="region" aria-labelledby="raw-heading">
-  <h2 id="raw-heading">2. What came back: the raw read</h2>
+  <h2 id="raw-heading">2. What came back: the raw transcript</h2>
   <p class="note" id="raw-note" role="status">The worker's own output, before any normalization.</p>
   <div class="raw-controls">
     <button type="button" id="raw-copy" disabled>Copy transcript</button>
@@ -585,17 +586,25 @@ async function copyRaw() {
 // labels nothing itself: it shows the server's answer, again, each time the job poll ticks.
 
 function documentModel(jobId) {
-  return { job: jobId, completed: 0, total: null, finished: false, absent: false };
+  return { job: jobId, completed: 0, total: null, finished: false, failed: false, absent: false };
 }
 
-function documentNote(completed, total, finished) {
+function documentNote(model) {
   // The counts are the server's, said in words beside the fragment: the pane adds no status of its own.
+  const completed = model.completed;
+  const total = model.total;
   const counted =
     total === null || total === undefined
       ? completed + (completed === 1 ? " page has" : " pages have")
       : completed + " of " + total + (total === 1 ? " page has" : " pages have");
-  if (finished) {
-    return counted + " completed. This is the document the pipeline would publish; the raw read " +
+  if (model.failed) {
+    // A failed read read nothing more: the fragment names each page it never reached as not read, and
+    // the note must not call what is left a document the pipeline would publish.
+    return counted + " completed. The read failed, so the pages that never completed were not read; " +
+      "what is here is the Page Text of the pages that were read.";
+  }
+  if (model.finished) {
+    return counted + " completed. This is the document the pipeline would publish; the raw transcript " +
       "beside it is what the worker emitted.";
   }
   if (completed === 0) {
@@ -609,7 +618,8 @@ function documentAbsent() {
   // The 503 answer says the [demo] extra is missing. The pane says so in these words -- never the
   // server's sentence dropped into markup -- and points at what still works.
   return "Rendering is not installed on this server, so this pane cannot show the rendered document. " +
-    "The document's markdown is still downloadable, and the raw read beside it is the worker's own output.";
+    "The document's markdown is still downloadable, and the raw transcript beside it is the worker's " +
+    "own output.";
 }
 
 function documentDownloadName(fileName) {
@@ -724,7 +734,7 @@ async function refreshDocument(jobId) {
   const total = response.headers.get("X-Document-Pages");
   state.document.total = total === null ? null : Number(total);
   insertDocument(byId("document"), fragment);
-  setDocumentNote(documentNote(state.document.completed, state.document.total, state.document.finished));
+  setDocumentNote(documentNote(state.document));
   setDocumentControls(true);
 }
 
@@ -787,7 +797,11 @@ function renderJob(job, jobId) {
     renderRefusal(job.refusal);
     return;
   }
-  if (state.document !== null) state.document.finished = true;
+  if (state.document !== null) {
+    // What the end of the job was, before the last ask: a failed read's pane names what it never read.
+    state.document.finished = true;
+    state.document.failed = job.outcome === "failed";
+  }
   // One last ask, so the finished Reading -- not the last mid-read view -- is what the visitor sees.
   refreshDocument(jobId);
   if (job.outcome === "read") renderReading(job.reading);

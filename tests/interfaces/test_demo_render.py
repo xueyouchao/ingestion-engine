@@ -9,6 +9,7 @@ output and that the demo says "not installed" instead of falling back to unescap
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from html.parser import HTMLParser
@@ -22,38 +23,10 @@ from finepdfs.interfaces.demo_job import DocumentView
 
 REPO = Path(__file__).resolve().parents[2]
 
-# What a document fragment may carry: the pane's own wrapper (article, section), the page labels (h2),
-# and the structural markup the sanitizer admits. ``style``, ``script``, ``iframe`` and ``img`` are
-# absent by construction, and so is ``a`` -- a link would be navigation the model wrote.
-ALLOWED_TAGS = {
-    "article",
-    "section",
-    "h1",
-    "h2",
-    "h3",
-    "h4",
-    "h5",
-    "h6",
-    "p",
-    "ul",
-    "ol",
-    "li",
-    "em",
-    "strong",
-    "code",
-    "pre",
-    "blockquote",
-    "hr",
-    "table",
-    "thead",
-    "tbody",
-    "tfoot",
-    "tr",
-    "th",
-    "td",
-    "br",
-    "span",
-}
+# What a document fragment may carry beyond the module's own allowlist: the pane's trusted wrapper. The
+# vocabulary itself is read from ``demo_render`` -- a second hand-kept copy could admit a tag the module
+# does not, or miss one it grows.
+WRAPPER_TAGS = frozenset({"article", "section"})
 
 
 class Tags(HTMLParser):
@@ -89,6 +62,14 @@ def _text(fragment: str) -> str:
     return "".join(parts)
 
 
+def _page_numbers(fragment: str) -> list[str]:
+    return re.findall(r'<section class="document-page" data-page="(\d+)"', fragment)
+
+
+def _states(fragment: str) -> list[str]:
+    return re.findall(r'<section class="document-page" data-page="\d+" data-state="(\w+)"', fragment)
+
+
 def test_a_document_fragment_carries_each_completed_page_and_a_skeleton_for_the_rest() -> None:
     view = DocumentView(pages=(PageText(1, "# One\n\nFirst body."),), total=3)
 
@@ -108,12 +89,55 @@ def test_a_document_fragment_carries_each_completed_page_and_a_skeleton_for_the_
 
 
 def test_a_page_count_the_job_has_not_learned_yet_is_not_invented() -> None:
+    """With no count, the pane shows the pages the read produced and claims no page it has not seen."""
     fragment = demo_render.render_document(DocumentView(pages=(PageText(1, "only page so far"),)))
 
     assert "data-pages=" not in fragment
     assert 'data-completed="1"' in fragment
     assert 'data-page="1" data-state="complete"' in fragment
-    assert 'data-page="2" data-state="pending"' in fragment, "the next page is the one being read"
+    assert 'data-state="pending"' not in fragment, "the next page is not a page until the read reports it"
+
+
+def test_pages_that_arrive_out_of_order_land_in_numeric_order_and_no_later_page_is_claimed() -> None:
+    """The pane reads the shared ordering rule; the last page is the highest it has, not one more."""
+    view = DocumentView(pages=(PageText(10, "the tenth page"), PageText(2, "the second page")))
+
+    fragment = demo_render.render_document(view)
+
+    assert _page_numbers(fragment) == [str(number) for number in range(1, 11)], "numeric, not arrival order"
+    assert fragment.index("the second page") < fragment.index("the tenth page")
+    assert _states(fragment) == ["pending"] + ["complete"] + ["pending"] * 7 + ["complete"]
+    assert "Page 11" not in fragment, "the page after the highest one is not invented"
+    assert "data-pages=" not in fragment, "the pane claims no count the job has not learned"
+
+
+def test_a_failed_read_names_the_pages_it_never_read_instead_of_promising_them() -> None:
+    """ADR-0014: a read that failed read nothing more; the pane says so rather than still reading."""
+    view = DocumentView(
+        pages=(PageText(1, "the page that completed before the failure"),), total=3, failed=True
+    )
+
+    fragment = demo_render.render_document(view)
+
+    assert _page_numbers(fragment) == ["1", "2", "3"]
+    assert 'data-page="1" data-state="complete"' in fragment
+    assert "the page that completed before the failure" in fragment, "the pages it completed are kept"
+    assert 'data-page="2" data-state="unread"' in fragment
+    assert 'data-page="3" data-state="unread"' in fragment
+    assert "still being read" not in fragment, "a failed read is not still reading anything"
+    assert '<p class="unread" data-state="unread">Page 2 was not read: the read failed.</p>' in fragment
+
+
+def test_a_failed_read_with_nothing_completed_calls_no_page_still_being_read() -> None:
+    """Nothing completed and no count is known: the pane says the read failed, not that it is reading."""
+    unnamed = demo_render.render_document(DocumentView(failed=True))
+    assert '<p class="document-empty" data-state="unread">No page was read: the read failed.</p>' in unnamed
+    assert "still being read" not in unnamed
+
+    counted = demo_render.render_document(DocumentView(total=2, failed=True))
+    assert _page_numbers(counted) == ["1", "2"]
+    assert _states(counted) == ["unread", "unread"]
+    assert "still being read" not in counted
 
 
 def test_an_empty_document_says_so_without_inventing_a_page() -> None:
@@ -140,21 +164,18 @@ def test_the_structural_markup_a_page_can_carry_renders_as_structure() -> None:
     assert _text(fragment).count("North") == 1
 
 
-def test_tables_keep_colspan_and_rowspan_but_no_attribute_that_could_run() -> None:
-    html = (
-        '<table><tr><td colspan="2" rowspan="3" onclick="alert(1)" style="color:red">kept</td></tr></table>'
-        "<script>alert(2)</script><iframe src=\"https://evil.example\"></iframe>"
+def test_markup_a_page_carries_reaches_the_pane_as_text_not_as_an_element() -> None:
+    """Page Text is markdown, never raw HTML: an attribute the model wrote has no element to ride in."""
+    page = PageText(
+        1,
+        '<table><tr><td colspan="2" onclick="alert(1)" style="color:red">a cell</td></tr></table>',
     )
 
-    sanitized = demo_render.sanitize_fragment(html)
+    fragment = demo_render.render_document(DocumentView(pages=(page,), total=1))
 
-    assert 'colspan="2"' in sanitized
-    assert 'rowspan="3"' in sanitized
-    assert "onclick" not in sanitized
-    assert "style=" not in sanitized
-    assert "<script" not in sanitized
-    assert "alert(2)" not in sanitized, "a script's content is removed with it, not shown as text"
-    assert "<iframe" not in sanitized
+    assert "td" not in {tag for tag, _ in _elements(fragment)}, "the page's own markup is not an element"
+    assert "<td" not in fragment and "<table>" not in fragment, "it is escaped text, not markup"
+    assert "a cell" in _text(fragment), "the text survives; the markup around it does not"
 
 
 def test_a_hostile_page_renders_inert_markup_only() -> None:
@@ -171,7 +192,7 @@ def test_a_hostile_page_renders_inert_markup_only() -> None:
     fragment = demo_render.render_document(DocumentView(pages=(hostile,), total=1))
     elements = _elements(fragment)
 
-    assert {tag for tag, _ in elements} <= ALLOWED_TAGS
+    assert {tag for tag, _ in elements} <= demo_render.ALLOWED_TAGS | WRAPPER_TAGS
     for tag, attrs in elements:
         assert tag not in {"script", "style", "iframe", "img", "a", "object", "embed", "form"}
         for name, value in attrs.items():
@@ -209,7 +230,6 @@ def test_rendering_says_it_is_not_installed_rather_than_rendering_unescaped(monk
 
     monkeypatch.setattr(demo_render, "_dependencies", missing)
 
-    assert demo_render.rendering_installed() is False
     with pytest.raises(demo_render.RenderingNotInstalled, match="not installed"):
         demo_render.render_document(DocumentView(pages=(PageText(1, "text"),), total=1))
 

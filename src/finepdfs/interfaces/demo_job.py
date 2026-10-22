@@ -6,9 +6,10 @@ one object owns all of it and every pane reads it -- the events endpoint asks th
 the document answer for its view, and ``GET /api/read/<id>`` for its eight keys. Nothing is merged after
 the fact: a third pane is a method here, not a second store for the server to join.
 
-The job is the ``ReadSink`` the engine reports to. Routing's page count and every completed Page Text
-land in it; a delta goes to the transcript and never to the document, because that pane is built from
-Page Text only and a half-parsed table is therefore never rendered.
+The job is the ``ReadSink`` the read reports to. The use case hands it routing's page count before the
+first delta; the engine hands it every delta and every completed Page Text. A delta goes to the
+transcript and never to the document, because that pane is built from Page Text only and a half-parsed
+table is therefore never rendered.
 
 **A finished Reading is authoritative, and it is held once.** Its Page Texts are the accepted ones, so
 the pane reads them from the outcome and the job drops whatever a lane reported mid-read rather than
@@ -24,9 +25,11 @@ Two answers carry the panes, and neither is the job JSON (ADR-0014):
   data-completed="M">``, and inside it one ``<section class="document-page" data-page="K"
   data-state="complete">`` per completed page in numeric order, each labelled ``page K``, with
   ``<section class="document-page" data-page="K" data-state="pending">`` and a ``.skeleton`` paragraph
-  for every page that has not completed. ``data-pages`` is present only when the job knows its page
-  count. The answer is ``503`` with ``{"error": ... "rendering is not installed ...", "rendering":
-  "not-installed"}`` when the ``[demo]`` extra is absent: the pane never falls back to unescaped text.
+  for every page that has not completed, and ``data-state="unread"`` naming the pages a failed read
+  never reached. ``data-pages`` is present only when the job knows its page count, and a page the job
+  has not seen is only drawn when that count says it exists. The answer is ``503`` with ``{"error": ...
+  "rendering is not installed ...", "rendering": "not-installed"}`` when the ``[demo]`` extra is absent:
+  the pane never falls back to unescaped text.
 - ``GET /api/read/<id>/document.md`` -- ``text/markdown; charset=utf-8``, the completed Page Texts in
   the shared projection (``domain.publishing.document_markdown``), which is the `.md` the page offers
   for download and the same bytes the corpus would write for those pages. It needs no optional
@@ -56,13 +59,16 @@ class DocumentView:
     """One job's document as the pane sees it now: completed pages, and how many exist in all.
 
     ``pages`` are the Page Texts that are complete, in their original 1-based numeric order. ``total``
-    is the page count the job knows -- from routing or from the finished Reading -- and ``None`` when
-    the job has not learned it yet; the pane then shows the next page as a skeleton instead of claiming
-    a page count it does not know.
+    is the page count the job knows -- from the count the use case reported before the read started, or
+    from the finished Reading -- and ``None`` when the job has not learned it yet; the pane then shows
+    only the pages the read reported instead of claiming a page count it does not know. ``failed`` is
+    whether the read failed: the pages it never reached were not read, and the pane says so rather than
+    promising a placeholder that no later page will replace.
     """
 
     pages: tuple[PageText, ...] = ()
     total: int | None = None
+    failed: bool = False
 
     @property
     def completed(self) -> int:
@@ -73,8 +79,9 @@ class DocumentView:
 class DemoJob:
     """One upload's per-job state, as every pane sees it.
 
-    ``advance`` is the stage the read reached and ``finish`` is what it answered; ``on_delta``,
-    ``on_page`` and ``on_page_count`` are the ``ReadSink`` the engine reports to. The reader thread writes
+    ``advance`` is the stage the read reached and ``finish`` is what it answered; ``on_delta`` and
+    ``on_page`` are what the engine reports, and ``on_page_count`` is what the use case reports before
+    the engine runs at all (``domain.ports.ReadSink``). The reader thread writes
     and a handler thread reads, so every field is touched under one lock and every view is a copy taken
     under it. ``redact`` is what a failure's words are shown through on the wire: a configured address or
     token in an engine's error is a leak, and the composition root is the one place that knows both.
@@ -114,12 +121,16 @@ class DemoJob:
             return self._transcript
 
     def document(self) -> DocumentView:
-        """The completed pages in page order, and the page count the job knows."""
+        """The completed pages in page order, the page count the job knows, and whether it failed."""
         with self._lock:
             if isinstance(self._outcome, Reading):
                 pages = pages_in_order(self._outcome.pages)
                 return DocumentView(pages=pages, total=len(pages))
-            return DocumentView(pages=pages_in_order(self._pages.values()), total=self._total)
+            return DocumentView(
+                pages=pages_in_order(self._pages.values()),
+                total=self._total,
+                failed=isinstance(self._outcome, FailedReading),
+            )
 
     def answer(self) -> dict[str, Any]:
         """The job exactly as ``GET /api/read/<id>`` answers it: one shape, with nulls where it is absent."""
@@ -186,7 +197,7 @@ class DemoJob:
             transcript.on_delta(page_number, text)
 
     def on_page(self, page: PageText) -> None:
-        """One completed Page Text: the document keeps it, and the stream reports it to the raw pane.
+        """One completed Page Text: the document keeps it, and the stream reports it to the raw transcript.
 
         The page event is what a visitor watching the middle pane sees when a page completes, so it is
         reported before the page is kept: the two panes are fed from one report, not two.
@@ -198,7 +209,7 @@ class DemoJob:
             self._pages[page.number] = page
 
     def on_page_count(self, page_count: int) -> None:
-        """Learn how many pages the read will report, so every page's placeholder exists from the start."""
+        """Learn how many pages the read will report, before its first delta: routing's answer, not a lane's."""
         with self._lock:
             self._total = page_count
 

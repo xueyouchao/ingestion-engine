@@ -55,7 +55,7 @@ class CountingEngine:
     def identity(self) -> EngineIdentity:
         return self._identity
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink=None) -> ExtractedDocument:
         self.calls += 1
         return ExtractedDocument(pages=self._pages, engine=self._identity)
 

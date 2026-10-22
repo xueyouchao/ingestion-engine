@@ -1,7 +1,7 @@
 """The live demo's raw transcript: what the worker emitted, kept bounded and served as events.
 
-ADR-0014 makes the raw read proof of work, not evidence. A Reading hands every delta to this store from
-the engine-call pool thread; the store keeps a per-page ring buffer with a byte ceiling and lets any
+ADR-0014 makes the raw transcript proof of work, not evidence. A Reading hands every delta to this store
+from the engine-call pool thread; the store keeps a per-page ring buffer with a byte ceiling and lets any
 number of subscribers replay it from the beginning. Nothing here is written to disk, put in the job
 answer or cited, and the job that owns it releases it the moment the Reading finishes.
 
@@ -20,15 +20,17 @@ The wire contract, which the page asset and the HTTP tests depend on. Every even
 A heartbeat is the SSE comment line ``: heartbeat`` sent while no event has arrived for one heartbeat
 interval. The stream ends after ``done`` (or ``error`` when a finish follows it); a browser must close
 the EventSource on ``done`` rather than letting it reconnect. A late or reloaded subscriber is replayed
-from the store's start, which for a truncated page is the truncated event plus the retained tail.
+from the store's start: for a truncated page that is its ``truncated`` marker first and then the retained
+tail, so the loss is named before the text that survived it. A subscriber that is already watching hears
+the marker where the drop happened, because that is when it happened.
 
 The store is ephemeral by construction: an absent job id is answered with an HTTP error before a stream
 starts, and a finished Reading's store is detached by the job that held it, so there is nothing left to
 replay.
 
 Delta text is the worker's own output and is never markup: a subscriber shows it with ``textContent`` (or
-an equivalent escape) and never parses it as HTML. The same rule the ADR gives the raw pane lives here,
-beside the event names a renderer reads.
+an equivalent escape) and never parses it as HTML. The same rule the ADR gives the raw transcript lives
+here, beside the event names a renderer reads.
 """
 
 from __future__ import annotations
@@ -184,7 +186,37 @@ class RawTranscript:
         return event
 
     def _after(self, cursor: int) -> list[TranscriptEvent]:
-        return [event for sequence, event in self._events.items() if sequence > cursor]
+        events = [event for sequence, event in self._events.items() if sequence > cursor]
+        # A subscriber already watching (a cursor past the start) is told of a drop when it happens; one
+        # replaying from the start reads each truncated page's marker before the tail that survived it.
+        return events if cursor else _marker_first(events)
+
+
+def _marker_first(events: list[TranscriptEvent]) -> list[TranscriptEvent]:
+    """Each truncated page's marker before the retained deltas it names the loss of.
+
+    A live subscriber hears the marker when the drop happens, because that is when it happened. A
+    subscriber replaying from the start never saw that moment: for it the page's first bytes are simply
+    gone, so the marker belongs before the text that survived, and its position then makes no claim about
+    where in the tail the missing bytes sat. Pages interleave, so each page keeps its own place in the
+    replay and only its own marker moves in front of its own first retained delta.
+    """
+    markers = {event.data["page"]: event for event in events if event.name == "truncated"}
+    if not markers:
+        return events
+    ordered: list[TranscriptEvent] = []
+    placed: set[int] = set()
+    for event in events:
+        if event.name == "truncated":
+            continue  # moved in front of its page's first retained event, below
+        page = event.data.get("page")
+        if page in markers and page not in placed:
+            ordered.append(markers[page])
+            placed.add(page)
+        ordered.append(event)
+    # A page whose whole buffer was dropped has no retained event to precede: its loss goes last.
+    ordered.extend(marker for page, marker in markers.items() if page not in placed)
+    return ordered
 
 
 def encode_event(event: TranscriptEvent) -> bytes:
@@ -208,7 +240,9 @@ def stream_events(
         events, finished = transcript.since(cursor)
         for event in events:
             write(encode_event(event))
-            cursor = event.sequence
+            # The highest sequence written, never the last one: a replay is written marker-first, so its
+            # marker carries the newest sequence though it is written before the tail it names.
+            cursor = max(cursor, event.sequence)
         if finished:
             return
         events, finished = transcript.wait(cursor, heartbeat_seconds)
