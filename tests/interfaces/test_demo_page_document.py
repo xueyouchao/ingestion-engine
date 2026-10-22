@@ -349,8 +349,10 @@ def test_a_failed_read_keeps_the_completed_pages_and_the_failure_names_the_lane(
     assert headers["X-Document-Completed"] == "1"
     rendered = _insert([fragment])[0]
     assert _page_numbers(rendered) == ["1", "2"]
-    assert _states(rendered)[0] == "complete"
+    assert _states(rendered) == ["complete", "unread"], "the page it never read is not still being read"
     assert "the page that completed before the failure" in rendered, "the pages it completed are kept"
+    assert "still being read" not in rendered, "a failed read is not still reading a page"
+    assert "Page 2 was not read: the read failed." in rendered
 
     page = demo_page.DEMO_HTML
     assert 'id="failure-lane"' in page and 'id="failure-reason"' in page
@@ -363,6 +365,23 @@ def test_a_failed_read_keeps_the_completed_pages_and_the_failure_names_the_lane(
     )
     assert "insertDocument" not in _function("renderFailure"), "the failure panel shows the error's words only"
     assert "textContent" in _function("renderFailure")
+
+
+@requires_node
+def test_the_pane_note_tells_a_failed_read_from_a_document_the_pipeline_would_publish() -> None:
+    """The note says what the fragment shows: pages that were not read, not a document that would be."""
+    failed, read = _run(
+        ("documentNote",),
+        "const notes = ["
+        "{job: 'a', completed: 1, total: 2, finished: true, failed: true, absent: false}, "
+        "{job: 'b', completed: 2, total: 2, finished: true, failed: false, absent: false}"
+        "];\nconsole.log(JSON.stringify(notes.map(documentNote)));",
+    )
+
+    assert "1 of 2 pages have completed" in failed
+    assert "failed" in failed and "not read" in failed, "the pages it never reached are named as not read"
+    assert "would publish" not in failed, "a failed read published nothing"
+    assert "would publish" in read and "failed" not in read
 
 
 @requires_node

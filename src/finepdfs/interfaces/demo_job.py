@@ -24,9 +24,11 @@ Two answers carry the panes, and neither is the job JSON (ADR-0014):
   data-completed="M">``, and inside it one ``<section class="document-page" data-page="K"
   data-state="complete">`` per completed page in numeric order, each labelled ``page K``, with
   ``<section class="document-page" data-page="K" data-state="pending">`` and a ``.skeleton`` paragraph
-  for every page that has not completed. ``data-pages`` is present only when the job knows its page
-  count. The answer is ``503`` with ``{"error": ... "rendering is not installed ...", "rendering":
-  "not-installed"}`` when the ``[demo]`` extra is absent: the pane never falls back to unescaped text.
+  for every page that has not completed, and ``data-state="unread"`` naming the pages a failed read
+  never reached. ``data-pages`` is present only when the job knows its page count, and a page the job
+  has not seen is only drawn when that count says it exists. The answer is ``503`` with ``{"error": ...
+  "rendering is not installed ...", "rendering": "not-installed"}`` when the ``[demo]`` extra is absent:
+  the pane never falls back to unescaped text.
 - ``GET /api/read/<id>/document.md`` -- ``text/markdown; charset=utf-8``, the completed Page Texts in
   the shared projection (``domain.publishing.document_markdown``), which is the `.md` the page offers
   for download and the same bytes the corpus would write for those pages. It needs no optional
@@ -56,13 +58,16 @@ class DocumentView:
     """One job's document as the pane sees it now: completed pages, and how many exist in all.
 
     ``pages`` are the Page Texts that are complete, in their original 1-based numeric order. ``total``
-    is the page count the job knows -- from routing or from the finished Reading -- and ``None`` when
-    the job has not learned it yet; the pane then shows the next page as a skeleton instead of claiming
-    a page count it does not know.
+    is the page count the job knows -- from the count the use case reported before the read started, or
+    from the finished Reading -- and ``None`` when the job has not learned it yet; the pane then shows
+    only the pages the read reported instead of claiming a page count it does not know. ``failed`` is
+    whether the read failed: the pages it never reached were not read, and the pane says so rather than
+    promising a placeholder that no later page will replace.
     """
 
     pages: tuple[PageText, ...] = ()
     total: int | None = None
+    failed: bool = False
 
     @property
     def completed(self) -> int:
@@ -114,12 +119,16 @@ class DemoJob:
             return self._transcript
 
     def document(self) -> DocumentView:
-        """The completed pages in page order, and the page count the job knows."""
+        """The completed pages in page order, the page count the job knows, and whether it failed."""
         with self._lock:
             if isinstance(self._outcome, Reading):
                 pages = pages_in_order(self._outcome.pages)
                 return DocumentView(pages=pages, total=len(pages))
-            return DocumentView(pages=pages_in_order(self._pages.values()), total=self._total)
+            return DocumentView(
+                pages=pages_in_order(self._pages.values()),
+                total=self._total,
+                failed=isinstance(self._outcome, FailedReading),
+            )
 
     def answer(self) -> dict[str, Any]:
         """The job exactly as ``GET /api/read/<id>`` answers it: one shape, with nulls where it is absent."""
