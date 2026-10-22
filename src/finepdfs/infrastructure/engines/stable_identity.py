@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument
-from finepdfs.domain.ports import OcrEngine
+from finepdfs.domain.ports import OcrEngine, ReadSink
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,7 +27,7 @@ class StableIdentity:
     def identity(self) -> EngineIdentity:
         return EngineIdentity(name=self.engine.identity.name, detail=self.detail)
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink: ReadSink | None = None) -> ExtractedDocument:
         """Extract with the wrapped engine, then stamp the result with the stable identity.
 
         The returned document's engine is what the published record is built from, so delegating the
@@ -35,5 +35,5 @@ class StableIdentity:
         engine field keeps the pages the engine produced and makes the record as stable as the memo
         key: the host can move without the record moving (ADR-0007).
         """
-        extracted = self.engine.extract(document)
+        extracted = self.engine.extract(document) if sink is None else self.engine.extract(document, sink)
         return ExtractedDocument(pages=extracted.pages, engine=self.identity)

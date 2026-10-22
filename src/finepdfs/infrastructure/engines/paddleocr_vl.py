@@ -13,6 +13,7 @@ from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText
+from finepdfs.domain.ports import ReadSink
 from finepdfs.infrastructure.engines.concurrency import DEFAULT_ENGINE_CONCURRENCY, EngineCalls
 from finepdfs.infrastructure.engines.pdf_document import MuPDFDocument
 from finepdfs.infrastructure.engines.subprocess_support import CommandRunner, SubprocessRunner, require_success
@@ -64,7 +65,7 @@ class PaddleOcrVlEngine:
     def identity(self) -> EngineIdentity:
         return self._identity
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink: ReadSink | None = None) -> ExtractedDocument:
         """Read every page, overlapping the requests while rendering them one at a time.
 
         Rendering is serial and stays on this thread: PyMuPDF is not thread-safe, and every page goes
@@ -79,6 +80,13 @@ class PaddleOcrVlEngine:
         cancelled on the way out, so the run's bound is not spent on a Document that has already failed.
         A request a worker has already started cannot be cancelled: it runs to completion and is not
         recalled.
+
+        A ``sink`` makes this a streaming read (ADR-0014): each page is asked for as a server-sent event
+        stream and its deltas reach ``sink.on_delta`` verbatim from the worker's thread, tagged with the
+        page they belong to, while each completed Page Text reaches ``sink.on_page`` here, on this thread
+        and in page-number order. Normalization is still ``strip_model_preamble``, applied once to a
+        page's whole stream, so the page a watcher is shown completing is exactly the page a batch run
+        would export. Without a sink nothing streams and the answer is the one this read has always given.
         """
         pages: dict[int, PageText] = {}
         in_flight: deque[tuple[int, Future[str]]] = deque()
@@ -87,7 +95,23 @@ class PaddleOcrVlEngine:
             """Take the oldest request's answer, so pages leave the pool in page-number order."""
             page_number, future = pending
             answer = future.result()
-            pages[page_number] = PageText(number=page_number, text=strip_model_preamble(answer, OCR_PROMPT))
+            page = PageText(number=page_number, text=strip_model_preamble(answer, OCR_PROMPT))
+            pages[page_number] = page
+            if sink is not None:
+                sink.on_page(page)
+
+        def request(page_number: int, image: bytes) -> Future[str]:
+            """One page's request: a stream a watcher can follow, or the blocking call of every batch run."""
+            if sink is None:
+                return self.calls.submit(self._transport.complete_with_page_image, OCR_PROMPT, image)
+
+            def stream() -> str:
+                answer = self._transport.stream_with_page_image(
+                    OCR_PROMPT, image, lambda delta: sink.on_delta(page_number, delta)
+                )
+                return answer.text
+
+            return self.calls.submit(stream)
 
         with MuPDFDocument(document.content) as pdf:
             try:
@@ -95,9 +119,7 @@ class PaddleOcrVlEngine:
                     while len(in_flight) >= self.calls.limit:  # bound the images held for in-flight requests
                         collect(in_flight.popleft())
                     image = pdf.render_page_png(page_number, dpi=self._dpi)
-                    in_flight.append(
-                        (page_number, self.calls.submit(self._transport.complete_with_page_image, OCR_PROMPT, image))
-                    )
+                    in_flight.append((page_number, request(page_number, image)))
                 while in_flight:
                     collect(in_flight.popleft())
             except BaseException:
@@ -139,7 +161,12 @@ class PaddleOcrVlCliEngine:
             name="paddleocr-vl", detail=paddleocr_detail(f"cli:{self.command}:{PIPELINE_VERSION}", self.dpi)
         )
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink: ReadSink | None = None) -> ExtractedDocument:
+        """Read every page through one `paddleocr doc_parser` run, one rendered page per result.
+
+        ``sink`` is accepted so a caller may always watch a read, and left silent: the command writes
+        its results when it finishes, so there is no page-by-page output to report and none is invented.
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory(dir=self.work_dir) as scratch:

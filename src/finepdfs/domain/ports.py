@@ -14,7 +14,7 @@ from typing import Protocol
 from finepdfs.domain.chunks import Chunk
 from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
 from finepdfs.domain.demo import UsageSnapshot
-from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, TextLayerQuality
+from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText, TextLayerQuality
 from finepdfs.domain.language import PageLanguage
 from finepdfs.domain.publishing import PageRecord
 from finepdfs.domain.search import IndexFailure, IndexState, SearchHit, SearchQuery
@@ -36,13 +36,39 @@ class TextLayerProbe(Protocol):
     def measure(self, content: bytes) -> TextLayerQuality: ...
 
 
+class ReadSink(Protocol):
+    """A caller watching an Extraction happen, page by page (ADR-0014).
+
+    ``on_delta`` is the engine's own output as it arrives, exactly as the worker emitted it and before
+    any normalization -- echoed prompt, fences and layout markers included -- tagged with the 1-based
+    page number it belongs to, because a read may have several pages in flight at once. ``on_page`` is
+    the Page Text the read exports for a page, as soon as that page is complete and in page-number
+    order: the same text a batch run would export for the same page.
+
+    An engine with nothing arriving page by page -- the text layer, a local command that writes its
+    results when it finishes -- has nothing to report and calls neither method, so a caller that
+    received nothing knows the lane did not stream instead of inferring a cadence of its own.
+    """
+
+    def on_delta(self, page_number: int, text: str) -> None: ...
+
+    def on_page(self, page: PageText) -> None: ...
+
+
 class OcrEngine(Protocol):
     """Turns document bytes into page texts."""
 
     @property
     def identity(self) -> EngineIdentity: ...
 
-    def extract(self, document: Document) -> ExtractedDocument: ...
+    def extract(self, document: Document, sink: ReadSink | None = None) -> ExtractedDocument:
+        """Read the document; a caller may pass a sink to watch the read and may always leave it out.
+
+        The answer is the same either way -- the sink only reports what the read is doing as it happens
+        -- so a caller with nothing to watch, and every batch run, passes no sink and is served exactly
+        as before.
+        """
+        ...
 
 
 class LanguageIdentifier(Protocol):

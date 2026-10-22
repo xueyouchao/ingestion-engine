@@ -31,12 +31,14 @@ class _AddressEngine:
     def __init__(self, name: str, pages: list[PageText], detail: str) -> None:
         self._identity = EngineIdentity(name=name, detail=detail)
         self._pages = pages
+        self.sinks: list = []
 
     @property
     def identity(self) -> EngineIdentity:
         return self._identity
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink=None) -> ExtractedDocument:
+        self.sinks.append(sink)
         return ExtractedDocument(pages=tuple(self._pages), engine=self._identity)
 
 
@@ -65,3 +67,14 @@ def test_a_published_record_does_not_move_when_the_host_does() -> None:
 
     assert record_engine("https://a.example/v1") == record_engine("https://b.example/v1")
     assert record_engine("https://a.example/v1") == "paddleocr-vl@modal:ocr:1.6"
+
+
+def test_a_watched_read_hands_its_sink_to_the_wrapped_engine_and_keeps_the_stable_identity() -> None:
+    """The demo reads through this decorator too: watching must not bypass it nor move the record's name."""
+    inner = _AddressEngine("paddleocr-vl", [PageText(number=1, text="one page")], detail="model@https://a/v1")
+    watcher = object()
+
+    extracted = StableIdentity(inner, "modal:ocr:1.6").extract(Document(name="x", content=b"%PDF"), watcher)
+
+    assert inner.sinks == [watcher]
+    assert extracted.engine == EngineIdentity(name="paddleocr-vl", detail="modal:ocr:1.6")

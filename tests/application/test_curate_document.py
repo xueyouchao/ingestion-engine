@@ -5,7 +5,7 @@ This is the main seam: no network, no models, no CocoIndex, no filesystem.
 
 from __future__ import annotations
 
-from finepdfs.application.curate import NATIVE_TEXT_ENGINE, CurateDocument, CurationPolicy
+from finepdfs.application.curate import NATIVE_TEXT_ENGINE, CurateDocument, CurationPolicy, ExtractionStep
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText, TextLayerQuality
 from finepdfs.domain.language import PageLanguage
 from finepdfs.domain.ocr import OcrRoutingPolicy
@@ -27,14 +27,16 @@ class FakeEngine:
         self._identity = EngineIdentity(name=name, detail=detail)
         self._pages = pages
         self.calls = 0
+        self.sinks: list = []
         self.failure: Exception | None = None
 
     @property
     def identity(self) -> EngineIdentity:
         return self._identity
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink=None) -> ExtractedDocument:
         self.calls += 1
+        self.sinks.append(sink)
         if self.failure is not None:
             raise self.failure
         return ExtractedDocument(pages=tuple(self._pages), engine=self._identity)
@@ -189,3 +191,15 @@ def test_a_probe_failure_is_reported_as_a_failed_document() -> None:
 
     assert outcome.status == "failed"
     assert "not a PDF" in outcome.reason
+
+
+def test_the_extraction_step_hands_a_sink_to_the_engine_and_needs_none() -> None:
+    """The batch flow passes no sink and is read as before; a watching caller's sink reaches the engine."""
+    ocr = FakeEngine("paddleocr-vl", _documents_pages("ocr"))
+    step = ExtractionStep(FakeProbe(SCANNED), {"paddleocr-vl": ocr}, CurationPolicy(engine_name="paddleocr-vl"))
+    watcher = object()
+
+    step.extract_with(Document(name="x", content=b"%PDF"), "paddleocr-vl", watcher)
+    step.extract_with(Document(name="x", content=b"%PDF"), "paddleocr-vl")
+
+    assert ocr.sinks == [watcher, None]

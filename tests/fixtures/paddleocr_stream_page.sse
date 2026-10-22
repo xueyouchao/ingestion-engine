@@ -1,0 +1,30 @@
+data: {"id": "chatcmpl-3f9d2a1c", "object": "chat.completion.chunk", "created": 1761183600, "model": "PaddleOCR-VL-1.6", "system_fingerprint": null, "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-3f9d2a1c", "object": "chat.completion.chunk", "created": 1761183600, "model": "PaddleOCR-VL-1.6", "system_fingerprint": null, "choices": [{"index": 0, "delta": {"content": "OCR"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-3f9d2a1c", "object": "chat.completion.chunk", "created": 1761183600, "model": "PaddleOCR-VL-1.6", "system_fingerprint": null, "choices": [{"index": 0, "delta": {"content": ":"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-3f9d2a1c", "object": "chat.completion.chunk", "created": 1761183600, "model": "PaddleOCR-VL-1.6", "system_fingerprint": null, "choices": [{"index": 0, "delta": {"content": "\n``"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-3f9d2a1c", "object": "chat.completion.chunk", "created": 1761183600, "model": "PaddleOCR-VL-1.6", "system_fingerprint": null, "choices": [{"index": 0, "delta": {"content": "`markdown\n# Quarterly "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-3f9d2a1c", "object": "chat.completion.chunk", "created": 1761183600, "model": "PaddleOCR-VL-1.6", "system_fingerprint": null, "choices": [{"index": 0, "delta": {"content": "Report\n\nReceipts were 1"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-3f9d2a1c", "object": "chat.completion.chunk", "created": 1761183600, "model": "PaddleOCR-VL-1.6", "system_fingerprint": null, "choices": [{"index": 0, "delta": {"content": "2% higher than in the sa"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-3f9d2a1c", "object": "chat.completion.chunk", "created": 1761183600, "model": "PaddleOCR-VL-1.6", "system_fingerprint": null, "choices": [{"index": 0, "delta": {"content": "me quarter last year.\n\n| Reg"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-3f9d2a1c", "object": "chat.completion.chunk", "created": 1761183600, "model": "PaddleOCR-VL-1.6", "system_fingerprint": null, "choices": [{"index": 0, "delta": {"content": "ion | Receipts |\n| -----"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-3f9d2a1c", "object": "chat.completion.chunk", "created": 1761183600, "model": "PaddleOCR-VL-1.6", "system_fingerprint": null, "choices": [{"index": 0, "delta": {"content": "- | -------- |\n| North "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-3f9d2a1c", "object": "chat.completion.chunk", "created": 1761183600, "model": "PaddleOCR-VL-1.6", "system_fingerprint": null, "choices": [{"index": 0, "delta": {"content": " | 4.1 M    |\n``"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-3f9d2a1c", "object": "chat.completion.chunk", "created": 1761183600, "model": "PaddleOCR-VL-1.6", "system_fingerprint": null, "choices": [{"index": 0, "delta": {"content": "`"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-3f9d2a1c", "object": "chat.completion.chunk", "created": 1761183600, "model": "PaddleOCR-VL-1.6", "system_fingerprint": null, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+
+data: {"id": "chatcmpl-3f9d2a1c", "object": "chat.completion.chunk", "created": 1761183600, "model": "PaddleOCR-VL-1.6", "system_fingerprint": null, "choices": [], "usage": {"prompt_tokens": 1123, "completion_tokens": 71, "total_tokens": 1194}}
+
+data: [DONE]
+
