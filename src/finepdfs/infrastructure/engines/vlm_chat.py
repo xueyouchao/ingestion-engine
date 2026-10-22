@@ -131,8 +131,8 @@ def _streamed_answer(response: Any, endpoint: ChatEndpoint, on_delta: Callable[[
     finish_reason: str | None = None
     try:
         for line in response:
-            payload = line.decode("utf-8").strip().removeprefix("data:").strip() if line.strip() else ""
-            if not payload:  # the blank line that ends a frame, or a comment the server sent
+            payload = line.decode("utf-8").strip().removeprefix("data:").strip()
+            if not payload:  # the blank line that ends a frame
                 continue
             if payload == "[DONE]":
                 return StreamedAnswer(text="".join(pieces), finish_reason=finish_reason)
