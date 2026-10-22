@@ -164,3 +164,19 @@ upload that finds every place taken is refused with kind `busy` rather than wait
 `python -m deploy.modal.warm status|on|off`, in `deploy/modal/warm.py` — and names what that floor costs per
 minute at the pinned L4 rate. `on` holds one container warm without a redeploy; `off` returns the app to the
 resting zero it ships with.
+
+**Raw Transcript** — the middle pane of the live upload demo: one Reading's raw output exactly as the
+worker emitted it, tagged with its 1-based page, kept in a bounded ring buffer per page only while the
+Reading runs, served at `GET /api/read/<id>/events`, and freed when the Reading finishes. It is **a pane
+name and not domain vocabulary**: nothing in it is exported, recorded, put in the job answer or cited,
+and no artifact anywhere is a Raw Transcript. It makes the transformation visible; its content is proof
+of work, never evidence. If it ever becomes an exported artifact, it enters this glossary as its own
+term first (ADR-0014).
+
+**Rendered Document** — the right pane of the live upload demo: the Page Texts a Reading exported,
+rendered page by page as an inert HTML fragment at `GET /api/read/<id>/document`, with a copy button and
+a markdown download from `GET /api/read/<id>/document.md`. That markdown is the corpus's own projection
+(`document_markdown`), i.e. the bytes a Published Document's `.md` would have, not a second artifact. The
+pane's name is **a pane name and not domain vocabulary**; the thing it shows is a Page Text or a Published
+Document, whichever is meant, and no artifact is called a Rendered Document. If that ever changes, it
+enters this glossary first (ADR-0014).
