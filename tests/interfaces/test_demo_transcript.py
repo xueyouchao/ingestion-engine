@@ -95,6 +95,53 @@ def test_the_dropped_count_accumulates_per_page_without_keeping_the_dropped_text
     assert "aaaa" not in json.dumps(events) and "bbbb" not in json.dumps(events)
 
 
+def test_a_truncated_page_replays_its_marker_before_the_tail_that_remains() -> None:
+    """A replay is read from the start, so the loss is stated before the text it cost (ADR-0014)."""
+    transcript = RawTranscript(ceiling_bytes=12)
+    for text in ("aaaaa", "bbbbb", "ccccc"):  # 15 bytes of page into a 12-byte page buffer
+        transcript.on_delta(1, text)
+
+    replayed = _events(transcript)
+
+    assert replayed[0] == ("truncated", {"page": 1, "dropped_bytes": 5}), "the marker comes first"
+    assert [data["text"] for name, data in replayed if name == "delta"] == ["bbbbb", "ccccc"]
+
+
+def test_a_live_stream_is_told_of_the_drop_where_it_happened() -> None:
+    """A subscriber already watching is not sent back: it hears the marker at the moment of the loss."""
+    transcript = RawTranscript(ceiling_bytes=12)
+    transcript.on_delta(1, "aaaaa")
+    transcript.on_delta(1, "bbbbb")
+    cursor = transcript.since(0)[0][-1].sequence
+
+    transcript.on_delta(1, "ccccc")  # the oldest bytes no longer fit: the drop happens here
+
+    fresh, _ = transcript.since(cursor)
+    assert [event.name for event in fresh] == ["truncated", "delta"]
+
+
+def test_the_streamed_wire_states_a_replayed_marker_once_and_before_its_tail() -> None:
+    """The wire a late subscriber reads: the marker, the tail, then the end -- and no event twice."""
+    transcript = RawTranscript(ceiling_bytes=12)
+    for text in ("aaaaa", "bbbbb", "ccccc"):
+        transcript.on_delta(1, text)
+    written: list[bytes] = []
+    thread = threading.Thread(
+        target=stream_events, args=(transcript, written.append), kwargs={"heartbeat_seconds": 0.02}, daemon=True
+    )
+    thread.start()
+    deadline = time.monotonic() + 2
+    while len([chunk for chunk in written if chunk.startswith(b"event:")]) < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    transcript.finish("read")
+    thread.join(timeout=2)
+
+    frames = [chunk for chunk in written if chunk.startswith(b"event:")]
+    names = [frame.split(b"\n", 1)[0].decode().removeprefix("event: ") for frame in frames]
+    assert not thread.is_alive(), "a finished transcript ends the writer"
+    assert names == ["truncated", "delta", "delta", "done"], "each event once, the marker before the tail"
+
+
 def test_a_failure_is_an_error_event_and_finishing_is_a_done_event() -> None:
     """The stream says why it failed in the same words the job answer shows, then ends."""
     transcript = RawTranscript()

@@ -20,7 +20,9 @@ The wire contract, which the page asset and the HTTP tests depend on. Every even
 A heartbeat is the SSE comment line ``: heartbeat`` sent while no event has arrived for one heartbeat
 interval. The stream ends after ``done`` (or ``error`` when a finish follows it); a browser must close
 the EventSource on ``done`` rather than letting it reconnect. A late or reloaded subscriber is replayed
-from the store's start, which for a truncated page is the truncated event plus the retained tail.
+from the store's start: for a truncated page that is its ``truncated`` marker first and then the retained
+tail, so the loss is named before the text that survived it. A subscriber that is already watching hears
+the marker where the drop happened, because that is when it happened.
 
 The store is ephemeral by construction: an absent job id is answered with an HTTP error before a stream
 starts, and a finished Reading's store is detached by the job that held it, so there is nothing left to
@@ -184,7 +186,37 @@ class RawTranscript:
         return event
 
     def _after(self, cursor: int) -> list[TranscriptEvent]:
-        return [event for sequence, event in self._events.items() if sequence > cursor]
+        events = [event for sequence, event in self._events.items() if sequence > cursor]
+        # A subscriber already watching (a cursor past the start) is told of a drop when it happens; one
+        # replaying from the start reads each truncated page's marker before the tail that survived it.
+        return events if cursor else _marker_first(events)
+
+
+def _marker_first(events: list[TranscriptEvent]) -> list[TranscriptEvent]:
+    """Each truncated page's marker before the retained deltas it names the loss of.
+
+    A live subscriber hears the marker at the moment the drop happened, which is where the drop happened.
+    A subscriber replaying from the start never saw that moment: for it the page's first bytes are simply
+    gone, and the marker belongs before the text that survived, so that its position never claims "the
+    missing bytes were here" about a place they were not. Pages interleave, so each page keeps its own
+    place in the replay and only its own marker moves in front of its own first retained delta.
+    """
+    markers = {event.data["page"]: event for event in events if event.name == "truncated"}
+    if not markers:
+        return events
+    ordered: list[TranscriptEvent] = []
+    placed: set[int] = set()
+    for event in events:
+        if event.name == "truncated":
+            continue  # moved in front of its page's first retained event, below
+        page = event.data.get("page")
+        if page in markers and page not in placed:
+            ordered.append(markers[page])
+            placed.add(page)
+        ordered.append(event)
+    # A page whose whole buffer was dropped still names its loss, after the replay lands somewhere.
+    ordered.extend(marker for page, marker in markers.items() if page not in placed)
+    return ordered
 
 
 def encode_event(event: TranscriptEvent) -> bytes:
@@ -208,7 +240,9 @@ def stream_events(
         events, finished = transcript.since(cursor)
         for event in events:
             write(encode_event(event))
-            cursor = event.sequence
+            # The highest sequence written, never the last one: a replay is written marker-first, so its
+            # marker carries the newest sequence though it is written before the tail it names.
+            cursor = max(cursor, event.sequence)
         if finished:
             return
         events, finished = transcript.wait(cursor, heartbeat_seconds)
