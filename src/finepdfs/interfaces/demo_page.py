@@ -1,15 +1,17 @@
 """The live demo's page asset: one self-contained HTML document with its styles and its script.
 
-The page is a view over three answers -- the status, the upload's job id and the job itself -- and it
-keeps no state of its own beyond the id it is polling. So it lives beside the queue and the server
-rather than inside either. No framework and no build step: the server hands the browser this string as
-it is, and the browser needs nothing else.
+The page is a view over four answers -- the status, the upload's job id, the job itself and the job's
+raw transcript -- and it keeps no state beyond the id it is polling and the transcript it is streaming.
+So it lives beside the queue and the server rather than inside either. No framework and no build step:
+the server hands the browser this string as it is, and the browser needs nothing else.
 
 What the page may show is the whole contract: the limits and the remaining budget before the upload
 control, the two statements about where the bytes go and what is kept, the stage timeline with the
 measured warm-up, the decision with its five features and the thresholds they were measured against, the
-Engine Identity, the per-page text with its original page number, and the refusal and failure panels. It
-never receives the bearer or the worker's address, so it cannot show them.
+Engine Identity, the raw transcript the middle pane streams from ``/api/read/<id>/events``, the per-page
+text with its original page number, and the refusal and failure panels. It never receives the bearer or
+the worker's address, so it cannot show them. The raw transcript is the worker's own bytes: it is set
+with ``textContent`` and never parsed as HTML.
 """
 
 from __future__ import annotations
@@ -126,6 +128,24 @@ DEMO_HTML = """<!doctype html>
   .page { border: 1px solid var(--line); border-radius: .4rem; padding: .65rem .75rem; margin: .7rem 0; }
   .page header { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
   .page pre { white-space: pre-wrap; word-wrap: break-word; margin: .4rem 0 0; font: inherit; }
+  /* The raw pane is the worker's own output, so it is monospaced and scrollable: markers and broken
+     table syntax must look unlike the published page the right-hand pane will carry. */
+  .raw-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin: .1rem 0 .55rem; }
+  .raw-controls button { padding: .3rem .7rem; font-size: .85rem; }
+  .raw-page { border: 1px solid var(--line); border-radius: .4rem; padding: .55rem .7rem; margin: .55rem 0; }
+  .raw-page header { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+  .raw-truncated { color: var(--warn); font-size: .85rem; margin: .35rem 0 .1rem; }
+  .raw-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin: .35rem 0 0;
+    padding: .5rem;
+    max-height: 30rem;
+    overflow: auto;
+    background: var(--bg);
+    border-radius: .3rem;
+    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
   .refusal { border-color: var(--bad); }
   .refusal h2, .failure h2 { color: var(--bad); }
   .label { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
@@ -205,6 +225,16 @@ DEMO_HTML = """<!doctype html>
   <p class="engine" id="engine-value"></p>
 </section>
 
+<section id="raw" class="hidden" role="region" aria-labelledby="raw-heading">
+  <h2 id="raw-heading">Raw transcript</h2>
+  <p class="note" id="raw-note" role="status">The worker's own output, before any normalization.</p>
+  <div class="raw-controls">
+    <button type="button" id="raw-copy" disabled>Copy transcript</button>
+    <span class="note" id="raw-copy-note"></span>
+  </div>
+  <div id="raw-transcript" role="log" aria-live="off" aria-label="Raw transcript"></div>
+</section>
+
 <section id="refusal" class="panel refusal hidden">
   <h2>Refused: <span id="refusal-kind"></span></h2>
   <p class="label">why the demo refused it</p>
@@ -240,7 +270,7 @@ const FEATURES = [
 ];
 
 const byId = (id) => document.getElementById(id);
-const state = { job: null, seen: new Set(), timer: null };
+const state = { job: null, seen: new Set(), timer: null, raw: null, rawJob: null, events: null };
 
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -330,6 +360,165 @@ function hideResults() {
   byId("error").classList.add("hidden");
 }
 
+// -- the raw transcript (ADR-0014) -----------------------------------------------------------------
+//
+// The middle pane is the worker's own output, escaped and never parsed: every function here that
+// touches the DOM only ever assigns ``textContent`` or ``replaceChildren``. Its entire state is the
+// event stream read from sequence zero, so a reloaded page replays what the server retained instead
+// of showing a delta this page happened to remember.
+
+function rawModel() {
+  return { deltas: [], dropped: {}, failure: null, outcome: null, finished: false, available: true };
+}
+
+function applyRawEvent(model, name, data) {
+  if (name === "delta") {
+    model.deltas.push({ page: data.page, text: String(data.text) });
+  } else if (name === "truncated") {
+    model.dropped[data.page] = data.dropped_bytes;
+  } else if (name === "error") {
+    model.failure = { lane: String(data.lane || ""), reason: String(data.reason || "") };
+  } else if (name === "done") {
+    model.finished = true;
+    model.outcome = data.outcome === undefined ? null : data.outcome;
+  }
+  return model;
+}
+
+function rawPages(model) {
+  const pages = new Map();
+  const at = (number) => {
+    if (!pages.has(number)) pages.set(number, { number: number, text: "", dropped: 0 });
+    return pages.get(number);
+  };
+  for (const delta of model.deltas) at(delta.page).text += delta.text;
+  for (const number of Object.keys(model.dropped)) at(Number(number)).dropped = model.dropped[number];
+  return [...pages.values()].sort((left, right) => left.number - right.number);
+}
+
+function rawText(model) {
+  // The copy button copies the stream, in arrival order: page labels and separators would be this
+  // page's invention, not the worker's output.
+  return model.deltas.map((delta) => delta.text).join("");
+}
+
+function rawNote(model) {
+  if (model.deltas.length) {
+    if (!model.finished) return "Streaming this lane's raw output as it arrives. Nothing here is parsed as HTML.";
+    return model.failure
+      ? "The raw output this lane produced before it failed, byte for byte, before any normalization."
+      : "The raw output this lane produced, byte for byte, before any normalization.";
+  }
+  if (!model.finished) {
+    return model.available
+      ? "Waiting for this lane's first raw output."
+      : "The raw transcript is no longer kept for this job.";
+  }
+  if (model.outcome === "refused") {
+    return "No lane read this upload, so this lane does not stream.";
+  }
+  if (model.outcome === "failed") {
+    return "The read failed before any raw output arrived; the failure panel names the lane and the reason.";
+  }
+  return "This lane does not stream: it returns a page whole, with no raw output to show.";
+}
+
+function rawTruncation(page, dropped) {
+  return "Page " + page + ": the transcript dropped the oldest " + dropped +
+    " bytes of this page; the most recent output is what remains below.";
+}
+
+function renderRaw(model) {
+  byId("raw").classList.remove("hidden");
+  byId("raw-note").textContent = rawNote(model);
+  byId("raw-copy").disabled = rawText(model).length === 0;
+  const container = byId("raw-transcript");
+  container.setAttribute("aria-busy", model.finished ? "false" : "true");
+  container.replaceChildren();
+  for (const page of rawPages(model)) {
+    const article = node("article", null, "raw-page");
+    article.dataset.page = String(page.number);
+    const head = document.createElement("header");
+    head.textContent = "page " + page.number;
+    article.append(head);
+    if (page.dropped > 0) {
+      article.append(node("p", rawTruncation(page.number, page.dropped), "raw-truncated"));
+    }
+    article.append(node("pre", page.text, "raw-text"));
+    container.append(article);
+  }
+}
+
+function closeRawStream() {
+  if (state.events !== null) {
+    state.events.close();
+    state.events = null;
+  }
+}
+
+function openRawStream(jobId) {
+  // One stream per job: a new upload closes the old one before it asks for another, and ``rawJob``
+  // makes a late handler from the old job harmless if one still fires.
+  closeRawStream();
+  state.raw = rawModel();
+  state.rawJob = jobId;
+  renderRaw(state.raw);
+  const source = new EventSource("/api/read/" + encodeURIComponent(jobId) + "/events");
+  state.events = source;
+  const apply = (event) => {
+    if (state.rawJob !== jobId) return;
+    let data;
+    try {
+      data = JSON.parse(event.data);
+    } catch (error) {
+      return;
+    }
+    applyRawEvent(state.raw, event.type, data);
+    renderRaw(state.raw);
+  };
+  for (const name of ["delta", "truncated", "page"]) source.addEventListener(name, apply);
+  source.addEventListener("error", (event) => {
+    // The server's own ``error`` event carries the read's words; the EventSource failure has no data
+    // and means this endpoint will answer nothing more for the job (a finished job keeps no store).
+    if (event.data) {
+      apply(event);
+      return;
+    }
+    closeRawStream();
+    state.raw.available = false;
+    renderRaw(state.raw);
+  });
+  source.addEventListener("done", (event) => {
+    apply(event);
+    closeRawStream();
+  });
+}
+
+function settleRaw(job, jobId) {
+  // A text-layer read can finish before this page attaches, and the events endpoint then answers 410.
+  // The poll's terminal answer is the remaining evidence: a finished read that streamed no delta is a
+  // lane with nothing to stream, never a stream this page is still waiting on.
+  if (job.stage !== "done" || state.raw === null || state.rawJob !== jobId) return;
+  if (!state.raw.finished) {
+    state.raw.finished = true;
+    state.raw.outcome = job.outcome;
+  }
+  renderRaw(state.raw);
+}
+
+async function copyRaw() {
+  if (state.raw === null) return;
+  const text = rawText(state.raw);
+  if (!text) return;
+  const note = byId("raw-copy-note");
+  try {
+    await navigator.clipboard.writeText(text);
+    note.textContent = "Copied " + text.length + " characters.";
+  } catch (error) {
+    note.textContent = "Copy failed; select the transcript text and copy it by hand.";
+  }
+}
+
 function renderRefusal(refusal) {
   hideResults();
   byId("refusal-kind").textContent = refusal.kind;
@@ -383,8 +572,9 @@ function renderReading(reading) {
   }
 }
 
-function renderJob(job) {
+function renderJob(job, jobId) {
   renderTimeline(job.stage, job.outcome, job.warmed_ms);
+  settleRaw(job, jobId);
   if (job.stage !== "done") return;
   stopPolling();
   byId("upload-button").disabled = false;
@@ -412,7 +602,7 @@ function poll(jobId) {
       if (response.status === 404) throw new Error("the server no longer knows this job");
       if (!response.ok) throw new Error("the job answered " + response.status);
       const job = await response.json();
-      renderJob(job);
+      renderJob(job, jobId);
       if (job.stage !== "done") state.timer = setTimeout(ask, 900);
     } catch (error) {
       stopPolling();
@@ -462,6 +652,11 @@ function uploadHeaders(file) {
 
 async function upload(file) {
   hideResults();
+  closeRawStream();
+  state.raw = null;
+  state.rawJob = null;
+  byId("raw").classList.add("hidden");
+  byId("raw-copy-note").textContent = "";
   state.seen = new Set();
   byId("upload-button").disabled = true;
   renderTimeline("queued", null, null);
@@ -474,6 +669,7 @@ async function upload(file) {
     const payload = await response.json();
     if (response.status === 202) {
       poll(payload.job);
+      openRawStream(payload.job);
       return;
     }
     byId("upload-button").disabled = false;
@@ -494,6 +690,8 @@ byId("upload-form").addEventListener("submit", (event) => {
   }
   upload(file);
 });
+
+byId("raw-copy").addEventListener("click", copyRaw);
 
 loadStatus();
 </script>
