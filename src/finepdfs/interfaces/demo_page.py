@@ -1,17 +1,21 @@
 """The live demo's page asset: one self-contained HTML document with its styles and its script.
 
-The page is a view over four answers -- the status, the upload's job id, the job itself and the job's
-raw transcript -- and it keeps no state beyond the id it is polling and the transcript it is streaming.
-So it lives beside the queue and the server rather than inside either. No framework and no build step:
-the server hands the browser this string as it is, and the browser needs nothing else.
+The page is a view over five answers -- the status, the upload's job id, the job itself, the job's raw
+transcript and the job's rendered document -- and it keeps no state beyond the id it is polling, the
+transcript it is streaming and the file name its download is called after. So it lives beside the queue
+and the server rather than inside either. No framework and no build step: the server hands the browser
+this string as it is, and the browser needs nothing else.
 
 What the page may show is the whole contract: the limits and the remaining budget before the upload
 control, the two statements about where the bytes go and what is kept, the stage timeline with the
 measured warm-up, the decision with its five features and the thresholds they were measured against, the
-Engine Identity, the raw transcript the middle pane streams from ``/api/read/<id>/events``, the per-page
-text with its original page number, and the refusal and failure panels. It never receives the bearer or
-the worker's address, so it cannot show them. The raw transcript is the worker's own bytes: it is set
-with ``textContent`` and never parsed as HTML.
+Engine Identity, the refusal and failure panels, and three panes -- what was sent, what came back and what
+would be published. The middle pane is the raw transcript the page streams from
+``/api/read/<id>/events``: the worker's own bytes, set with ``textContent`` and never parsed as HTML. The
+right pane is the server's rendered Page Texts from ``/api/read/<id>/document``, already sanitized;
+``insertDocument`` is the one place in this asset that inserts HTML. Its copy button and ``.md`` download
+are the answer at ``/api/read/<id>/document.md``. It never receives the bearer or the worker's address, so
+it cannot show them.
 """
 
 from __future__ import annotations
@@ -56,7 +60,7 @@ DEMO_HTML = """<!doctype html>
   * { box-sizing: border-box; }
   body {
     margin: 0 auto;
-    max-width: 980px;
+    max-width: 1180px;
     padding: 1.25rem;
     background: var(--bg);
     color: var(--ink);
@@ -125,9 +129,42 @@ DEMO_HTML = """<!doctype html>
   th { color: var(--muted); font-weight: 600; }
   td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
   .engine { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
-  .page { border: 1px solid var(--line); border-radius: .4rem; padding: .65rem .75rem; margin: .7rem 0; }
-  .page header { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
-  .page pre { white-space: pre-wrap; word-wrap: break-word; margin: .4rem 0 0; font: inherit; }
+  /* The page is three panes -- what was sent, what came back, what would be published. They stack in
+     that order on a narrow screen; only a wide enough one puts them side by side, so a phone reads the
+     same three sentences top to bottom rather than in a squeezed row. */
+  .panes { display: grid; grid-template-columns: 1fr; gap: 1rem; margin: 1rem 0; align-items: start; }
+  .panes > section { margin: 0; }
+  @media (min-width: 60rem) {
+    .panes { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.15fr); }
+  }
+  /* The rendered pane is the product: the document's own typography, not the transcribed look of the
+     raw pane. Every element here is in the server's allowlist; nothing is styled that cannot arrive. */
+  .document-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin: .1rem 0 .55rem; }
+  .document-controls button { padding: .3rem .7rem; font-size: .85rem; }
+  #document { overflow-x: auto; }
+  .document-page { border: 1px solid var(--line); border-radius: .4rem; padding: .65rem .75rem; margin: .7rem 0; }
+  .document-page-number {
+    margin: 0 0 .4rem;
+    color: var(--muted);
+    font-size: .8rem;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .document-page pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    overflow: auto;
+    padding: .5rem;
+    background: var(--bg);
+    border-radius: .3rem;
+  }
+  .document-page blockquote {
+    margin: .5rem 0;
+    padding-left: .7rem;
+    border-left: 2px solid var(--line);
+    color: var(--muted);
+  }
+  .skeleton, .document-empty { color: var(--muted); font-style: italic; }
   /* The raw pane is the worker's own output, so it is monospaced and scrollable: markers and broken
      table syntax must look unlike the published page the right-hand pane will carry. */
   .raw-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin: .1rem 0 .55rem; }
@@ -182,8 +219,9 @@ DEMO_HTML = """<!doctype html>
   <p class="note" id="limits-note">These are checked before a read starts, so a refusal is never a surprise.</p>
 </section>
 
-<section>
-  <h2>Upload</h2>
+<div class="panes">
+<section id="input-pane" class="pane" role="region" aria-labelledby="input-heading">
+  <h2 id="input-heading">1. What you sent</h2>
   <form class="upload" id="upload-form">
     <input type="file" id="upload-file" accept="application/pdf,image/png,image/jpeg,image/tiff" required>
     <button type="submit" id="upload-button">Read this document</button>
@@ -191,18 +229,39 @@ DEMO_HTML = """<!doctype html>
   <p class="note" id="upload-note">One document at a time. A scan is read as a page, so it goes to the OCR
   lane &mdash; a three-page TIFF is three pages, and the page cap counts them. The server answers a job and
   this page polls it.</p>
+  <div id="timeline">
+    <h3>Stage</h3>
+    <ol class="timeline" id="timeline-stages">
+      <li data-stage="queued">queued</li>
+      <li data-stage="routing">routing</li>
+      <li data-stage="warming">warming the OCR worker</li>
+      <li data-stage="reading">reading the pages</li>
+    </ol>
+    <p class="warm" id="warm-measured">The warm-up is reported as the number that was measured.</p>
+  </div>
 </section>
 
-<section id="timeline">
-  <h2>Stage</h2>
-  <ol class="timeline" id="timeline-stages">
-    <li data-stage="queued">queued</li>
-    <li data-stage="routing">routing</li>
-    <li data-stage="warming">warming the OCR worker</li>
-    <li data-stage="reading">reading the pages</li>
-  </ol>
-  <p class="warm" id="warm-measured">The warm-up is reported as the number that was measured.</p>
+<section id="raw" class="pane hidden" role="region" aria-labelledby="raw-heading">
+  <h2 id="raw-heading">2. What came back: the raw read</h2>
+  <p class="note" id="raw-note" role="status">The worker's own output, before any normalization.</p>
+  <div class="raw-controls">
+    <button type="button" id="raw-copy" disabled>Copy transcript</button>
+    <span class="note" id="raw-copy-note"></span>
+  </div>
+  <div id="raw-transcript" role="log" aria-live="off" aria-label="Raw transcript"></div>
 </section>
+
+<section id="document-pane" class="pane hidden" role="region" aria-labelledby="document-heading">
+  <h2 id="document-heading">3. What would be published: the rendered document</h2>
+  <p class="note" id="document-note" role="status"></p>
+  <div class="document-controls">
+    <button type="button" id="document-copy" disabled>Copy document</button>
+    <button type="button" id="document-download" disabled>Download .md</button>
+    <span class="note" id="document-action-note"></span>
+  </div>
+  <div id="document" aria-label="Rendered document"></div>
+</section>
+</div>
 
 <section id="decision" class="hidden">
   <h2>The decision</h2>
@@ -214,25 +273,9 @@ DEMO_HTML = """<!doctype html>
   </table>
 </section>
 
-<section id="pages" class="hidden">
-  <h2>Page text</h2>
-  <p class="note" id="pages-summary"></p>
-  <div id="page-texts"></div>
-</section>
-
 <section id="engine-identity" class="hidden">
   <h2>Engine Identity</h2>
   <p class="engine" id="engine-value"></p>
-</section>
-
-<section id="raw" class="hidden" role="region" aria-labelledby="raw-heading">
-  <h2 id="raw-heading">Raw transcript</h2>
-  <p class="note" id="raw-note" role="status">The worker's own output, before any normalization.</p>
-  <div class="raw-controls">
-    <button type="button" id="raw-copy" disabled>Copy transcript</button>
-    <span class="note" id="raw-copy-note"></span>
-  </div>
-  <div id="raw-transcript" role="log" aria-live="off" aria-label="Raw transcript"></div>
 </section>
 
 <section id="refusal" class="panel refusal hidden">
@@ -270,7 +313,16 @@ const FEATURES = [
 ];
 
 const byId = (id) => document.getElementById(id);
-const state = { job: null, seen: new Set(), timer: null, raw: null, rawJob: null, events: null };
+const state = {
+  job: null,
+  seen: new Set(),
+  timer: null,
+  raw: null,
+  rawJob: null,
+  events: null,
+  document: null,
+  fileName: "",
+};
 
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -354,7 +406,7 @@ function showError(message) {
 }
 
 function hideResults() {
-  for (const id of ["decision", "engine-identity", "pages", "refusal", "failure"]) {
+  for (const id of ["decision", "engine-identity", "document-pane", "refusal", "failure"]) {
     byId(id).classList.add("hidden");
   }
   byId("error").classList.add("hidden");
@@ -519,6 +571,159 @@ async function copyRaw() {
   }
 }
 
+// -- the rendered document (ADR-0014) ---------------------------------------------------------------
+//
+// The right pane is the product: the server renders Page Text and sanitizes it, and this page inserts
+// that one answer. ``insertDocument`` is the only place in this asset that assigns HTML -- every other
+// pane, and every note here, is written with ``textContent``. The fragment carries the page numbers,
+// their numeric order and the skeleton for a page that has not completed, so this pane orders and
+// labels nothing itself: it shows the server's answer, again, each time the job poll ticks.
+
+function documentModel(jobId) {
+  return { job: jobId, completed: 0, total: null, finished: false, absent: false };
+}
+
+function documentNote(completed, total, finished) {
+  // The counts are the server's, said in words beside the fragment: the pane adds no status of its own.
+  const counted =
+    total === null || total === undefined
+      ? completed + (completed === 1 ? " page has" : " pages have")
+      : completed + " of " + total + (total === 1 ? " page has" : " pages have");
+  if (finished) {
+    return counted + " completed. This is the document the pipeline would publish; the raw read " +
+      "beside it is what the worker emitted.";
+  }
+  if (completed === 0) {
+    return "No page has completed yet. Each page appears, in its own 1-based number, as the lane finishes it.";
+  }
+  return counted + " completed; a page still being read shows a skeleton, and its own page replaces " +
+    "it when it completes.";
+}
+
+function documentAbsent() {
+  // The 503 answer says the [demo] extra is missing. The pane says so in these words -- never the
+  // server's sentence dropped into markup -- and points at what still works.
+  return "Rendering is not installed on this server, so this pane cannot show the rendered document. " +
+    "The document's markdown is still downloadable, and the raw read beside it is the worker's own output.";
+}
+
+function documentDownloadName(fileName) {
+  // The download is named after the document the visitor uploaded; the browser hands this page the
+  // file's base name, so the extension is the only thing this page changes.
+  const name = String(fileName || "");
+  if (!name) return "document.md";
+  const dot = name.lastIndexOf(".");
+  return (dot > 0 ? name.slice(0, dot) : name) + ".md";
+}
+
+function insertDocument(container, fragment) {
+  // The one place this page turns an answer into HTML. The server rendered the Page Texts and
+  // sanitized them against ADR-0014's allowlist; this page neither orders nor escapes nor repairs it.
+  container.innerHTML = fragment;
+}
+
+function setDocumentNote(text) {
+  byId("document-note").textContent = text;
+}
+
+function setDocumentControls(enabled) {
+  byId("document-copy").disabled = !enabled;
+  byId("document-download").disabled = !enabled;
+}
+
+async function documentMarkdown() {
+  // Both the copy button and the download use the same answer: the completed pages as the corpus's one
+  // projection. It needs no optional dependency, so it still works when rendering is absent.
+  const note = byId("document-action-note");
+  const jobId = state.document === null ? null : state.document.job;
+  if (jobId === null) return null;
+  let response;
+  try {
+    response = await fetch("/api/read/" + encodeURIComponent(jobId) + "/document.md", { cache: "no-store" });
+  } catch (error) {
+    note.textContent = "The document's markdown could not be read: " + error.message;
+    return null;
+  }
+  if (!response.ok) {
+    note.textContent = "The document's markdown answered " + response.status + ".";
+    return null;
+  }
+  return await response.text();
+}
+
+async function copyDocument() {
+  const text = await documentMarkdown();
+  if (text === null) return;
+  const note = byId("document-action-note");
+  if (!text) {
+    note.textContent = "No page has completed yet, so there is nothing to copy.";
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    note.textContent = "Copied " + text.length + " characters of the document's markdown.";
+  } catch (error) {
+    note.textContent = "Copy failed; select the document text and copy it by hand.";
+  }
+}
+
+async function downloadDocument() {
+  const text = await documentMarkdown();
+  if (text === null) return;
+  const note = byId("document-action-note");
+  if (!text) {
+    note.textContent = "No page has completed yet, so there is nothing to download.";
+    return;
+  }
+  const name = documentDownloadName(state.fileName);
+  const url = URL.createObjectURL(new Blob([text], { type: "text/markdown;charset=utf-8" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = name;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  // The browser has started reading the blob by now; revoking at once can cancel it in some browsers.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  note.textContent = "Downloaded " + name + " (" + text.length + " characters).";
+}
+
+async function refreshDocument(jobId) {
+  // The pane is asked again on the job poll's own tick, so a skeleton becomes its page as soon as that
+  // page completes. The fragment is replaced whole: its page numbers, order and states are the
+  // server's answer, not an accumulation this page keeps.
+  if (state.document === null || state.document.job !== jobId) return;
+  let response;
+  try {
+    response = await fetch("/api/read/" + encodeURIComponent(jobId) + "/document", { cache: "no-store" });
+  } catch (error) {
+    setDocumentNote("The document pane could not be read: " + error.message);
+    return;
+  }
+  if (state.document === null || state.document.job !== jobId) return;
+  byId("document-pane").classList.remove("hidden");
+  if (response.status === 503) {
+    state.document.absent = true;
+    byId("document").replaceChildren();
+    setDocumentNote(documentAbsent());
+    setDocumentControls(true);
+    return;
+  }
+  if (!response.ok) {
+    setDocumentNote("The document answered " + response.status + ".");
+    return;
+  }
+  const fragment = await response.text();
+  if (state.document === null || state.document.job !== jobId) return;
+  state.document.completed = Number(response.headers.get("X-Document-Completed") || 0);
+  const total = response.headers.get("X-Document-Pages");
+  state.document.total = total === null ? null : Number(total);
+  insertDocument(byId("document"), fragment);
+  setDocumentNote(documentNote(state.document.completed, state.document.total, state.document.finished));
+  setDocumentControls(true);
+}
+
+
 function renderRefusal(refusal) {
   hideResults();
   byId("refusal-kind").textContent = refusal.kind;
@@ -557,31 +762,31 @@ function renderReading(reading) {
   renderFeatureRows(reading);
   byId("engine-identity").classList.remove("hidden");
   byId("engine-value").textContent = reading.engine;
-  byId("pages").classList.remove("hidden");
-  byId("pages-summary").textContent =
-    reading.page_count + " page" + (reading.page_count === 1 ? "" : "s") + ", " +
-    reading.character_count + " characters read by this lane.";
-  const container = byId("page-texts");
-  container.replaceChildren();
-  for (const page of reading.pages) {
-    const article = node("article", null, "page");
-    const head = document.createElement("header");
-    head.textContent = "page " + page.number;
-    article.append(head, node("pre", page.text));
-    container.append(article);
-  }
 }
 
 function renderJob(job, jobId) {
   renderTimeline(job.stage, job.outcome, job.warmed_ms);
   settleRaw(job, jobId);
-  if (job.stage !== "done") return;
+  if (job.stage !== "done") {
+    // The job poll's own tick is the document pane's tick: a skeleton is replaced by its page as soon
+    // as that page completes (ADR-0014), not only when the whole read ends.
+    refreshDocument(jobId);
+    return;
+  }
   stopPolling();
   byId("upload-button").disabled = false;
   // An OCR read charges the day's budget, so the standing limits are stale the moment a job finishes.
   loadStatus();
+  if (job.outcome === "refused") {
+    // Nothing was read, so there is no document to show; the refusal panel is the whole answer.
+    state.document = null;
+    renderRefusal(job.refusal);
+    return;
+  }
+  if (state.document !== null) state.document.finished = true;
+  // One last ask, so the finished Reading -- not the last mid-read view -- is what the visitor sees.
+  refreshDocument(jobId);
   if (job.outcome === "read") renderReading(job.reading);
-  else if (job.outcome === "refused") renderRefusal(job.refusal);
   else if (job.outcome === "failed") renderFailure(job.failure);
   else showError("the job finished without an outcome");
 }
@@ -595,6 +800,7 @@ function stopPolling() {
 
 function poll(jobId) {
   state.job = jobId;
+  state.document = documentModel(jobId);
   stopPolling();
   const ask = async () => {
     try {
@@ -655,8 +861,16 @@ async function upload(file) {
   closeRawStream();
   state.raw = null;
   state.rawJob = null;
+  state.document = null;
+  // The download is named after the document the visitor chose; the job answer is not asked for it.
+  state.fileName = file.name || "";
   byId("raw").classList.add("hidden");
   byId("raw-copy-note").textContent = "";
+  byId("document-pane").classList.add("hidden");
+  byId("document").replaceChildren();
+  byId("document-note").textContent = "";
+  byId("document-action-note").textContent = "";
+  setDocumentControls(false);
   state.seen = new Set();
   byId("upload-button").disabled = true;
   renderTimeline("queued", null, null);
@@ -692,6 +906,8 @@ byId("upload-form").addEventListener("submit", (event) => {
 });
 
 byId("raw-copy").addEventListener("click", copyRaw);
+byId("document-copy").addEventListener("click", copyDocument);
+byId("document-download").addEventListener("click", downloadDocument);
 
 loadStatus();
 </script>
