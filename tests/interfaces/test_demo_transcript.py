@@ -319,13 +319,24 @@ WORKER_ADDRESS = "<the OCR worker>"
 
 
 class _ScannedProbe:
-    """The text-layer probe's answer for a scan: one page, no text, so the OCR lane is chosen."""
+    """The text-layer probe's answer for a scan: no text on a page, so the OCR lane is chosen.
+
+    ``pages`` is how many pages the document has, which is what routing measures and what the OCR budget
+    is charged for, so a two-page scan is two pages of spend.
+    """
+
+    def __init__(self, pages: int = 1) -> None:
+        self._pages = pages
 
     def measure(self, content: bytes):
         from finepdfs.domain.document import TextLayerQuality
 
         return TextLayerQuality(
-            page_count=1, pages_with_text=0, character_count=0, garbled_ratio=0.0, image_dominated_pages=1
+            page_count=self._pages,
+            pages_with_text=0,
+            character_count=0,
+            garbled_ratio=0.0,
+            image_dominated_pages=self._pages,
         )
 
 
@@ -345,19 +356,20 @@ class _Lease:
         return None
 
 
-def _scanned_pdf() -> bytes:
-    """A real one-page PDF the adapter can render, so the worker sees the real streaming request."""
+def _scanned_pdf(pages: int = 1) -> bytes:
+    """A real PDF the adapter can render, so the worker sees the real streaming request."""
     import pymupdf
 
     document = pymupdf.open()
-    page = document.new_page(width=595, height=842)
-    page.insert_text((72, 120), "a synthetic scan")
+    for number in range(1, pages + 1):
+        page = document.new_page(width=595, height=842)
+        page.insert_text((72, 120), f"a synthetic scan, page {number}")
     content = document.tobytes()
     document.close()
     return content
 
 
-def _server_app(worker: FakeStreamingWorker, limits=None):
+def _server_app(worker: FakeStreamingWorker, limits=None, probe=None):
     """The real use case over the shared fake worker, composed exactly as the demo server composes it."""
     from finepdfs.application.curate import CurationPolicy
     from finepdfs.application.demo_read import DemoRead
@@ -376,7 +388,7 @@ def _server_app(worker: FakeStreamingWorker, limits=None):
     )
     ledger = InMemoryGateLedger(clock=datetime.now, limits=settings)
     read = DemoRead(
-        probe=_ScannedProbe(),
+        probe=probe if probe is not None else _ScannedProbe(),
         engines={},
         policy=CurationPolicy(engine_name=OCR_ENGINE, routing=OcrRoutingPolicy()),
         gates=SpendGatePolicy(settings),
@@ -570,6 +582,45 @@ def test_closing_the_connection_mid_stream_charges_exactly_one_read_and_its_page
     assert final["outcome"] == "read"
     assert (usage.reads_in_window, usage.ocr_pages_today) == (1, 1)
     assert len(worker.bodies) == 1
+
+
+def test_an_admitted_multi_page_ocr_read_charges_exactly_its_pages_once() -> None:
+    """ADR-0014's budget: one read against the window and one charge per OCR page, charged once."""
+    with FakeStreamingWorker() as worker:
+        app, ledger = _server_app(worker, probe=_ScannedProbe(pages=2))
+        with _serving(app) as base:
+            _, answer = _post(base, _scanned_pdf(2))
+            final = _wait_for_done(base, answer["job"])
+
+    usage = ledger.usage("127.0.0.1")
+    assert final["outcome"] == "read"
+    assert (usage.reads_in_window, usage.ocr_pages_today) == (1, 2), "two pages read, two pages charged"
+    assert [page["number"] for page in final["reading"]["pages"]] == [1, 2]
+    assert len(worker.bodies) == 2, "one request per page, and no page paid for twice"
+
+
+def test_a_multi_page_read_disconnected_mid_stream_still_charges_every_page_once() -> None:
+    """A disconnect is not a refund, for any page of the read (ADR-0012): the GPU read them all."""
+    hold = threading.Event()
+    with FakeStreamingWorker(hold_after=3, hold=hold) as worker:
+        app, ledger = _server_app(worker, probe=_ScannedProbe(pages=2))
+        with _serving(app) as base:
+            _, answer = _post(base, _scanned_pdf(2))
+            job = answer["job"]
+
+            subscriber = _Subscriber(base, job)
+            seen: list = []
+            while len([event for event in seen if event[0] == "delta"]) < 2:
+                seen.append(subscriber.next_event())
+            subscriber.close()
+
+            hold.set()
+            final = _wait_for_done(base, job)
+
+    usage = ledger.usage("127.0.0.1")
+    assert final["outcome"] == "read"
+    assert (usage.reads_in_window, usage.ocr_pages_today) == (1, 2), "the visitor leaving refunds nothing"
+    assert len(worker.bodies) == 2, "the read was not restarted for the visitor who left"
 
 
 def test_a_failed_read_ends_the_stream_with_its_kind_lane_and_redacted_words() -> None:
