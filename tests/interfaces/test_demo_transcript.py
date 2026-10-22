@@ -183,6 +183,31 @@ def test_a_quiet_read_sends_a_heartbeat_and_a_finished_read_ends_the_stream() ->
     assert b'event: done\ndata: {"outcome": "read"}\n\n' in written
 
 
+def test_a_zero_heartbeat_interval_never_spins_the_writer() -> None:
+    """A zero interval would return from ``wait`` at once and flood the connection: the loop still waits."""
+
+    class _Quiet:
+        """Nothing new and never finished, so the only thing that can pace the loop is its own wait."""
+
+        def __init__(self) -> None:
+            self.waits: list[float] = []
+
+        def since(self, cursor: int) -> tuple[list, bool]:
+            return [], len(self.waits) >= 3
+
+        def wait(self, cursor: int, seconds: float) -> tuple[list, bool]:
+            self.waits.append(seconds)
+            return [], False
+
+    transcript = _Quiet()
+    written: list[bytes] = []
+
+    stream_events(transcript, written.append, heartbeat_seconds=0)
+
+    assert len(transcript.waits) == 3, "the loop ended rather than spinning forever"
+    assert all(seconds > 0 for seconds in transcript.waits), "a zero interval must not make the loop spin"
+
+
 # -- the job's ownership of its transcript ------------------------------------------------------------
 
 
@@ -682,4 +707,24 @@ def test_a_quiet_read_heartbeats_and_an_unknown_id_is_a_plain_http_error() -> No
             assert "finished" in finished["error"]
     finally:
         app.close()
+
+
+def test_a_zero_transcript_ceiling_answers_410_with_that_absence_not_a_finish() -> None:
+    """With no transcript kept at all, a queued or running job is told so, not told that it finished."""
+    reader = _StreamingReader([], require_sink=True)
+    app = _reader_app(reader, DemoLimits(transcript_bytes=0))
+    try:
+        with _serving(app) as base:
+            _, answer = _post(base, b"%PDF-1.7 an upload")
+            job = answer["job"]
+            assert reader.started.wait(5), "the read is running, and it has not finished"
+
+            status, absent = _http_error(base + f"/api/read/{job}/events")
+
+            assert status == 410
+            assert "keeps no raw transcript" in absent["error"], "the absence is stated as itself"
+            assert "ceiling is 0 bytes" in absent["error"]
+            assert "finished" not in absent["error"], "the read is still running; it has not finished"
+    finally:
+        reader.release.set()
 

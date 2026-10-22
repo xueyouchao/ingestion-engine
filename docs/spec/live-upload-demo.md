@@ -181,8 +181,9 @@ and for a truncated page that replay is the `truncated` marker first and then th
 loss is named before the text that survived it; a subscriber that is already watching hears the marker
 where the drop happened, because that is when it happened. A browser closes the stream on `done` instead
 of reconnecting. An unknown job id is `404`; a job that already finished is `410`, because its
-transcript is not kept -- the job answer was always the final answer, and it never carries a transcript,
-a page of HTML or a `data-page`.
+transcript is not kept -- and with a ceiling of `0` the events endpoint answers `410` for every job,
+naming that ceiling rather than a finish a queued or running read has not reached. The job answer was
+always the final answer, and it never carries a transcript, a page of HTML or a `data-page`.
 
 **The document is its own answer, so the data answer is never markup.** `GET /api/read/<id>/document`
 returns one inert HTML fragment: an `<article class="document">` holding one `<section
@@ -199,8 +200,9 @@ and a `.md` download named after the uploaded file. Rendering is server-side and
 one fragment, at one call site.
 
 **Rendering is allowlisted and pinned, and absence is stated.** A markdown renderer and a sanitizer,
-pinned exactly in the optional `[demo]` extra and in `docs/demo/requirements-demo.txt` and imported
-lazily, turn Page Text into that fragment against a structural allowlist: headings, paragraphs, lists,
+pinned exactly in the optional `[demo]` extra and in `docs/demo/requirements-demo.txt`, carried by the
+`dev` extra too so the offline gate that runs the pane's tests installs them, and imported lazily, turn
+Page Text into that fragment against a structural allowlist: headings, paragraphs, lists,
 emphasis, code blocks, blockquotes, rules and tables with `colspan`/`rowspan` and nothing else -- no
 `script`, `style`, `iframe`, `img` or `a`, no `on*` attribute and no URL, so model output cannot create
 navigation or run. Math stays text. Without the extra the document endpoint answers `503` in words
@@ -221,9 +223,11 @@ Routing Decision when one was made:
   daily budget, an unreadable upload, or a full queue. A refusal names its kind and its reason in
   words, and carries no page text.
 - **failed** -- a lane was chosen and the read failed. The reason is the underlying error's own words,
-  never a summary, and the kind is the exclusion kind `failed` that already exists. A page whose stream
-  the worker ended before the page was finished -- the model's own token limit above all -- is this
-  outcome and not a short page: the exported Page Text is never the part the worker managed to send. Those words are shown
+  never a summary, and the kind is the exclusion kind `failed` that already exists. A page the worker
+  cut off before it was finished -- the model's own token limit above all, whether the answer arrived as
+  a stream or in one blocking call -- is this outcome and not a short page: the exported Page Text is
+  never the part the worker managed to send. The blocking answer a batch run reads carries the same
+  `finish_reason`, so the guard is on that path too, not only on a stream. Those words are shown
   through the composition root's redactor, because an engine's transport error quotes the address it
   called and the job answer is public: no address and no bearer reaches the page. No Reading is recorded,
   because the demo records nothing anywhere.
@@ -359,8 +363,9 @@ the stream's shape -- is a setting. The defaults live in `domain/demo.py` and th
   transcript at all and the events endpoint then answers `410`) -- what a page's ring buffer holds before it
   is marked `truncated`;
 - stream heartbeat (`FINEPDFS_DEMO_HEARTBEAT_SECONDS`, flag `--heartbeat-seconds`, default 15 s of quiet,
-  the unit being seconds) -- how long a silent `text/event-stream` waits before it writes a heartbeat
-  comment.
+  the unit being seconds, and it must be positive) -- how long a silent `text/event-stream` waits before
+  it writes a heartbeat comment; a zero or negative interval is refused when the demo starts, because it
+  would never block and the stream loop would spin.
 
 The console script takes one flag per limit (`--page-cap`, `--rate-limit-reads`,
 `--rate-limit-window-seconds`, `--daily-ocr-pages`, `--upload-bytes`, `--queue-depth`, `--warm-timeout`,

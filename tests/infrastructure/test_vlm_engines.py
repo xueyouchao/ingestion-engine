@@ -44,6 +44,7 @@ from finepdfs.infrastructure.engines.pdf_document import MuPDFDocument
 from finepdfs.infrastructure.engines.subprocess_support import CommandResult
 from finepdfs.infrastructure.engines.vlm_chat import (
     ChatEndpoint,
+    StreamedAnswer,
     VlmChatTransport,
     VlmTransportError,
     strip_model_preamble,
@@ -197,6 +198,10 @@ class GatedTransport(VlmChatTransport):
         if failure is not None:
             raise failure
         return f"page {page_number} text"
+
+    def complete_answer_with_page_image(self, prompt: str, image_png: bytes) -> StreamedAnswer:
+        """The same fake answer with the worker's reason, which the batch path now checks."""
+        return StreamedAnswer(text=self.complete_with_page_image(prompt, image_png), finish_reason="stop")
 
 
 class CountingTransport(GatedTransport):

@@ -52,6 +52,11 @@ from finepdfs.domain.document import PageText
 # its socket must not pin a handler thread forever.
 STREAM_WRITE_TIMEOUT_SECONDS = 30.0
 
+# The shortest a quiet stream ever sleeps. The demo limit refuses a non-positive heartbeat, so this is
+# defence in depth: a zero interval handed in anyway would make ``wait`` return at once and the loop
+# below would spin, writing heartbeats as fast as the socket takes them.
+MINIMUM_WAIT_SECONDS = 0.01
+
 HEARTBEAT = b": heartbeat\n\n"
 
 
@@ -233,9 +238,11 @@ def stream_events(
 
     This is the bounded loop behind the SSE endpoint: it blocks only for one heartbeat interval at a
     time, never for the whole read, so a subscriber that stops reading is noticed by the writer's own
-    socket timeout and a finished read always ends the loop.
+    socket timeout and a finished read always ends the loop. The interval never goes below
+    ``MINIMUM_WAIT_SECONDS``, so even a zero handed in here cannot turn the loop into a spin.
     """
     cursor = 0
+    wait_seconds = max(heartbeat_seconds, MINIMUM_WAIT_SECONDS)
     while True:
         events, finished = transcript.since(cursor)
         for event in events:
@@ -245,6 +252,6 @@ def stream_events(
             cursor = max(cursor, event.sequence)
         if finished:
             return
-        events, finished = transcript.wait(cursor, heartbeat_seconds)
+        events, finished = transcript.wait(cursor, wait_seconds)
         if not events and not finished:
             write(HEARTBEAT)

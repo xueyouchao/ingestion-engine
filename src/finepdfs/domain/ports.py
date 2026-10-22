@@ -42,8 +42,13 @@ class ReadSink(Protocol):
     An engine that streams reports to it. ``on_delta`` is the engine's own output as it arrives, exactly
     as the worker emitted it and before any normalization -- echoed prompt, fences and layout markers
     included -- tagged with the 1-based page number it belongs to, because a read may have several pages
-    in flight at once. ``on_page`` is the Page Text the read exports for a page, as soon as that page is
-    complete: the same text a batch run would export for the same page.
+    in flight at once. Those calls come from whichever engine threads are reading those pages, so a sink
+    may be called by several threads at the same time and has to be safe to. It may also be called after
+    the read has failed: a request a worker has already started cannot be cancelled, so deltas for a
+    sibling page keep arriving until that page's stream ends, and a sink that has given up must ignore
+    them rather than treat them as a second answer (ADR-0010, ADR-0014). ``on_page`` is called on the
+    thread that started the read, in page-number order, and carries the Page Text the read exports for a
+    page as soon as that page is complete: the same text a batch run would export for the same page.
 
     An engine with nothing arriving page by page -- the text layer, a local command that writes its
     results when it finishes -- has nothing to report and calls neither of those, so a caller that
@@ -55,6 +60,10 @@ class ReadSink(Protocol):
     routing's answer, and no engine knows it. It is part of this protocol rather than a second one
     because the same watcher answers both questions; a watcher with no use for the count implements it
     as a no-op.
+
+    A sink written against the older two-method contract -- ``on_delta`` and ``on_page`` only -- does not
+    have this method at all, and the caller asks for the count only from a sink that provides it, so an
+    informational extra never turns a readable upload into a failed job.
     """
 
     def on_delta(self, page_number: int, text: str) -> None: ...

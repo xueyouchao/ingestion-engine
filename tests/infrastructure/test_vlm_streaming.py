@@ -8,8 +8,10 @@ PaddleOCR-VL page, so no network and no model are needed and the wire is the rea
 
 from __future__ import annotations
 
+import http.client
 import json
 from pathlib import Path
+from typing import Self
 
 import pymupdf
 import pytest
@@ -149,6 +151,90 @@ def test_a_stream_that_ends_before_done_is_a_named_failure() -> None:
     assert "[DONE]" in str(raised.value)
 
 
+def test_a_heartbeat_or_another_field_is_not_mistaken_for_a_frame() -> None:
+    """A worker keeping its connection alive sends comments and fields; only ``data:`` carries an answer."""
+    frames = recorded_frames()
+    noisy = [*frames[:2], ": keep-alive", "event: message", "id: 42", *frames[2:]]
+    with FakeStreamingWorker(noisy) as worker:
+        deltas: list[str] = []
+
+        answer = _transport(worker).stream_with_page_image(OCR_PROMPT, _page_png(), deltas.append)
+
+    assert deltas == RECORDED_DELTAS, "a comment or another SSE field reached the caller as a delta"
+    assert answer.text == RECORDED_ANSWER
+
+
+def test_a_sink_that_breaks_is_not_reported_as_the_worker_breaking_its_stream() -> None:
+    """The caller's own failure is the caller's: a visitor who went away is not a worker fault (ADR-0012)."""
+
+    def gone(_delta: str) -> None:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    with FakeStreamingWorker() as worker, pytest.raises(BrokenPipeError):
+        _transport(worker).stream_with_page_image(OCR_PROMPT, _page_png(), gone)
+
+
+class _BreakingResponse:
+    """A response whose stream fails while it is being read, the way a cut connection does."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def __iter__(self):
+        raise self._error
+
+
+def test_a_connection_cut_mid_stream_is_named_as_the_transport_failure_it_is() -> None:
+    """``IncompleteRead`` is an ``HTTPException``, not an ``OSError``, and it is still this read's failure."""
+    incomplete = http.client.IncompleteRead(b"data: {", None)
+    transport = VlmChatTransport(
+        ChatEndpoint(base_url="http://worker.invalid/v1", model="m"),
+        opener=lambda _request, timeout: _BreakingResponse(incomplete),
+    )
+
+    with pytest.raises(VlmTransportError, match="broke its stream off") as raised:
+        transport.stream_with_page_image(OCR_PROMPT, _page_png(), lambda _delta: None)
+
+    assert "http://worker.invalid/v1/chat/completions" in str(raised.value)
+
+
+def test_a_frame_whose_content_is_parts_is_the_text_of_those_parts() -> None:
+    """Some servers answer a stream with content parts; the page is their text, as in the blocking answer."""
+    frames = [
+        'data: {"choices": [{"index": 0, "delta": {"content": '
+        '[{"type": "text", "text": "half "}, {"type": "text", "text": "a page"}]}, "finish_reason": null}]}',
+        'data: {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}',
+        "data: [DONE]",
+    ]
+    with FakeStreamingWorker(frames) as worker:
+        deltas: list[str] = []
+
+        answer = _transport(worker).stream_with_page_image(OCR_PROMPT, _page_png(), deltas.append)
+
+    assert answer.text == "half a page"
+    assert deltas == ["half a page"]
+
+
+def test_a_frame_whose_content_is_neither_text_nor_parts_is_a_named_failure() -> None:
+    """Content that is not page text is named for what arrived, never silently an empty page."""
+    frames = [
+        'data: {"choices": [{"index": 0, "delta": {"content": [{"type": "image_url", "image_url": {}}]}}]}',
+        "data: [DONE]",
+    ]
+    with FakeStreamingWorker(frames) as worker, pytest.raises(VlmTransportError) as raised:
+        _transport(worker).stream_with_page_image(OCR_PROMPT, _page_png(), lambda _delta: None)
+
+    assert "content is not text" in str(raised.value)
+    assert "image_url" in str(raised.value), "the failure names what arrived"
+
+
+
 class RecordingSink:
     """A caller watching the read: every delta it was handed, and every page it was handed."""
 
@@ -256,6 +342,19 @@ def test_a_page_whose_stream_ended_with_stop_is_the_whole_page_it_always_was() -
 
     assert extracted.pages[0].text == PAGE_TEXT, "a stop is a whole page, and normalization is unchanged"
     assert sink.pages == list(extracted.pages)
+
+
+def test_a_blocking_answer_cut_off_at_the_token_limit_fails_the_read_too() -> None:
+    """The batch path has no stream, but its answer carries the same reason: a cut page is never exported."""
+    with FakeStreamingWorker(blocking_finish_reason="length") as worker:
+        engine = PaddleOcrVlEngine(transport=_transport(worker), dpi=72)
+
+        with pytest.raises(PaddleOcrError) as raised:
+            engine.extract(Document(name="https://a.example/scan.pdf", content=_scanned_pdf()))
+
+    words = str(raised.value)
+    assert "page 1" in words, "the failure names the page that was cut off"
+    assert "token limit" in words and "length" in words, "the failure names the truncation and its reason"
 
 
 def test_a_worker_that_fails_mid_stream_fails_the_read_and_reports_no_page() -> None:
