@@ -16,6 +16,13 @@ engine variable is introduced.
 Nothing here imports a vendor SDK, and nothing here writes: the uploaded bytes are opened from memory,
 the page images are rendered from memory, and no file, page or job outlives the process.
 
+The rendered document is its own answer, never a field of the job JSON (ADR-0014):
+``GET /api/read/<id>/document`` returns the inert HTML fragment described in ``demo_document`` and
+``demo_render``, and ``GET /api/read/<id>/document.md`` returns the same Page Texts in the corpus's one
+projection, as the download the page offers. ``GET /api/read/<id>`` keeps exactly its old shape, so the
+data answer never carries markup. Both document answers need the page store's pages and nothing else; the
+fragment additionally needs the pinned ``[demo]`` pair and answers ``503`` in words when it is absent.
+
     finepdfs-live-demo --host 127.0.0.1 --port 8766
     PYTHONPATH=src python -m finepdfs.interfaces.demo_server
 """
@@ -39,7 +46,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from finepdfs.application.curate import CurationPolicy
-from finepdfs.application.demo_read import DemoRead
+from finepdfs.application.demo_read import DemoRead, Reading
 from finepdfs.domain.demo import (
     DEFAULT_DAILY_OCR_PAGE_BUDGET,
     DEFAULT_PAGE_CAP,
@@ -53,6 +60,7 @@ from finepdfs.domain.demo import (
     SpendGatePolicy,
 )
 from finepdfs.domain.ports import GateLedger, OcrEndpointProbe, OcrEngine
+from finepdfs.domain.publishing import document_markdown
 from finepdfs.infrastructure.compute.endpoint import ENGINE_API_KEY, ENGINE_BASE_URL
 from finepdfs.infrastructure.compute.ocr_endpoint import endpoint_probe
 from finepdfs.infrastructure.compute.providers import (
@@ -64,8 +72,10 @@ from finepdfs.infrastructure.demo.ledger import InMemoryGateLedger
 from finepdfs.infrastructure.engines.environment import ENGINE_COMMAND, engine_config, ocr_routing_policy
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextLayerProbe
 from finepdfs.infrastructure.engines.registry import PADDLEOCR_VL_ENGINE, build_engines, engine_endpoint
+from finepdfs.interfaces.demo_document import DocumentStore, DocumentView
 from finepdfs.interfaces.demo_jobs import QueueFull, Reader, ReadingJob, ReadingQueue
 from finepdfs.interfaces.demo_page import DEMO_HTML
+from finepdfs.interfaces.demo_render import RenderingNotInstalled, render_document
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +242,9 @@ class DemoApp:
         self._engine_name = engine_name if engine_name is not None else configured_engine(self._environ)
         self._ledger = ledger if ledger is not None else InMemoryGateLedger(clock=clock, limits=self._limits)
         self._use_case = self._demo_read()
+        # The document pane's store (ADR-0014): a page a lane reports mid-read lands here, keyed by job
+        # id, while a finished job's own Reading stays the authority for what the pane shows.
+        self._documents = DocumentStore()
         self._queue = ReadingQueue(read if read is not None else self._use_case.read, self._limits)
 
     @property
@@ -261,6 +274,33 @@ class DemoApp:
     @property
     def queue(self) -> ReadingQueue:
         return self._queue
+
+    @property
+    def documents(self) -> DocumentStore:
+        """The document pane's per-job store: where a mid-read lane reports each completed Page Text."""
+        return self._documents
+
+    def document(self, job_id: str) -> DocumentView | None:
+        """One job's document as the pane sees it, or ``None`` for an id this process never issued.
+
+        A finished Reading is authoritative: its pages are the accepted Page Texts, in their original
+        1-based numbers. While a job is still reading, the store holds the pages completed so far and
+        the page count the job has learned, so the pane can show a skeleton for the rest. A failed read
+        keeps the pages that completed before it, because the store is not cleared by the outcome.
+        """
+        job = self.job(job_id)
+        if job is None:
+            return None
+        reading = job.outcome if isinstance(job.outcome, Reading) else None
+        if reading is not None:
+            pages = tuple(sorted(reading.pages, key=lambda page: page.number))
+            return DocumentView(pages=pages, total=len(pages))
+        return self._documents.view(job_id)
+
+    def markdown(self, job_id: str) -> str | None:
+        """The `.md` the pane offers for download: the shared projection, or ``None`` for no such job."""
+        document = self.document(job_id)
+        return None if document is None else document_markdown(document.pages)
 
     def status(self) -> dict[str, Any]:
         """What the page is allowed to know: the limits, the budget, the depth, and whether OCR is wired.
@@ -412,14 +452,56 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/status":
             self._json(self.app.status(), head=head)
         elif path.startswith("/api/read/"):
-            job_id = path.removeprefix("/api/read/")
-            job = self.app.job(job_id)
-            if job is None:
-                self._error(HTTPStatus.NOT_FOUND, f"no job {job_id}", head=head)
-                return
-            self._json(job.as_json(), head=head)
+            self._answer_read(path.removeprefix("/api/read/"), head=head)
         else:
             self._error(HTTPStatus.NOT_FOUND, "not found", head=head)
+
+    def _answer_read(self, target: str, *, head: bool) -> None:
+        """The job answer, the document fragment and the document's markdown are three separate answers.
+
+        ``GET /api/read/<id>`` keeps exactly the shape it had: reading data, never HTML. The document is
+        its own endpoint (ADR-0014), so a caller that wants the rendered pane asks for it and a caller
+        that wants data is never handed markup.
+        """
+        if target.endswith("/document.md"):
+            self._document_markdown(target.removesuffix("/document.md"), head=head)
+        elif target.endswith("/document"):
+            self._document_html(target.removesuffix("/document"), head=head)
+        else:
+            job = self.app.job(target)
+            if job is None:
+                self._error(HTTPStatus.NOT_FOUND, f"no job {target}", head=head)
+                return
+            self._json(job.as_json(), head=head)
+
+    def _document_html(self, job_id: str, *, head: bool) -> None:
+        """The inert fragment for one job; an explicit absence when the ``[demo]`` extra is missing."""
+        document = self.app.document(job_id)
+        if document is None:
+            self._error(HTTPStatus.NOT_FOUND, f"no job {job_id}", head=head)
+            return
+        try:
+            fragment = render_document(document)
+        except RenderingNotInstalled as absent:
+            self._error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                str(absent),
+                head=head,
+                rendering="not-installed",
+            )
+            return
+        extra = {"X-Document-Completed": str(document.completed)}
+        if document.total is not None:
+            extra["X-Document-Pages"] = str(document.total)
+        self._html(fragment, head=head, extra=extra)
+
+    def _document_markdown(self, job_id: str, *, head: bool) -> None:
+        """The `.md` the pane offers for download: the same projection the corpus writes."""
+        markdown = self.app.markdown(job_id)
+        if markdown is None:
+            self._error(HTTPStatus.NOT_FOUND, f"no job {job_id}", head=head)
+            return
+        self._body("text/markdown; charset=utf-8", markdown, head=head)
 
     def _read(self) -> None:
         """Take one upload: refuse what cannot be read, otherwise queue it and answer its job id.
@@ -495,10 +577,21 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         if not head:
             self.wfile.write(body)
 
-    def _html(self, body: str, *, head: bool) -> None:
+    def _html(self, body: str, *, head: bool, extra: Mapping[str, str] | None = None) -> None:
+        self._body("text/html; charset=utf-8", body, head=head, extra=extra)
+
+    def _body(
+        self,
+        content_type: str,
+        body: str,
+        *,
+        head: bool,
+        extra: Mapping[str, str] | None = None,
+    ) -> None:
+        """One text answer -- the page, the fragment, the markdown -- with its type and its headers."""
         encoded = body.encode("utf-8")
         self.send_response(HTTPStatus.OK)
-        self._headers("text/html; charset=utf-8", len(encoded))
+        self._headers(content_type, len(encoded), extra=extra)
         self.end_headers()
         if not head:
             self.wfile.write(encoded)
@@ -507,19 +600,23 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         """A refusal, in the one shape every refused answer has: its kind and the visitor's sentence."""
         self._json({"outcome": "refused", "refusal": {"kind": kind, "reason": reason}}, status=status)
 
-    def _error(self, status: HTTPStatus, message: str, *, head: bool = False) -> None:
-        body = json.dumps({"error": message}, ensure_ascii=False).encode("utf-8")
+    def _error(
+        self, status: HTTPStatus, message: str, *, head: bool = False, **extra: str
+    ) -> None:
+        body = json.dumps({"error": message, **extra}, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self._headers("application/json; charset=utf-8", len(body))
         self.end_headers()
         if not head:
             self.wfile.write(body)
 
-    def _headers(self, content_type: str, length: int) -> None:
+    def _headers(self, content_type: str, length: int, *, extra: Mapping[str, str] | None = None) -> None:
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in (extra or {}).items():
+            self.send_header(name, value)
 
 
 def _client(handler: BaseHTTPRequestHandler) -> str:
