@@ -91,9 +91,10 @@ class RawTranscript:
         with self._lock:
             if self._finished:
                 return
-            kept = self._tail(raw) if len(raw) > self._ceiling else text
-            dropped = len(raw) - len(kept.encode("utf-8"))
-            while self._page_bytes[page_number] + len(kept.encode("utf-8")) > self._ceiling:
+            kept = self._tail(raw)
+            kept_bytes = len(kept.encode("utf-8"))
+            dropped = len(raw) - kept_bytes
+            while self._page_bytes[page_number] + kept_bytes > self._ceiling:
                 oldest = self._page_events[page_number].popleft()
                 gone = self._events.pop(oldest)
                 size = len(str(gone.data["text"]).encode("utf-8"))
@@ -104,7 +105,7 @@ class RawTranscript:
             if kept:
                 event = self._append("delta", {"page": page_number, "text": kept})
                 self._page_events[page_number].append(event.sequence)
-                self._page_bytes[page_number] += len(kept.encode("utf-8"))
+                self._page_bytes[page_number] += kept_bytes
             self._lock.notify_all()
 
     def on_page(self, page: PageText) -> None:
@@ -160,7 +161,8 @@ class RawTranscript:
     # -- internals, all under ``self._lock`` ---------------------------------------------------------
 
     def _tail(self, raw: bytes) -> str:
-        """The newest ``ceiling`` bytes of one delta, decoded without inventing characters."""
+        """The newest ``ceiling`` bytes of one delta -- the whole delta when it is shorter -- decoded
+        without inventing characters, or nothing at all when the ceiling keeps no text."""
         if self._ceiling == 0:
             return ""
         return raw[-self._ceiling :].decode("utf-8", errors="ignore")
