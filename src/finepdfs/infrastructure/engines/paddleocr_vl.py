@@ -30,22 +30,24 @@ WHOLE_PAGE_REASONS = frozenset({None, "stop"})
 
 
 def whole_page(page_number: int, answer: StreamedAnswer) -> str:
-    """The text of a streamed page that ended whole, or the error naming why this one did not.
+    """The text of a page that ended whole, or the error naming why this one did not.
 
     ``StreamedAnswer.finish_reason`` is the worker's own word for why it stopped, so it is the one thing
     that tells a page cut off at the model's token limit from a page the model finished: dropping it would
-    export a truncated page as Page Text, into both the corpus and the demo's document pane. A reason the
-    worker did not name, or a ``stop``, is a whole page and changes nothing.
+    export a truncated page as Page Text, into both the corpus and the demo's document pane. Both ways of
+    asking carry it -- the streaming call and the blocking answer ``complete_answer_with_page_image``
+    returns -- so both paths are checked here, and a batch run cannot export a cut page the demo would
+    refuse. A reason the worker did not name, or a ``stop``, is a whole page and changes nothing.
     """
     if answer.finish_reason in WHOLE_PAGE_REASONS:
         return answer.text
     if answer.finish_reason == "length":
         raise PaddleOcrError(
-            f"page {page_number} ended its stream at the model's token limit "
+            f"page {page_number} ended at the model's token limit "
             f"(the worker finished with finish_reason 'length'): the page is not whole and was not exported"
         )
     raise PaddleOcrError(
-        f"page {page_number} ended its stream with finish_reason {answer.finish_reason!r}, "
+        f"page {page_number} ended with finish_reason {answer.finish_reason!r}, "
         "not the end of a whole page: it was not exported"
     )
 
@@ -108,14 +110,18 @@ class PaddleOcrVlEngine:
         recalled.
 
         A ``sink`` makes this a streaming read (ADR-0014): each page is asked for as a server-sent event
-        stream and its deltas reach ``sink.on_delta`` verbatim from the worker's thread, tagged with the
-        page they belong to, while each completed Page Text reaches ``sink.on_page`` here, on this thread
-        and in page-number order. Normalization is still ``strip_model_preamble``, applied once to a
-        page's whole stream, so the page a watcher is shown completing is exactly the page a batch run
-        would export. A stream the worker ended before the page was finished -- the model's token limit
-        above all -- fails this read with ``PaddleOcrError`` naming the page and the reason the worker
-        gave, because a page cut short is not a page. Without a sink nothing streams and the answer is
-        the one this read has always given.
+        stream and its deltas reach ``sink.on_delta`` verbatim, tagged with the page they belong to, from
+        whichever engine thread is reading that page. Pages overlap, so a sink is called from several
+        threads at once, and a page request that is already in flight when this read fails cannot be
+        cancelled: its deltas keep arriving until its stream ends, after the read has answered. Each
+        completed Page Text reaches ``sink.on_page`` here, on the reading thread and in page-number
+        order. Normalization is still ``strip_model_preamble``, applied once to a page's whole stream,
+        so the page a watcher is shown completing is exactly the page a batch run would export. A page
+        the worker ended before it was finished -- the model's token limit above all -- fails this read
+        with ``PaddleOcrError`` naming the page and the reason the worker gave, because a page cut
+        short is not a page. Without a sink nothing streams: the page is asked for in one blocking
+        answer and its ``finish_reason`` is checked the same way, so a batch run cannot export a page
+        the demo would refuse.
         """
         pages: dict[int, PageText] = {}
         in_flight: deque[tuple[int, Future[str]]] = deque()
@@ -132,7 +138,7 @@ class PaddleOcrVlEngine:
         def request(page_number: int, image: bytes) -> Future[str]:
             """One page's request: a stream a watcher can follow, or the blocking call of every batch run."""
             if sink is None:
-                return self.calls.submit(self._transport.complete_with_page_image, OCR_PROMPT, image)
+                return self.calls.submit(self._complete_page, page_number, image)
 
             def stream() -> str:
                 answer = self._transport.stream_with_page_image(
@@ -162,6 +168,16 @@ class PaddleOcrVlEngine:
                     queued.cancel()
                 raise
         return ExtractedDocument(pages=tuple(pages[number] for number in sorted(pages)), engine=self._identity)
+
+    def _complete_page(self, page_number: int, image: bytes) -> str:
+        """One page's blocking answer, checked against the worker's own reason for stopping.
+
+        The blocking answer carries ``finish_reason`` just as a stream does, so the batch path -- the one
+        every corpus run takes -- is routed through ``whole_page`` too instead of trusting the body of a
+        page the worker cut off.
+        """
+        answer = self._transport.complete_answer_with_page_image(OCR_PROMPT, image)
+        return whole_page(page_number, answer)
 
 
 @dataclass(frozen=True, slots=True)

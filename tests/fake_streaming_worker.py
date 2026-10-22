@@ -35,10 +35,21 @@ def content_of(frames: Sequence[str]) -> str:
     return "".join(text for text in map(delta_text, frames) if text)
 
 
+def _payload(frame: str) -> str:
+    """One wire line's payload: what followed ``data:``, or nothing for any other line.
+
+    A server writes ``data: {...}`` and ``data:{...}`` for the same frame, so the space is optional and
+    the one place that reads a frame strips the prefix and the whitespace together -- otherwise a frame
+    that omitted the space would come back out with the prefix written twice.
+    """
+    line = frame.strip()
+    return line.removeprefix("data:").strip() if line.startswith("data:") else ""
+
+
 def delta_text(frame: str) -> str | None:
     """One frame's content delta, or ``None`` for a frame that carries no text."""
-    payload = frame.removeprefix("data:").strip()
-    if payload == "[DONE]":
+    payload = _payload(frame)
+    if not payload or payload == "[DONE]":
         return None
     choices = json.loads(payload).get("choices") or []
     if not choices:
@@ -50,9 +61,16 @@ def delta_text(frame: str) -> str | None:
 class FakeStreamingWorker:
     """A worker that records every request and answers a page from the recording.
 
-    ``fail_after`` makes the worker fail the stream it is sending: it writes that many frames, then an
-    ``error`` frame in the server's own words and no ``[DONE]``, the way a worker whose model falls over
-    mid-read does. ``end_after`` is the quieter version -- the connection closes with no reason given.
+    The stream it sends is the recording's own frames, verbatim, and it always ends with ``DONE_FRAME``
+    unless a test asked for one of the two ways to end early: ``fail_after`` makes the worker fail the
+    stream it is sending -- it writes that many frames, then an ``error`` frame in the server's own words
+    and no ``[DONE]``, the way a worker whose model falls over mid-read does -- and ``end_after`` is the
+    quieter version, where the connection closes with no reason given. A frame in ``frames`` that is not
+    a ``data:`` line is written as the SSE line it is, so a comment heartbeat or an ``event:`` field can
+    be part of the wire a test replays.
+
+    ``blocking_finish_reason`` is the ``finish_reason`` the blocking answer carries, so a test can show
+    what the batch path does with an answer the worker cut off at the model's token limit.
     """
 
     def __init__(
@@ -64,6 +82,7 @@ class FakeStreamingWorker:
         hold_after: int | None = None,
         hold: threading.Event | None = None,
         error: str = "the worker ran out of memory",
+        blocking_finish_reason: str = "stop",
     ) -> None:
         self.frames = list(frames if frames is not None else recorded_frames())
         self.requests: list[dict] = []
@@ -72,6 +91,7 @@ class FakeStreamingWorker:
         self._hold_after = hold_after
         self._hold = hold
         self._error = error
+        self._blocking_finish_reason = blocking_finish_reason
         worker = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -114,13 +134,26 @@ class FakeStreamingWorker:
                 return
             if index == self._end_after:
                 return
-            self._write(handler, frame.removeprefix("data: ").strip())
+            line = frame.strip()
+            payload = _payload(frame)
+            if line.startswith("data:"):
+                # The stream ends once, below, with the frame this module declares: a recording's own
+                # [DONE] is not sent twice, and a frame with no payload is not a frame.
+                if payload and payload != "[DONE]":
+                    self._write(handler, payload)
+            elif line:
+                self._write_line(handler, line)  # a comment heartbeat or an event/id field, verbatim
+        self._write_line(handler, DONE_FRAME)
 
     def _answer_blocking(self, handler: BaseHTTPRequestHandler) -> None:
         payload = json.dumps(
             {
                 "choices": [
-                    {"index": 0, "message": {"role": "assistant", "content": content_of(self.frames)}, "finish_reason": "stop"}
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content_of(self.frames)},
+                        "finish_reason": self._blocking_finish_reason,
+                    }
                 ]
             }
         ).encode("utf-8")
@@ -132,8 +165,13 @@ class FakeStreamingWorker:
 
     @staticmethod
     def _write(handler: BaseHTTPRequestHandler, payload: str) -> None:
-        """One SSE frame: the ``data:`` line, then the blank line that ends the frame."""
-        handler.wfile.write(f"data: {payload}\n\n".encode())
+        """One ``data:`` frame: the payload, then the blank line that ends the frame."""
+        FakeStreamingWorker._write_line(handler, f"data: {payload}")
+
+    @staticmethod
+    def _write_line(handler: BaseHTTPRequestHandler, line: str) -> None:
+        """One SSE line as a server writes it, then the blank line that ends the event."""
+        handler.wfile.write(f"{line}\n\n".encode())
         handler.wfile.flush()
 
     def stop(self) -> None:
