@@ -42,11 +42,13 @@ from finepdfs.application.curate import CurationPolicy
 from finepdfs.application.demo_read import DemoRead
 from finepdfs.domain.demo import (
     DEFAULT_DAILY_OCR_PAGE_BUDGET,
+    DEFAULT_HEARTBEAT_SECONDS,
     DEFAULT_PAGE_CAP,
     DEFAULT_POLL_INTERVAL_SECONDS,
     DEFAULT_QUEUE_DEPTH,
     DEFAULT_RATE_LIMIT_READS,
     DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+    DEFAULT_TRANSCRIPT_BYTES,
     DEFAULT_UPLOAD_BYTES,
     DEFAULT_WARM_TIMEOUT_SECONDS,
     DemoLimits,
@@ -66,6 +68,11 @@ from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextLayerProbe
 from finepdfs.infrastructure.engines.registry import PADDLEOCR_VL_ENGINE, build_engines, engine_endpoint
 from finepdfs.interfaces.demo_jobs import QueueFull, Reader, ReadingJob, ReadingQueue
 from finepdfs.interfaces.demo_page import DEMO_HTML
+from finepdfs.interfaces.demo_transcript import (
+    STREAM_WRITE_TIMEOUT_SECONDS,
+    RawTranscript,
+    stream_events,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +99,9 @@ QUEUE_DEPTH = "FINEPDFS_DEMO_QUEUE_DEPTH"
 BACK_LINK = "FINEPDFS_DEMO_BACK_LINK"
 WARM_TIMEOUT_SECONDS = "FINEPDFS_DEMO_WARM_TIMEOUT_SECONDS"
 POLL_INTERVAL_SECONDS = "FINEPDFS_DEMO_POLL_INTERVAL_SECONDS"
+# ADR-0014's raw transcript: the per-page byte ceiling and the quiet stream's heartbeat interval.
+TRANSCRIPT_BYTES = "FINEPDFS_DEMO_TRANSCRIPT_BYTES"
+HEARTBEAT_SECONDS = "FINEPDFS_DEMO_HEARTBEAT_SECONDS"
 
 # What the upload accepts: a PDF, and the formats a scanner or a phone writes. A picture of a page is a
 # page to this demo -- the reader takes one page per image frame, an image-only page has no text layer,
@@ -167,6 +177,12 @@ _LIMITS = {
     "poll_interval_seconds": _Limit(
         POLL_INTERVAL_SECONDS, DEFAULT_POLL_INTERVAL_SECONDS, whole=False, noun="seconds between readiness polls"
     ),
+    "transcript_bytes": _Limit(
+        TRANSCRIPT_BYTES, DEFAULT_TRANSCRIPT_BYTES, whole=True, noun="raw transcript bytes kept per page"
+    ),
+    "heartbeat_seconds": _Limit(
+        HEARTBEAT_SECONDS, DEFAULT_HEARTBEAT_SECONDS, whole=False, noun="seconds between stream heartbeats"
+    ),
 }
 
 # The console script's overrides, named for the limit they set rather than for the variable, so an
@@ -180,6 +196,8 @@ _FLAGS = {
     "queue_depth": "--queue-depth",
     "warm_timeout_seconds": "--warm-timeout",
     "poll_interval_seconds": "--poll-interval",
+    "transcript_bytes": "--transcript-bytes",
+    "heartbeat_seconds": "--heartbeat-seconds",
 }
 
 
@@ -232,7 +250,9 @@ class DemoApp:
         self._engine_name = engine_name if engine_name is not None else configured_engine(self._environ)
         self._ledger = ledger if ledger is not None else InMemoryGateLedger(clock=clock, limits=self._limits)
         self._use_case = self._demo_read()
-        self._queue = ReadingQueue(read if read is not None else self._use_case.read, self._limits)
+        self._queue = ReadingQueue(
+            read if read is not None else self._use_case.read, self._limits, redact=self._redact
+        )
 
     @property
     def limits(self) -> DemoLimits:
@@ -283,6 +303,10 @@ class DemoApp:
     def job(self, job_id: str) -> ReadingJob | None:
         """One job's standing, or ``None`` for an id this process never issued or no longer keeps."""
         return self._queue.get(job_id)
+
+    def transcript(self, job_id: str) -> RawTranscript | None:
+        """The raw transcript of a job that is running or waiting; ``None`` once it finished."""
+        return self._queue.transcript(job_id)
 
     def close(self) -> None:
         """Stop the queue's worker; the process is ending or the test is done."""
@@ -411,6 +435,9 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             self._html(self.app.page_html(), head=head)
         elif path == "/api/status":
             self._json(self.app.status(), head=head)
+        elif path.startswith("/api/read/") and path.endswith("/events"):
+            job_id = path.removeprefix("/api/read/").removesuffix("/events")
+            self._events(job_id, head=head)
         elif path.startswith("/api/read/"):
             job_id = path.removeprefix("/api/read/")
             job = self.app.job(job_id)
@@ -464,6 +491,46 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             self._refuse(HTTPStatus.SERVICE_UNAVAILABLE, full.kind, full.reason)
             return
         self._json({"job": job.id}, status=HTTPStatus.ACCEPTED)
+
+    def _events(self, job_id: str, *, head: bool = False) -> None:
+        """Stream one job's raw transcript (ADR-0014), or answer honestly when there is none left.
+
+        The store exists only while the Reading does, so an id this process never issued is a ``404`` and
+        a job that already finished -- whose transcript was freed -- is a ``410``. Neither is answered
+        with an empty stream that a browser would keep reconnecting to. The stream itself is bounded by
+        the store's own finish and by a write timeout, so a client that stops reading releases the thread.
+        """
+        if head:
+            self._error(HTTPStatus.METHOD_NOT_ALLOWED, "HEAD is not served for the events stream", head=True)
+            return
+        transcript = self.app.transcript(job_id)
+        if transcript is None:
+            if self.app.job(job_id) is None:
+                self._error(HTTPStatus.NOT_FOUND, f"no job {job_id}")
+            else:
+                self._error(
+                    HTTPStatus.GONE,
+                    f"the read {job_id} has finished; its raw transcript is not kept",
+                )
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        try:
+            self.connection.settimeout(STREAM_WRITE_TIMEOUT_SECONDS)
+            stream_events(transcript, self._write_chunk, self.app.limits.heartbeat_seconds)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            # The visitor closed the tab or stopped reading. The Reading is unaffected and already
+            # charged (ADR-0012): a disconnect is not a refund.
+            return
+
+    def _write_chunk(self, chunk: bytes) -> None:
+        self.wfile.write(chunk)
+        self.wfile.flush()
 
     def _declared_length(self) -> int | None:
         raw = self.headers.get("Content-Length")
