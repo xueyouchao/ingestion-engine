@@ -17,11 +17,37 @@ from finepdfs.domain.ports import ReadSink
 from finepdfs.infrastructure.engines.concurrency import DEFAULT_ENGINE_CONCURRENCY, EngineCalls
 from finepdfs.infrastructure.engines.pdf_document import MuPDFDocument
 from finepdfs.infrastructure.engines.subprocess_support import CommandRunner, SubprocessRunner, require_success
-from finepdfs.infrastructure.engines.vlm_chat import VlmChatTransport, strip_model_preamble
+from finepdfs.infrastructure.engines.vlm_chat import StreamedAnswer, VlmChatTransport, strip_model_preamble
 
 OCR_PROMPT = "OCR:"
 TABLE_PROMPT = "Table Recognition:"
 PIPELINE_VERSION = "v1.6"
+
+# The reasons a streamed page can be whole: the worker stopped of its own accord, or named no reason at
+# all before ``[DONE]``. Anything else -- the model's token limit above all -- ended the stream before the
+# page was finished, which is a failed read and never a short page.
+WHOLE_PAGE_REASONS = frozenset({None, "stop"})
+
+
+def whole_page(page_number: int, answer: StreamedAnswer) -> str:
+    """The text of a streamed page that ended whole, or the error naming why this one did not.
+
+    ``StreamedAnswer.finish_reason`` is the worker's own word for why it stopped, so it is the one thing
+    that tells a page cut off at the model's token limit from a page the model finished: dropping it would
+    export a truncated page as Page Text, into both the corpus and the demo's document pane. A reason the
+    worker did not name, or a ``stop``, is a whole page and changes nothing.
+    """
+    if answer.finish_reason in WHOLE_PAGE_REASONS:
+        return answer.text
+    if answer.finish_reason == "length":
+        raise PaddleOcrError(
+            f"page {page_number} ended its stream at the model's token limit "
+            f"(the worker finished with finish_reason 'length'): the page is not whole and was not exported"
+        )
+    raise PaddleOcrError(
+        f"page {page_number} ended its stream with finish_reason {answer.finish_reason!r}, "
+        "not the end of a whole page: it was not exported"
+    )
 
 
 def paddleocr_detail(base: str, dpi: int) -> str:
@@ -86,7 +112,10 @@ class PaddleOcrVlEngine:
         page they belong to, while each completed Page Text reaches ``sink.on_page`` here, on this thread
         and in page-number order. Normalization is still ``strip_model_preamble``, applied once to a
         page's whole stream, so the page a watcher is shown completing is exactly the page a batch run
-        would export. Without a sink nothing streams and the answer is the one this read has always given.
+        would export. A stream the worker ended before the page was finished -- the model's token limit
+        above all -- fails this read with ``PaddleOcrError`` naming the page and the reason the worker
+        gave, because a page cut short is not a page. Without a sink nothing streams and the answer is
+        the one this read has always given.
         """
         pages: dict[int, PageText] = {}
         in_flight: deque[tuple[int, Future[str]]] = deque()
@@ -109,7 +138,10 @@ class PaddleOcrVlEngine:
                 answer = self._transport.stream_with_page_image(
                     OCR_PROMPT, image, lambda delta: sink.on_delta(page_number, delta)
                 )
-                return answer.text
+                # The worker's own reason for stopping is part of the page: a stream that ended at the
+                # model's token limit fails this read here, in the worker's words, rather than exporting
+                # the part of the page it managed to send.
+                return whole_page(page_number, answer)
 
             return self.calls.submit(stream)
 
