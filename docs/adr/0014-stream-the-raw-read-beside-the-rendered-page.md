@@ -84,6 +84,12 @@ command engine (Docling, MinerU) writes process output, not page tokens, and sho
 states which case it is in -- "this lane does not stream" -- rather than animating a fake one or
 inventing a token cadence.
 
+**A page the worker cut off is a failure, not a short page.** A streamed page ends when the worker says
+it did: `stop`, or nothing named before `[DONE]`, is a whole page; any other `finish_reason` -- the
+model's token limit above all -- ended the stream before the page was finished, and the read fails in
+the worker's own words rather than exporting what arrived. A truncated page in both panes would be a
+reading the product does not have.
+
 **The transcript is ephemeral and bounded.** The job keeps a per-page ring buffer of raw deltas (a
 ceiling in bytes, truncation marked explicitly with a `truncated` event rather than silently dropping
 the start), serves it over `text/event-stream` at `/api/read/<id>/events`, and frees it when the job

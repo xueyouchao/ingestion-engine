@@ -148,7 +148,8 @@ DEMO_HTML = """<!doctype html>
   }
   .raw-controls button, .document-controls button { padding: .3rem .7rem; font-size: .85rem; }
   /* The rendered pane is the product: the document's own typography, not the transcribed look of the
-     raw pane. Every element here is in the server's allowlist; nothing is styled that cannot arrive. */
+     raw transcript pane. Every element here is in the server's allowlist; nothing is styled that cannot
+     arrive. */
   #document { overflow-x: auto; }
   .document-page { border: 1px solid var(--line); border-radius: .4rem; padding: .65rem .75rem; margin: .7rem 0; }
   .document-page-number {
@@ -173,8 +174,8 @@ DEMO_HTML = """<!doctype html>
     color: var(--muted);
   }
   .skeleton, .document-empty, .unread { color: var(--muted); font-style: italic; }
-  /* The raw pane is the worker's own output, so it is monospaced and scrollable: markers and broken
-     table syntax must look unlike the published page the right-hand pane will carry. */
+  /* The raw transcript pane is the worker's own output, so it is monospaced and scrollable: markers and
+     broken table syntax must look unlike the published page the right-hand pane will carry. */
   .raw-page { border: 1px solid var(--line); border-radius: .4rem; padding: .55rem .7rem; margin: .55rem 0; }
   .raw-page header { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
   .raw-truncated { color: var(--warn); font-size: .85rem; margin: .35rem 0 .1rem; }

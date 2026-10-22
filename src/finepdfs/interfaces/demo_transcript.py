@@ -1,6 +1,6 @@
 """The live demo's raw transcript: what the worker emitted, kept bounded and served as events.
 
-ADR-0014 makes the raw read proof of work, not evidence. A Reading hands every delta to this store from
+ADR-0014 makes the raw transcript proof of work, not evidence. A Reading hands every delta to this store from
 the engine-call pool thread; the store keeps a per-page ring buffer with a byte ceiling and lets any
 number of subscribers replay it from the beginning. Nothing here is written to disk, put in the job
 answer or cited, and the job that owns it releases it the moment the Reading finishes.
@@ -29,8 +29,8 @@ starts, and a finished Reading's store is detached by the job that held it, so t
 replay.
 
 Delta text is the worker's own output and is never markup: a subscriber shows it with ``textContent`` (or
-an equivalent escape) and never parses it as HTML. The same rule the ADR gives the raw pane lives here,
-beside the event names a renderer reads.
+an equivalent escape) and never parses it as HTML. The same rule the ADR gives the raw transcript lives
+here, beside the event names a renderer reads.
 """
 
 from __future__ import annotations

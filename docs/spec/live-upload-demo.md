@@ -155,14 +155,14 @@ Nothing under `src/` imports Modal, and nothing under `src/` imports `deploy/`.
 ADR-0014 amends the page, not the flow: no declared state, record, page record, chunk, chunk id or search
 index moves because of it. The page shows three panes in one row -- **1. What you sent** (the upload
 control, the statements about the worker and retention, and the stage timeline with the measured
-warm-up), **2. What came back: the raw read** (the transcript, arriving), and **3. What would be
-published: the rendered document** (the page projection). A wide screen puts them side by side; anything
+warm-up), **2. What came back: the raw transcript** (the worker's own output, arriving), and **3. What
+would be published: the rendered document** (the page projection). A wide screen puts them side by side; anything
 narrower stacks them in that order. The Routing Decision, the Engine Identity, and the refusal and
 failure panels keep their wording and follow the row. The sixth user story is unchanged, and its "page
 text the chosen lane actually read" is the rendered pane's own source: the pane and the corpus show the
 same Page Texts, rendered.
 
-**The raw pane is the transport's verbatim output, set as text.** It holds exactly what the worker
+**The raw transcript pane is the transport's verbatim output, set as text.** It holds exactly what the worker
 emitted -- echoed prompt, fences, layout markers, before any normalization -- tagged with its 1-based
 page because several pages are in flight at once, and the page sets it with `textContent`: a delta is
 never parsed as HTML, and neither pane has a link or an image. A lane with nothing to stream (the text
@@ -176,18 +176,23 @@ cumulative `dropped_bytes`, never as a silently shortened page. The job frees it
 finishes. `GET /api/read/<id>/events` answers `text/event-stream; charset=utf-8` with `Cache-Control:
 no-store` and five event names -- `delta`, `truncated`, `page` (the Page Text that page exported),
 `error` (kind, lane and the job answer's own redacted words) and terminal `done` -- plus a heartbeat
-comment while the read is quiet. A subscriber that connects late, or reloads, is replayed from the start
-(for a truncated page: the marker, then the retained tail), and a browser closes the stream on `done`
-instead of reconnecting. An unknown job id is `404`; a job that already finished is `410`, because its
+comment while the read is quiet. A subscriber that connects late, or reloads, is replayed from the start,
+and for a truncated page that replay is the `truncated` marker first and then the retained tail, so the
+loss is named before the text that survived it; a subscriber that is already watching hears the marker
+where the drop happened, because that is when it happened. A browser closes the stream on `done` instead
+of reconnecting. An unknown job id is `404`; a job that already finished is `410`, because its
 transcript is not kept -- the job answer was always the final answer, and it never carries a transcript,
 a page of HTML or a `data-page`.
 
 **The document is its own answer, so the data answer is never markup.** `GET /api/read/<id>/document`
 returns one inert HTML fragment: an `<article class="document">` holding one `<section
-class="document-page" data-page="N" data-state="complete|pending">` per page, in the original 1-based
-numeric order, each complete page introduced by its `Page N` separator; a page still being read is a
-skeleton and a delta never reaches it, so a half-read table cannot appear. `X-Document-Completed` and
-(once the job knows it) `X-Document-Pages` say how much of it is real. `GET /api/read/<id>/document.md`
+class="document-page" data-page="N" data-state="complete|pending|unread">` per page, in the original
+1-based numeric order, each complete page introduced by its `Page N` separator; a page still being read
+is a `pending` skeleton and a delta never reaches it, so a half-read table cannot appear, and after a
+failed read the pages it never reached are `unread` and say they were not read -- a failed read is not
+still reading. The page numbers are the pages the job has plus the count routing gave it: with no count,
+no page the read never reported is drawn and no page after the last one is invented.
+`X-Document-Completed` and (once the job knows it) `X-Document-Pages` say how much of it is real. `GET /api/read/<id>/document.md`
 returns the same completed pages as the markdown the corpus writes -- the one shared projection
 (`document_markdown`), byte for byte -- and needs no optional dependency. The pane offers a copy button
 and a `.md` download named after the uploaded file. Rendering is server-side and the page inserts exactly
@@ -216,7 +221,9 @@ Routing Decision when one was made:
   daily budget, an unreadable upload, or a full queue. A refusal names its kind and its reason in
   words, and carries no page text.
 - **failed** -- a lane was chosen and the read failed. The reason is the underlying error's own words,
-  never a summary, and the kind is the exclusion kind `failed` that already exists. Those words are shown
+  never a summary, and the kind is the exclusion kind `failed` that already exists. A page whose stream
+  the worker ended before the page was finished -- the model's own token limit above all -- is this
+  outcome and not a short page: the exported Page Text is never the part the worker managed to send. Those words are shown
   through the composition root's redactor, because an engine's transport error quotes the address it
   called and the job answer is public: no address and no bearer reaches the page. No Reading is recorded,
   because the demo records nothing anywhere.
@@ -297,7 +304,7 @@ survives a restart.
 
 The page states, before the upload control, that the document is sent to a rented GPU to be read and that
 nothing is kept after the response. Once a Reading starts, that pane also carries the stage timeline with
-the measured warm-up, the two panes beside it carry the raw read and the rendered document as they
+the measured warm-up, the two panes beside it carry the raw transcript and the rendered document as they
 arrive, and the Routing Decision with its features and thresholds and the Engine Identity that produced
 the text follow the row -- with a refusal or failure panel in place of the reading when there is none.
 
@@ -387,7 +394,7 @@ The seams, highest first:
 2. **The page asset's own JavaScript** (`tests/interfaces/test_demo_page_raw.py`,
    `tests/interfaces/test_demo_page_document.py`). The page's pure functions run under Node when Node is
    present and are skipped when it is not, fed the answers the real server produced: a delta reaches the
-   raw pane as text, a reload converges on the job's answer, a skeleton is replaced by its page, and the
+   raw transcript pane as text, a reload converges on the job's answer, a skeleton is replaced by its page, and the
    three panes are in the visitor's reading order. The rest -- one `innerHTML`, no second status
    vocabulary -- is a static assertion on the asset, because the suite has no browser.
 3. **The use case** (`tests/application/test_demo_read.py`). `DemoRead` with hand-written fakes, the way
