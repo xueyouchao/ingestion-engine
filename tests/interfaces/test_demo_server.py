@@ -88,7 +88,7 @@ class FakeEngine:
     def identity(self) -> EngineIdentity:
         return self._identity
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink=None) -> ExtractedDocument:
         self.calls += 1
         return ExtractedDocument(pages=tuple(self._pages), engine=self._identity)
 
@@ -128,7 +128,7 @@ class RecordingReader:
     def __init__(self) -> None:
         self.calls: list[bytes] = []
 
-    def __call__(self, content, client, on_stage, name):
+    def __call__(self, content, client, on_stage, name, sink=None):
         self.calls.append(content)
         on_stage("routing")
         on_stage("done")
@@ -142,7 +142,7 @@ class BlockingReader:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def __call__(self, content, client, on_stage, name):
+    def __call__(self, content, client, on_stage, name, sink=None):
         on_stage("routing")
         self.started.set()
         assert self.release.wait(5), "the test never released the reading"
@@ -869,9 +869,9 @@ def test_a_visitor_name_that_is_not_latin_1_still_arrives() -> None:
             super().__init__()
             self.names: list[str] = []
 
-        def __call__(self, content, client, on_stage, name):
+        def __call__(self, content, client, on_stage, name, sink=None):
             self.names.append(name)
-            return super().__call__(content, client, on_stage, name)
+            return super().__call__(content, client, on_stage, name, sink)
 
     reader = Naming()
     app = DemoApp(environ={}, read=reader)
@@ -890,9 +890,9 @@ def test_a_name_that_was_never_encoded_is_kept_as_it_is() -> None:
             super().__init__()
             self.names: list[str] = []
 
-        def __call__(self, content, client, on_stage, name):
+        def __call__(self, content, client, on_stage, name, sink=None):
             self.names.append(name)
-            return super().__call__(content, client, on_stage, name)
+            return super().__call__(content, client, on_stage, name, sink)
 
     reader = Naming()
     app = DemoApp(environ={}, read=reader)
@@ -912,9 +912,9 @@ def test_a_percent_escape_in_a_name_is_decoded_like_the_page_meant_it() -> None:
             super().__init__()
             self.names: list[str] = []
 
-        def __call__(self, content, client, on_stage, name):
+        def __call__(self, content, client, on_stage, name, sink=None):
             self.names.append(name)
-            return super().__call__(content, client, on_stage, name)
+            return super().__call__(content, client, on_stage, name, sink)
 
     reader = Naming()
     app = DemoApp(environ={}, read=reader)

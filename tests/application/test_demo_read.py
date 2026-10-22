@@ -74,7 +74,7 @@ class FakeEngine:
     def identity(self) -> EngineIdentity:
         return self._identity
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink=None) -> ExtractedDocument:
         self.calls += 1
         if self._spends is not None:
             self._spends(self._spends_seconds)

@@ -26,6 +26,8 @@ from uuid import uuid4
 from finepdfs.application.demo_read import FailedReading, Reading, ReadingOutcome, Refusal
 from finepdfs.domain.demo import DemoLimits, ReadingStage
 from finepdfs.domain.ocr import OcrRoutingPolicy
+from finepdfs.domain.ports import ReadSink
+from finepdfs.interfaces.demo_transcript import RawTranscript
 
 # What the page receives when an upload finds the single slot and its waiting list taken. ``busy`` is the
 # RefusalKind the domain already names for "the demo is reading someone else's document".
@@ -36,8 +38,9 @@ QUEUE_FULL_REASON = "the demo is reading someone else's document right now; try 
 # outlive a reload; it is not job state the demo promises to keep across a restart (ADR-0012).
 DEFAULT_RETAINED_JOBS = 32
 
-# A reader is what ``DemoRead.read`` is: bytes, a client identity, a stage reporter and a document name.
-Reader = Callable[[bytes, str, Callable[[ReadingStage], None], str], ReadingOutcome]
+# A reader is what ``DemoRead.read`` is: bytes, a client identity, a stage reporter, a document name and
+# the sink the job's raw transcript is written to (``None`` when the transcript is switched off).
+Reader = Callable[[bytes, str, Callable[[ReadingStage], None], str, ReadSink | None], ReadingOutcome]
 
 
 class QueueFull(Exception):
@@ -95,6 +98,9 @@ class _Entry:
     stage: ReadingStage = "queued"
     outcome: ReadingOutcome | None = None
     failure: dict[str, str] | None = None
+    # The job's raw transcript (ADR-0014): created with the job and released the moment it finishes, so
+    # the store never outlives the bytes it describes.
+    transcript: RawTranscript | None = None
 
 
 class ReadingQueue:
@@ -105,9 +111,15 @@ class ReadingQueue:
         read: Reader,
         limits: DemoLimits | None = None,
         retained_jobs: int = DEFAULT_RETAINED_JOBS,
+        *,
+        redact: Callable[[str], str] = str,
     ) -> None:
         self._read = read
-        self._depth = (limits if limits is not None else DemoLimits()).queue_depth
+        settings = limits if limits is not None else DemoLimits()
+        self._depth = settings.queue_depth
+        # Zero means the operator switched the transcript off: no store, and the events endpoint says so.
+        self._transcript_bytes = settings.transcript_bytes
+        self._redact = redact
         self._retained_jobs = max(retained_jobs, 0)
         self._lock = Condition()
         self._waiting: deque[_Entry] = deque()
@@ -128,7 +140,13 @@ class ReadingQueue:
             waiting = len(self._waiting)
             if (waiting or self._running is not None) and waiting >= self._depth:
                 raise QueueFull()
-            entry = _Entry(id=uuid4().hex, name=name, content=content, client=client)
+            entry = _Entry(
+                id=uuid4().hex,
+                name=name,
+                content=content,
+                client=client,
+                transcript=RawTranscript(self._transcript_bytes) if self._transcript_bytes > 0 else None,
+            )
             self._waiting.append(entry)
             self._start_worker()
             self._lock.notify()
@@ -144,6 +162,16 @@ class ReadingQueue:
                 return _snapshot(self._running)
             return self._finished.get(job_id)
 
+    def transcript(self, job_id: str) -> RawTranscript | None:
+        """The running or waiting job's raw transcript, or ``None`` once it finished or was forgotten."""
+        with self._lock:
+            for entry in self._waiting:
+                if entry.id == job_id:
+                    return entry.transcript
+            if self._running is not None and self._running.id == job_id:
+                return self._running.transcript
+            return None
+
     def depth(self) -> dict[str, int]:
         """How many Readings are running and how many wait behind them, for the status answer."""
         with self._lock:
@@ -153,6 +181,10 @@ class ReadingQueue:
         """Stop taking work and let the worker thread go; the process is ending or the test is done."""
         with self._lock:
             self._closed = True
+            for entry in self._waiting:
+                if entry.transcript is not None:
+                    entry.transcript.finish(None)
+                entry.transcript = None
             self._waiting.clear()
             self._lock.notify_all()
             worker = self._worker
@@ -177,13 +209,16 @@ class ReadingQueue:
                 self._running = entry
 
             outcome, failure = self._read_one(entry)
+            self._finish_transcript(entry, outcome, failure)
 
             with self._lock:
                 entry.outcome = outcome
                 entry.failure = failure
                 entry.stage = "done"
-                # The bytes were this Reading's, not the queue's: nothing about the document outlives it.
+                # The bytes and the transcript were this Reading's, not the queue's: nothing about the
+                # document outlives it (ADR-0014 keeps the transcript ephemeral).
                 entry.content = b""
+                entry.transcript = None
                 self._running = None
                 self._remember(_snapshot(entry))
                 self._lock.notify_all()
@@ -206,9 +241,25 @@ class ReadingQueue:
                 entry.stage = stage
 
         try:
-            return self._read(entry.content, entry.client, on_stage, entry.name), None
+            return self._read(entry.content, entry.client, on_stage, entry.name, entry.transcript), None
         except Exception as error:  # the queue must answer, whatever the composition did
             return None, {"kind": "failed", "lane": "", "reason": _words(error)}
+
+    def _finish_transcript(
+        self,
+        entry: _Entry,
+        outcome: ReadingOutcome | None,
+        failure: dict[str, str] | None,
+    ) -> None:
+        """Tell the transcript how the read ended, in the same words the job answer will carry."""
+        transcript = entry.transcript
+        if transcript is None:
+            return
+        if failure is not None:
+            transcript.fail(failure["kind"], failure.get("lane", ""), self._redact(failure["reason"]))
+        elif isinstance(outcome, FailedReading):
+            transcript.fail(outcome.kind, outcome.lane, self._redact(outcome.reason))
+        transcript.finish("failed" if failure is not None else _outcome(outcome))
 
     def _remember(self, job: ReadingJob) -> None:
         """Keep the most recent finished jobs, forgetting the oldest beyond that bound."""
