@@ -54,3 +54,14 @@ def test_the_demo_requirements_record_the_working_environment() -> None:
     assert "docling" not in " ".join(_project()["dependencies"]).lower(), (
         "recording the demo environment must not make the base install model-bearing"
     )
+
+
+def test_the_dev_extra_installs_the_pair_the_offline_gate_renders_with() -> None:
+    """CI installs only `.[dev]` and runs the whole suite: the pane's tests need the pair with it."""
+    extras = _project()["optional-dependencies"]
+
+    assert extras["demo"] == ["markdown-it-py==4.2.0", "nh3==0.3.7"]
+    for pin in ("markdown-it-py==4.2.0", "nh3==0.3.7"):
+        assert pin in extras["dev"], f"the dev extra must carry {pin}, or CI errors instead of rendering"
+    base = " ".join(_project()["dependencies"]).lower()
+    assert "markdown-it-py" not in base and "nh3" not in base, "the base install keeps no HTML stack"

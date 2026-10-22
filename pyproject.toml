@@ -10,9 +10,11 @@ requires-python = ">=3.11"
 dependencies = ["cocoindex==1.0.25", "pymupdf==1.28.2"]
 
 [project.optional-dependencies]
-# The dev extra installs the tools the CI lint gate runs, so `pip install -e '.[dev]'` is enough to
-# reproduce every check locally.
-dev = ["pytest>=8", "ruff>=0.6"]
+# The dev extra installs everything CI's gates run, so `pip install -e '.[dev]'` is enough to reproduce
+# every check locally: pytest and ruff for the lint and test gates, and the pinned renderer/sanitizer
+# pair the offline suite renders the document pane through, because CI installs nothing else. The base
+# install still carries neither of the two, so it keeps no HTML stack.
+dev = ["pytest>=8", "ruff>=0.6", "markdown-it-py==4.2.0", "nh3==0.3.7"]
 # Docling is the CPU OCR Engine the demo runbook validates (README "Engines"). It is pinned and
 # optional on purpose: the base install stays model-free and the offline suite needs no weights. Docling
 # pulls torch as its own dependency; the observed working CPU environment -- docling 2.140.0, torch
@@ -28,11 +30,14 @@ language = ["fasttext-numpy2-wheel>=0.9.2"]
 # pinned exactly because the fragment is a golden-tested answer: a different renderer or sanitizer can
 # change markup for the same Page Text, so a bump is a reviewed change with the pane's evidence. They
 # are optional on purpose -- only the document endpoint imports them, lazily -- so the base install
-# keeps no HTML stack. Without them `GET /api/read/<id>/document` answers `503` in words ("rendering is
-# not installed: ...", `rendering: not-installed`) rather than rendering unescaped text, while
-# `GET /api/read/<id>/document.md` keeps answering: the markdown is the corpus's own projection and
-# needs no optional dependency. Observed working: markdown-it-py 4.2.0, nh3 0.3.7 (a wheel; no Rust
-# toolchain needed). Also pinned in docs/demo/requirements-demo.txt.
+# keeps no HTML stack. This extra is the deployment's way of installing them without the dev tools; the
+# `dev` extra carries the same two pins so CI, which installs only `.[dev]` and runs the whole offline
+# suite, renders the pane instead of erroring on a missing import. Without them `GET
+# /api/read/<id>/document` answers `503` in words ("rendering is not installed: ...", `rendering:
+# not-installed`) rather than rendering unescaped text, while `GET /api/read/<id>/document.md` keeps
+# answering: the markdown is the corpus's own projection and needs no optional dependency. Observed
+# working: markdown-it-py 4.2.0, nh3 0.3.7 (a wheel; no Rust toolchain needed). Also pinned in
+# docs/demo/requirements-demo.txt.
 demo = ["markdown-it-py==4.2.0", "nh3==0.3.7"]
 
 [project.scripts]
