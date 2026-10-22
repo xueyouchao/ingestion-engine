@@ -250,6 +250,31 @@ def _stages() -> tuple[list[str], Callable[[str], None]]:
     return seen, seen.append
 
 
+class TwoMethodSink:
+    """A watcher written against the contract before ``on_page_count`` existed: the two methods it had."""
+
+    def __init__(self) -> None:
+        self.deltas: list[tuple[int, str]] = []
+        self.pages: list[PageText] = []
+
+    def on_delta(self, page_number: int, text: str) -> None:
+        self.deltas.append((page_number, text))
+
+    def on_page(self, page: PageText) -> None:
+        self.pages.append(page)
+
+
+def test_a_sink_from_before_the_page_count_still_gets_its_reading() -> None:
+    """The count is an informational extra: a sink that never had that method is not a failed job."""
+    demo, _fakes = _demo(HEALTHY)
+    sink = TwoMethodSink()
+
+    outcome = demo.read(b"%PDF-1.7 healthy bytes", "10.0.0.1", lambda stage: None, sink=sink)
+
+    assert isinstance(outcome, Reading), "an absent on_page_count is never a failure of the read"
+    assert [page.text for page in outcome.pages] == [page.text for page in _pages("native")]
+
+
 def test_a_healthy_upload_is_read_by_the_text_layer_and_never_touches_the_ocr_engine() -> None:
     demo, fakes = _demo(HEALTHY)
 

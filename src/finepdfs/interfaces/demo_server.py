@@ -149,7 +149,7 @@ _URL = re.compile(r"https?://[^\s'\"<>]+")
 
 
 class DemoLimitError(ValueError):
-    """A demo limit in the environment is not the kind of number that limit takes."""
+    """A demo limit in the environment is not a number that limit can take."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,12 +158,15 @@ class _Limit:
 
     ``noun`` earns its place twice: it is the help text of the flag that sets this limit, and it is the
     phrase an operator reads in the runbook, so the two cannot describe the same number differently.
+    ``positive`` is for a limit where zero is not a smaller setting but a broken one: a heartbeat of zero
+    never blocks, so it would turn the events loop into a spin that floods the connection.
     """
 
     variable: str
     default: float
     whole: bool
     noun: str
+    positive: bool = False
 
 
 _LIMITS = {
@@ -194,7 +197,11 @@ _LIMITS = {
         TRANSCRIPT_BYTES, DEFAULT_TRANSCRIPT_BYTES, whole=True, noun="raw transcript bytes kept per page"
     ),
     "heartbeat_seconds": _Limit(
-        HEARTBEAT_SECONDS, DEFAULT_HEARTBEAT_SECONDS, whole=False, noun="seconds between stream heartbeats"
+        HEARTBEAT_SECONDS,
+        DEFAULT_HEARTBEAT_SECONDS,
+        whole=False,
+        noun="seconds between stream heartbeats",
+        positive=True,
     ),
 }
 
@@ -408,6 +415,11 @@ def _number(limit: _Limit, raw: str) -> float | int:
     except ValueError as error:
         kind = "a whole number" if limit.whole else "a number"
         raise DemoLimitError(f"{limit.variable} is not {kind}: {raw!r}") from error
+    if limit.positive and value <= 0:
+        raise DemoLimitError(
+            f"{limit.variable} must be positive: {raw!r}; a zero or negative interval never blocks, so "
+            "the events stream would spin and flood the connection"
+        )
     if value < 0:
         raise DemoLimitError(f"{limit.variable} cannot be negative: {raw!r}")
     return value
@@ -562,10 +574,12 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         """Stream one job's raw transcript (ADR-0014), or answer honestly when there is none left.
 
         The transcript exists only while the job holds it, so an id this process never issued is a
-        ``404`` and a job that already finished -- and so freed its transcript -- is a ``410``. Neither
-        is answered with an empty stream that a browser would keep reconnecting to. The stream itself is
-        bounded by the transcript's own finish and by a write timeout, so a client that stops reading
-        releases the thread.
+        ``404`` and a job that already finished -- and so freed its transcript -- is a ``410``. A demo
+        whose transcript ceiling is ``0`` keeps no transcript for any job, so it answers ``410`` for a
+        queued or running job too, and says that absence (``transcript ceiling is 0 bytes``) rather than
+        a finish the read may not have reached. Neither is answered with an empty stream that a browser
+        would keep reconnecting to. The stream itself is bounded by the transcript's own finish and by a
+        write timeout, so a client that stops reading releases the thread.
         """
         if head:
             self._error(HTTPStatus.METHOD_NOT_ALLOWED, "HEAD is not served for the events stream", head=True)
@@ -574,6 +588,11 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         if transcript is None:
             if self.app.job(job_id) is None:
                 self._no_job(job_id)
+            elif self.app.limits.transcript_bytes == 0:
+                self._error(
+                    HTTPStatus.GONE,
+                    f"the read {job_id} keeps no raw transcript: the demo's transcript ceiling is 0 bytes",
+                )
             else:
                 self._error(
                     HTTPStatus.GONE,

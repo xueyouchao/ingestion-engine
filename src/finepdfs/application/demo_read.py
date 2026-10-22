@@ -195,9 +195,14 @@ class DemoRead:
             return closed
 
         # The page count is routing's answer, so a pane that draws one placeholder per page can start
-        # before the first delta (ADR-0014). A watcher with no use for it has a no-op.
+        # before the first delta (ADR-0014). A sink written against the older two-method contract has no
+        # ``on_page_count`` at all, so the count is offered only to a sink that provides it: it is an
+        # informational extra, and an absent method here must never turn a readable upload into a
+        # failed job.
         if sink is not None:
-            sink.on_page_count(page_count)
+            count_page = getattr(sink, "on_page_count", None)
+            if count_page is not None:
+                count_page(page_count)
 
         if ocr_pages is not None:
             return self._read_ocr(plan, content, name, on_stage, started, client, ocr_pages, sink)

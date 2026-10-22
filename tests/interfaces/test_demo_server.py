@@ -29,6 +29,7 @@ from finepdfs.application.curate import CurationPolicy, RoutingPlan
 from finepdfs.application.demo_read import DemoRead, Reading
 from finepdfs.domain.demo import (
     DEFAULT_DAILY_OCR_PAGE_BUDGET,
+    DEFAULT_HEARTBEAT_SECONDS,
     DEFAULT_PAGE_CAP,
     DEFAULT_POLL_INTERVAL_SECONDS,
     DEFAULT_QUEUE_DEPTH,
@@ -633,6 +634,21 @@ def test_the_demo_limits_default_to_the_specs_numbers_and_read_the_environment()
 def test_a_mistyped_limit_names_the_variable_it_came_from() -> None:
     with pytest.raises(ValueError, match="FINEPDFS_DEMO_PAGE_CAP"):
         demo_server.demo_limits({"FINEPDFS_DEMO_PAGE_CAP": "twenty-five"})
+
+
+def test_a_non_positive_heartbeat_is_refused_by_name_and_reason() -> None:
+    """A zero quiet interval never blocks, so the events loop would spin and flood the connection."""
+    with pytest.raises(ValueError, match="FINEPDFS_DEMO_HEARTBEAT_SECONDS") as raised:
+        demo_server.demo_limits({"FINEPDFS_DEMO_HEARTBEAT_SECONDS": "0"})
+
+    assert "positive" in str(raised.value)
+    with pytest.raises(ValueError, match="FINEPDFS_DEMO_HEARTBEAT_SECONDS"):
+        demo_server.demo_limits({"FINEPDFS_DEMO_HEARTBEAT_SECONDS": "-1"})
+
+
+def test_the_heartbeat_default_and_a_positive_override_are_still_accepted() -> None:
+    assert demo_server.demo_limits({}).heartbeat_seconds == DEFAULT_HEARTBEAT_SECONDS
+    assert demo_server.demo_limits({"FINEPDFS_DEMO_HEARTBEAT_SECONDS": "2.5"}).heartbeat_seconds == 2.5
 
 
 def test_the_console_script_serves_loopback_8766_by_default(monkeypatch) -> None:
