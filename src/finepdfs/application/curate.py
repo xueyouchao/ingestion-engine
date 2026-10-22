@@ -16,7 +16,12 @@ from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument
 from finepdfs.domain.language import LanguagePolicy
 from finepdfs.domain.ocr import OcrRoutingPolicy, RoutingDecision
 from finepdfs.domain.ports import LanguageIdentifier, OcrEngine, ReadSink, TextLayerProbe
-from finepdfs.domain.publishing import CurationOutcome, DocumentRecord, PublishPolicy
+from finepdfs.domain.publishing import (
+    CurationOutcome,
+    DocumentRecord,
+    PublishPolicy,
+    document_markdown,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +156,7 @@ class CurationStep:
         publishable, reason = self._policy.publish.judge(pages, language)
         if not publishable:
             return CurationOutcome(status="dropped", url=url, record=record, reason=reason)
-        markdown = "\n\n".join(page.text for page in pages)
+        markdown = document_markdown(pages)
         return CurationOutcome(
             status="published", url=url, record=record, pages=pages, markdown=markdown, reason=reason
         )
