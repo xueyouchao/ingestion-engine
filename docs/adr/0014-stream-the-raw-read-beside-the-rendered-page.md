@@ -87,8 +87,9 @@ inventing a token cadence.
 **A page the worker cut off is a failure, not a short page.** A streamed page ends when the worker says
 it did: `stop`, or nothing named before `[DONE]`, is a whole page; any other `finish_reason` -- the
 model's token limit above all -- ended the stream before the page was finished, and the read fails in
-the worker's own words rather than exporting what arrived. A truncated page in both panes would be a
-reading the product does not have.
+the worker's own words rather than exporting what arrived. The blocking answer a batch run reads
+carries the same `finish_reason`, and is held to the same rule: a cut page never reaches the corpus.
+A truncated page in both panes would be a reading the product does not have.
 
 **The transcript is ephemeral and bounded.** The job keeps a per-page ring buffer of raw deltas (a
 ceiling in bytes, truncation marked explicitly with a `truncated` event rather than silently dropping
@@ -111,8 +112,8 @@ the fix is in that engine's adapter and lands in the corpus too -- the demo must
 the product.
 
 **Rendering is server-side, allowlisted and pinned.** A markdown renderer plus a sanitizer, both pinned
-in a new optional `[demo]` extra and recorded in `docs/demo/requirements-demo.txt`, turn Page Text into
-an HTML fragment. The allowlist is structural only: headings, paragraphs, lists, emphasis, code blocks,
+in a new optional `[demo]` extra, carried by `dev` as well so the offline gate can run the pane's tests,
+and recorded in `docs/demo/requirements-demo.txt`, turn Page Text into an HTML fragment. The allowlist is structural only: headings, paragraphs, lists, emphasis, code blocks,
 blockquotes, rules, and tables with `colspan`/`rowspan`; no `script`, `style`, `iframe`, `img`, no
 `on*` attributes and no links in the first cut (model output must not create navigation). Math is
 rendered as text until there is a reason to ship a MathJax-class dependency. The page inserts exactly
@@ -176,7 +177,8 @@ residue rather than cleaning it is pinned by
 
 **What is pinned, and what that word does not cover.** The renderer/sanitizer pair is
 `markdown-it-py==4.2.0` and `nh3==0.3.7`, exact pins in the optional `[demo]` extra
-(`pyproject.toml`) and in `docs/demo/requirements-demo.txt`, imported lazily so the base install never
+(`pyproject.toml`), the same pins in the `dev` extra so CI's `pip install -e '.[dev]'` can run the
+pane's tests, and in `docs/demo/requirements-demo.txt`; imported lazily so the base install never
 needs them. "Pinned" means the same Page Text renders to the same bytes on the pinned pair, which is what
 makes the golden and hostile tests meaningful; a bump is a reviewed change with the pane's evidence. It
 does **not** mean a live worker's Page Text has been through it -- every fragment these tests render comes
@@ -226,8 +228,8 @@ the heartbeat on a real read.
   neither number has been sized from evidence: a page longer than 256 KiB will truncate, and how often
   that happens is unknown until a real reading is watched.
 - **The renderer/sanitizer pair is pinned, and pinned is all it is.** `markdown-it-py==4.2.0` and
-  `nh3==0.3.7`, exact pins in `[demo]` and `requirements-demo.txt`, with the fragment golden-tested and the
-  hostile input inert. No live worker has exercised the pair: every Page Text it has rendered came from a
+  `nh3==0.3.7`, exact pins in `[demo]`, `dev` and `requirements-demo.txt`, with the fragment
+  golden-tested and the hostile input inert. No live worker has exercised the pair: every Page Text it has rendered came from a
   fixture or a fake, so engine output that is odd in a way no fixture is (a malformed table, an unclosed
   fence) has not been seen through it.
 - **Whether the OCR lane can stream depends on the worker**: vLLM and SGLang both serve SSE for this model

@@ -687,7 +687,7 @@ per page and silence per stream. Both are the demo's own limits -- defaults in
 | Variable | Flag | Default | Unit | What it bounds |
 | --- | --- | --- | --- | --- |
 | `FINEPDFS_DEMO_TRANSCRIPT_BYTES` | `--transcript-bytes` | 262144 | raw bytes kept per page | one page's ring buffer before a `truncated` event names what it dropped. `0` keeps no transcript: the events endpoint answers `410` for every job |
-| `FINEPDFS_DEMO_HEARTBEAT_SECONDS` | `--heartbeat-seconds` | 15 | seconds of quiet | how long a silent `text/event-stream` waits before it writes the comment line `: heartbeat` |
+| `FINEPDFS_DEMO_HEARTBEAT_SECONDS` | `--heartbeat-seconds` | 15 | seconds of quiet | how long a silent `text/event-stream` waits before it writes the comment line `: heartbeat`. It must be positive: a zero or negative interval never blocks, so the demo refuses it at startup instead of spinning the stream loop |
 
 Check them against the build you have, not against this file. The flag and the limit's own words are the
 first half of the check, because a flag's help text and the table above are read from the same entry:
@@ -736,6 +736,10 @@ curl -sN "http://127.0.0.1:8766/api/read/$JOB/events"
   newest bytes, and dropped `M` bytes cumulatively. The page says so in words beside what remains.
 * `410` and `{"error": "the read <id> has finished; its raw transcript is not kept"}`: the Reading ended
   and the store was freed -- the normal answer for a reloaded or late subscriber, not a fault.
+* with `FINEPDFS_DEMO_TRANSCRIPT_BYTES=0`, `410` and
+  `{"error": "the read <id> keeps no raw transcript: the demo's transcript ceiling is 0 bytes"}` for
+  **any** job, queued or running as well as finished: nothing was ever kept, and the status is the same
+  `410` while the sentence names that absence instead of a finish the read may not have reached.
 * `404` and `{"error": "no job <id>"}`: this process never issued that id (a restart forgets jobs, §12).
 * nothing at all for longer than the interval and no `: heartbeat` either: the stream is not the demo's
   -- check §5's host and port, and any proxy in front of it.
