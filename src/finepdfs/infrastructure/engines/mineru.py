@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText
+from finepdfs.domain.ports import ReadSink
 from finepdfs.infrastructure.engines.concurrency import DEFAULT_ENGINE_CONCURRENCY, EngineCalls
 from finepdfs.infrastructure.engines.subprocess_support import CommandRunner, SubprocessRunner, require_success
 
@@ -48,7 +49,12 @@ class MineruEngine:
     def identity(self) -> EngineIdentity:
         return EngineIdentity(name="mineru", detail=self.backend.describe())
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink: ReadSink | None = None) -> ExtractedDocument:
+        """Read the Document through the configured backend, one Page Text per content-list page.
+
+        ``sink`` is accepted so a caller may always watch a read, and left silent: MinerU answers with a
+        whole content list, so there is no page-by-page output to report and none is invented.
+        """
         items = self.backend.content_list(document)
         return ExtractedDocument(pages=pages_from_content_list(items), engine=self.identity)
 

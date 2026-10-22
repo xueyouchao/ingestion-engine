@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText
+from finepdfs.domain.ports import ReadSink
 from finepdfs.infrastructure.engines.concurrency import DEFAULT_ENGINE_CONCURRENCY, EngineCalls
 from finepdfs.infrastructure.engines.subprocess_support import CommandRunner, SubprocessRunner, require_success
 
@@ -67,7 +68,12 @@ class DoclingEngine:
         version = _tool_version(self.runner, self.command, self.calls)
         return EngineIdentity(name="docling", detail=f"cli:{command_name}:v{version}")
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink: ReadSink | None = None) -> ExtractedDocument:
+        """Read the Document with one `docling convert` run.
+
+        ``sink`` is accepted so a caller may always watch a read, and left silent: Docling writes its
+        JSON when it finishes, so there is no page-by-page output to report and none is invented.
+        """
         identity = self.identity
         with tempfile.TemporaryDirectory(dir=self.work_dir) as scratch:
             scratch_dir = Path(scratch)
