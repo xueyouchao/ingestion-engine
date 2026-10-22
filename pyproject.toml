@@ -24,6 +24,13 @@ docling = ["docling==2.140.0"]
 # creating an array as requested"); this is the same library built against the NumPy 2 headers, and it is
 # what the upstream FinePDFs pipeline depends on too. Only the FINEPDFS_LANGUAGE=fasttext mode needs it.
 language = ["fasttext-numpy2-wheel>=0.9.2"]
+# The live demo's rendered document pane (ADR-0014) needs a markdown renderer and a sanitizer. Both are
+# pinned exactly because the fragment is a golden-tested answer: a different renderer or sanitizer can
+# change markup for the same Page Text, so a bump is a reviewed change with the pane's evidence. They
+# are optional on purpose -- only the document endpoint imports them, lazily -- so the base install
+# keeps no HTML stack and the demo says "rendering is not installed" rather than rendering unescaped
+# text. Observed working: markdown-it-py 4.2.0, nh3 0.3.7 (a wheel; no Rust toolchain needed).
+demo = ["markdown-it-py==4.2.0", "nh3==0.3.7"]
 
 [project.scripts]
 finepdfs = "finepdfs.interfaces.cli:main"

@@ -1,6 +1,6 @@
 # The observed working demo environment, pinned so a fresh install reproduces the same page text,
 # chunk ids and citations. The base install stays model-free (pyproject.toml dependencies); everything
-# below is the optional OCR and CPU tooling the runbook's measured runs used.
+# below is the optional OCR, CPU and rendering tooling the demo uses.
 #
 # Install the base first, then the CPU wheels from the CPU index, then this file:
 #
@@ -14,3 +14,10 @@
 docling==2.140.0
 torch==2.10.0+cpu
 easyocr==1.7.2
+# The rendered document pane (ADR-0014): markdown-it-py turns Page Text into structural HTML and nh3
+# sanitizes it against the structural allowlist. Pinned exactly because the fragment is golden-tested,
+# and installed here rather than in the base install: only the demo's document endpoint imports them,
+# lazily, and answers "rendering is not installed" when they are absent. They are also the `[demo]`
+# extra in pyproject.toml, which is the shorter way to install just this pair.
+markdown-it-py==4.2.0
+nh3==0.3.7
