@@ -24,6 +24,10 @@ from the store's start, which for a truncated page is the truncated event plus t
 
 The store is ephemeral by construction: an absent job id is answered with an HTTP error before a stream
 starts, and a finished Reading's store is detached by the queue, so there is nothing left to replay.
+
+Delta text is the worker's own output and is never markup: a subscriber shows it with ``textContent`` (or
+an equivalent escape) and never parses it as HTML. The same rule the ADR gives the raw pane lives here,
+beside the event names a renderer reads.
 """
 
 from __future__ import annotations
