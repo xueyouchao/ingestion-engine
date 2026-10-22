@@ -618,7 +618,8 @@ function documentAbsent() {
   // The 503 answer says the [demo] extra is missing. The pane says so in these words -- never the
   // server's sentence dropped into markup -- and points at what still works.
   return "Rendering is not installed on this server, so this pane cannot show the rendered document. " +
-    "The document's markdown is still downloadable, and the raw transcript beside it is the worker's own output.";
+    "The document's markdown is still downloadable, and the raw transcript beside it is the worker's " +
+    "own output.";
 }
 
 function documentDownloadName(fileName) {

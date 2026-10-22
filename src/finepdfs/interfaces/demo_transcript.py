@@ -1,7 +1,7 @@
 """The live demo's raw transcript: what the worker emitted, kept bounded and served as events.
 
-ADR-0014 makes the raw transcript proof of work, not evidence. A Reading hands every delta to this store from
-the engine-call pool thread; the store keeps a per-page ring buffer with a byte ceiling and lets any
+ADR-0014 makes the raw transcript proof of work, not evidence. A Reading hands every delta to this store
+from the engine-call pool thread; the store keeps a per-page ring buffer with a byte ceiling and lets any
 number of subscribers replay it from the beginning. Nothing here is written to disk, put in the job
 answer or cited, and the job that owns it releases it the moment the Reading finishes.
 
@@ -195,11 +195,11 @@ class RawTranscript:
 def _marker_first(events: list[TranscriptEvent]) -> list[TranscriptEvent]:
     """Each truncated page's marker before the retained deltas it names the loss of.
 
-    A live subscriber hears the marker at the moment the drop happened, which is where the drop happened.
-    A subscriber replaying from the start never saw that moment: for it the page's first bytes are simply
-    gone, and the marker belongs before the text that survived, so that its position never claims "the
-    missing bytes were here" about a place they were not. Pages interleave, so each page keeps its own
-    place in the replay and only its own marker moves in front of its own first retained delta.
+    A live subscriber hears the marker when the drop happens, because that is when it happened. A
+    subscriber replaying from the start never saw that moment: for it the page's first bytes are simply
+    gone, so the marker belongs before the text that survived, and its position then makes no claim about
+    where in the tail the missing bytes sat. Pages interleave, so each page keeps its own place in the
+    replay and only its own marker moves in front of its own first retained delta.
     """
     markers = {event.data["page"]: event for event in events if event.name == "truncated"}
     if not markers:
@@ -214,7 +214,7 @@ def _marker_first(events: list[TranscriptEvent]) -> list[TranscriptEvent]:
             ordered.append(markers[page])
             placed.add(page)
         ordered.append(event)
-    # A page whose whole buffer was dropped still names its loss, after the replay lands somewhere.
+    # A page whose whole buffer was dropped has no retained event to precede: its loss goes last.
     ordered.extend(marker for page, marker in markers.items() if page not in placed)
     return ordered
 
