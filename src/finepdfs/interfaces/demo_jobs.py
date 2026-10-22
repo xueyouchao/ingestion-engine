@@ -101,6 +101,9 @@ class _Entry:
     # The job's raw transcript (ADR-0014): created with the job and released the moment it finishes, so
     # the store never outlives the bytes it describes.
     transcript: RawTranscript | None = None
+    # The sink the engine is actually handed: one object forwarding to every pane watching this job
+    # (the composition root builds it), or ``None`` when no pane watches this job at all.
+    sink: ReadSink | None = None
 
 
 class ReadingQueue:
@@ -113,6 +116,8 @@ class ReadingQueue:
         retained_jobs: int = DEFAULT_RETAINED_JOBS,
         *,
         redact: Callable[[str], str] = str,
+        sinks: Callable[[str, RawTranscript | None], ReadSink] | None = None,
+        finished: Callable[[str, ReadingOutcome | None], None] | None = None,
     ) -> None:
         self._read = read
         settings = limits if limits is not None else DemoLimits()
@@ -120,6 +125,10 @@ class ReadingQueue:
         # Zero means the operator switched the transcript off: no store, and the events endpoint says so.
         self._transcript_bytes = settings.transcript_bytes
         self._redact = redact
+        # How the composition root joins the panes: one sink per job, and what it hears when the Reading
+        # ends. The queue owns the job id and the transcript; everything else is the composition's.
+        self._sinks = sinks
+        self._on_finished = finished
         self._retained_jobs = max(retained_jobs, 0)
         self._lock = Condition()
         self._waiting: deque[_Entry] = deque()
@@ -140,12 +149,15 @@ class ReadingQueue:
             waiting = len(self._waiting)
             if (waiting or self._running is not None) and waiting >= self._depth:
                 raise QueueFull()
+            job_id = uuid4().hex
+            transcript = RawTranscript(self._transcript_bytes) if self._transcript_bytes > 0 else None
             entry = _Entry(
-                id=uuid4().hex,
+                id=job_id,
                 name=name,
                 content=content,
                 client=client,
-                transcript=RawTranscript(self._transcript_bytes) if self._transcript_bytes > 0 else None,
+                transcript=transcript,
+                sink=self._sinks(job_id, transcript) if self._sinks else transcript,
             )
             self._waiting.append(entry)
             self._start_worker()
@@ -185,6 +197,7 @@ class ReadingQueue:
                 if entry.transcript is not None:
                     entry.transcript.finish(None)
                 entry.transcript = None
+                entry.sink = None
             self._waiting.clear()
             self._lock.notify_all()
             worker = self._worker
@@ -209,6 +222,8 @@ class ReadingQueue:
                 self._running = entry
 
             outcome, failure = self._read_one(entry)
+            if self._on_finished is not None:
+                self._on_finished(entry.id, outcome)
             self._finish_transcript(entry, outcome, failure)
 
             with self._lock:
@@ -219,6 +234,7 @@ class ReadingQueue:
                 # document outlives it (ADR-0014 keeps the transcript ephemeral).
                 entry.content = b""
                 entry.transcript = None
+                entry.sink = None
                 self._running = None
                 self._remember(_snapshot(entry))
                 self._lock.notify_all()
@@ -241,7 +257,7 @@ class ReadingQueue:
                 entry.stage = stage
 
         try:
-            return self._read(entry.content, entry.client, on_stage, entry.name, entry.transcript), None
+            return self._read(entry.content, entry.client, on_stage, entry.name, entry.sink), None
         except Exception as error:  # the queue must answer, whatever the composition did
             return None, {"kind": "failed", "lane": "", "reason": _words(error)}
 

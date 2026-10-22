@@ -36,6 +36,7 @@ from finepdfs.domain.ports import (
     OcrEndpointUnavailable,
     OcrEngine,
     OcrWorker,
+    PageCountSink,
     ReadSink,
     TextLayerProbe,
 )
@@ -178,6 +179,11 @@ class DemoRead:
         closed = _closed(self._gates.decide(page_count, usage, ocr_pages=ocr_pages), plan, self._policy.routing)
         if closed is not None:
             return closed
+
+        # The page count is routing's answer, so a pane that draws one placeholder per page can start
+        # before the first delta (ADR-0014). A sink that only watches deltas is not asked for it.
+        if isinstance(sink, PageCountSink):
+            sink.on_page_count(page_count)
 
         if ocr_pages is not None:
             return self._read_ocr(plan, content, name, on_stage, started, client, ocr_pages, sink)

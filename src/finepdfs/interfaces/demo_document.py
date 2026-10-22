@@ -149,6 +149,10 @@ class JobPagesSink:
     def on_delta(self, page_number: int, text: str) -> None:
         """Nothing: a delta is not Page Text and the document pane never renders one."""
 
+    def on_page_count(self, page_count: int) -> None:
+        """Learn how many pages the read will report, so every page's placeholder exists from the start."""
+        self._store.begin(self._job_id, page_count)
+
     def on_page(self, page: PageText) -> None:
         """Keep a page the moment its read is complete."""
         self._store.page(self._job_id, page)
