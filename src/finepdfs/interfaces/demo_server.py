@@ -486,7 +486,7 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not found", head=head)
             return
         if path in ("/", "/index.html"):
-            self._html(self.app.page_html(), head=head)
+            self._body("text/html; charset=utf-8", self.app.page_html(), head=head)
         elif path == "/api/status":
             self._json(self.app.status(), head=head)
         elif path.startswith("/api/read/") and path.endswith("/events"):
@@ -534,7 +534,7 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         extra = {"X-Document-Completed": str(document.completed)}
         if document.total is not None:
             extra["X-Document-Pages"] = str(document.total)
-        self._html(fragment, head=head, extra=extra)
+        self._body("text/html; charset=utf-8", fragment, head=head, extra=extra)
 
     def _document_markdown(self, job_id: str, *, head: bool) -> None:
         """The `.md` the pane offers for download: the same projection the corpus writes."""
@@ -657,9 +657,6 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if not head:
             self.wfile.write(body)
-
-    def _html(self, body: str, *, head: bool, extra: Mapping[str, str] | None = None) -> None:
-        self._body("text/html; charset=utf-8", body, head=head, extra=extra)
 
     def _body(
         self,

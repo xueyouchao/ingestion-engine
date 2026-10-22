@@ -98,11 +98,14 @@ def render_document(view: DocumentView) -> str:
     renderer = markdown_it("commonmark", {"html": False, "linkify": False, "typographer": False})
     renderer.enable("table")
     completed = {page.number: page for page in view.pages}
-    last = max(view.total if view.total is not None else 0, max(completed, default=0))
-    if view.total is None and completed:
+    if view.total is not None:
+        last = max(view.total, max(completed, default=0))
+    elif completed:
         # The job has not learned its page count, but the lane completes pages in page-number order:
         # the next number is the page being read now, and no later one can be claimed.
-        last = max(last, max(completed) + 1)
+        last = max(completed) + 1
+    else:
+        last = 0
 
     attributes = f' data-pages="{view.total}"' if view.total is not None else ""
     parts = [f'<article class="{DOCUMENT_CLASS}"{attributes} data-completed="{len(completed)}">']

@@ -137,10 +137,18 @@ DEMO_HTML = """<!doctype html>
   @media (min-width: 60rem) {
     .panes { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.15fr); }
   }
+  /* Both panes carry the same copy/download row: one rule for the two, since they differ in what they
+     show and not in how their controls look. */
+  .raw-controls, .document-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .6rem;
+    margin: .1rem 0 .55rem;
+  }
+  .raw-controls button, .document-controls button { padding: .3rem .7rem; font-size: .85rem; }
   /* The rendered pane is the product: the document's own typography, not the transcribed look of the
      raw pane. Every element here is in the server's allowlist; nothing is styled that cannot arrive. */
-  .document-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin: .1rem 0 .55rem; }
-  .document-controls button { padding: .3rem .7rem; font-size: .85rem; }
   #document { overflow-x: auto; }
   .document-page { border: 1px solid var(--line); border-radius: .4rem; padding: .65rem .75rem; margin: .7rem 0; }
   .document-page-number {
@@ -167,8 +175,6 @@ DEMO_HTML = """<!doctype html>
   .skeleton, .document-empty { color: var(--muted); font-style: italic; }
   /* The raw pane is the worker's own output, so it is monospaced and scrollable: markers and broken
      table syntax must look unlike the published page the right-hand pane will carry. */
-  .raw-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin: .1rem 0 .55rem; }
-  .raw-controls button { padding: .3rem .7rem; font-size: .85rem; }
   .raw-page { border: 1px solid var(--line); border-radius: .4rem; padding: .55rem .7rem; margin: .55rem 0; }
   .raw-page header { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
   .raw-truncated { color: var(--warn); font-size: .85rem; margin: .35rem 0 .1rem; }
@@ -434,7 +440,6 @@ function applyRawEvent(model, name, data) {
     model.finished = true;
     model.outcome = data.outcome === undefined ? null : data.outcome;
   }
-  return model;
 }
 
 function rawPages(model) {
@@ -722,7 +727,6 @@ async function refreshDocument(jobId) {
   setDocumentNote(documentNote(state.document.completed, state.document.total, state.document.finished));
   setDocumentControls(true);
 }
-
 
 function renderRefusal(refusal) {
   hideResults();

@@ -62,11 +62,6 @@ class DocumentView:
         """How many pages are ready to read."""
         return len(self.pages)
 
-    @property
-    def numbers(self) -> tuple[int, ...]:
-        """The original 1-based numbers of the completed pages, in order."""
-        return tuple(page.number for page in self.pages)
-
 
 @dataclass(slots=True)
 class _Entry:
@@ -101,14 +96,12 @@ class DocumentStore:
         with self._lock:
             self._entry(job_id).pages[page.number] = page
 
-    def completed(
-        self, job_id: str, pages: tuple[PageText, ...] | list[PageText], page_count: int | None = None
-    ) -> None:
+    def completed(self, job_id: str, pages: tuple[PageText, ...] | list[PageText]) -> None:
         """Record the pages a finished Reading answered with, which are authoritative for the job."""
         with self._lock:
             entry = self._entry(job_id)
             entry.pages = {page.number: page for page in pages}
-            entry.total = page_count if page_count is not None else len(entry.pages)
+            entry.total = len(entry.pages)
 
     def view(self, job_id: str) -> DocumentView:
         """A snapshot of the job's document; an id with no document is the empty view, not an error."""
