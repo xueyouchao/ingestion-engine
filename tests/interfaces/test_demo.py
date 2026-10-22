@@ -36,7 +36,8 @@ class CountingEngine:
     def identity(self) -> EngineIdentity:
         return self._identity
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink=None) -> ExtractedDocument:
+        # ``sink`` is part of the engine's interface (ADR-0014); this stand-in has nothing to report.
         self.calls += 1
         return ExtractedDocument(
             pages=(PageText(number=1, text="demo word " * 200),), engine=self._identity

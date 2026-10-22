@@ -35,5 +35,5 @@ class StableIdentity:
         engine field keeps the pages the engine produced and makes the record as stable as the memo
         key: the host can move without the record moving (ADR-0007).
         """
-        extracted = self.engine.extract(document) if sink is None else self.engine.extract(document, sink)
+        extracted = self.engine.extract(document, sink)
         return ExtractedDocument(pages=extracted.pages, engine=self.identity)
