@@ -120,12 +120,12 @@ contract below).
   client identity into one Reading. It reuses `ExtractionStep.route`/`extract_with` from
   `application/curate.py` -- routing is *the* policy and the demo must not have its own copy -- and it
   never cleans, language-tags, publishes or deduplicates.
-- **Interface** (`interfaces/demo_server.py` + `interfaces/demo_jobs.py` + `interfaces/demo_page.py`, and
-  ADR-0014's `demo_transcript.py`, `demo_document.py`, `demo_render.py` and `demo_sinks.py`): the Reading
-  Queue, the HTTP server, the job protocol, the page asset, the raw transcript's bounded store and event
-  stream, the document pane's store, and its pinned renderer and sanitizer. This is the composition root:
-  it reads `FINEPDFS_*`, leases the GPU through `leased_environment`, builds the engine and the endpoint
-  probe, and owns the Gate Ledger for the life of the process.
+- **Interface** (`interfaces/demo_server.py` + `interfaces/demo_jobs.py` + `interfaces/demo_job.py` +
+  `interfaces/demo_page.py`, and ADR-0014's `demo_transcript.py` and `demo_render.py`): the HTTP server,
+  the Reading Queue, the page asset, one Demo Job per upload -- its stage, answer, bounded raw transcript
+  and document view, read by every pane -- and the document's pinned renderer and sanitizer. This is the
+  composition root: it reads `FINEPDFS_*`, leases the GPU through `leased_environment`, builds the engine
+  and the endpoint probe, and owns the Gate Ledger for the life of the process.
 
 The entry point is the console script `finepdfs-live-demo` (`finepdfs.interfaces.demo_server:main`;
 `python -m finepdfs.interfaces.demo_server` is the module fallback), binding `127.0.0.1:8766` by default. Its
@@ -172,7 +172,7 @@ of work, never evidence, and nothing in it is exported, recorded or cited.
 
 **The transcript is ephemeral and bounded.** One ring buffer per page, with the byte ceiling below;
 a page that outruns its ceiling keeps its newest bytes and reports the drop as a `truncated` event with a
-cumulative `dropped_bytes`, never as a silently shortened page. The store is freed the moment the Reading
+cumulative `dropped_bytes`, never as a silently shortened page. The job frees it the moment the Reading
 finishes. `GET /api/read/<id>/events` answers `text/event-stream; charset=utf-8` with `Cache-Control:
 no-store` and five event names -- `delta`, `truncated`, `page` (the Page Text that page exported),
 `error` (kind, lane and the job answer's own redacted words) and terminal `done` -- plus a heartbeat
@@ -250,6 +250,9 @@ One Reading runs at a time and a bounded number wait behind it. The single slot 
 per-read environment lease safe (a lease mutates `os.environ`, which the flow's own model already
 assumes is one run at a time), and it is what ADR-0012 means when it says what serialises uploads is the
 demo server's queue and not Modal. A full queue is a refusal with its own kind, not an unbounded wait.
+The most recent finished jobs stay answerable, so a page that polls a moment late still gets its answer;
+one bound covers them, and a job past it is forgotten with everything it held -- its answer and its
+document -- while its raw transcript was already freed when the Reading ended. Nothing survives a restart.
 
 The protocol is therefore a job, not a long request: the upload answers `202` with a job id, and the page
 polls that job for its stage. The stages are `queued`, `routing`, `warming`, `reading`, and the terminal
