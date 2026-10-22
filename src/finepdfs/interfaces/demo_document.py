@@ -62,11 +62,6 @@ class DocumentView:
         """How many pages are ready to read."""
         return len(self.pages)
 
-    @property
-    def numbers(self) -> tuple[int, ...]:
-        """The original 1-based numbers of the completed pages, in order."""
-        return tuple(page.number for page in self.pages)
-
 
 @dataclass(slots=True)
 class _Entry:
