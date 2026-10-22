@@ -70,3 +70,26 @@ frames[0].save("tests/fixtures/scan-3-pages.tiff", compression="tiff_lzw", save_
 
 Their text is legible to a model, which is deliberate — a real cold-start rehearsal sends one — but the
 default suite never runs an engine on them.
+
+## Streaming and rendered-document fixtures (ADR-0014)
+
+Both are **constructed, not captured**. They exist to pin one contract each, and neither is evidence of
+what a deployed worker or a corpus run produced.
+
+- **`paddleocr_stream_page.sse`** — one PaddleOCR-VL page as a vLLM-style SSE body: `data:` frames
+  shaped like `chat.completion.chunk`s, a role frame, a `finish_reason: "stop"` frame, a usage frame and
+  `data: [DONE]`, carrying 168 characters of content in all. The echoed `OCR:` prompt and the
+  opening markdown fence arrive split across frames (`"OCR"`, `":"`, `"\n``"`, …), so only
+  concatenate-then-normalize-once recovers the page; the Page Text it exports is
+  `# Quarterly Report` / `Receipts were 12% higher …` / a two-column `Region | Receipts` table. It was
+  hand-written on 2026-10-22 in the shape vLLM sends for this model family and replayed by
+  `tests/fake_streaming_worker.py` (`tests/infrastructure/test_vlm_streaming.py`). It is **not** a
+  capture from a deployed worker, and no test in the suite talks to one.
+- **`pages/ba02d52504f527bb.jsonl`** — three page records for one document (`ba02d52504f527bb`, engine
+  `paddleocr-vl@weights-c5630abae1d9`, source URL on `example.org`), each exactly the fields
+  `PageRecord.as_json()` writes (`doc_id`, `source_url`, `digest`, `page_number`, `text`, `engine`), so
+  `PageRecord(**row)` is the shape assertion. The text is constructed as well. Its job is to pin the
+  demo's rendered-document answer as a golden one (`tests/interfaces/test_demo_document_server.py`):
+  the pane carries these Page Texts in numeric order behind their `Page N` separators, and its `.md` is
+  the same bytes `document_markdown` gives, which is what `out/pages/<key>.jsonl` and
+  `out/docs/<key>.md` would hold for those pages. It proves the projection, not what any engine read.

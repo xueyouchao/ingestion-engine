@@ -28,8 +28,11 @@ language = ["fasttext-numpy2-wheel>=0.9.2"]
 # pinned exactly because the fragment is a golden-tested answer: a different renderer or sanitizer can
 # change markup for the same Page Text, so a bump is a reviewed change with the pane's evidence. They
 # are optional on purpose -- only the document endpoint imports them, lazily -- so the base install
-# keeps no HTML stack and the demo says "rendering is not installed" rather than rendering unescaped
-# text. Observed working: markdown-it-py 4.2.0, nh3 0.3.7 (a wheel; no Rust toolchain needed).
+# keeps no HTML stack. Without them `GET /api/read/<id>/document` answers `503` in words ("rendering is
+# not installed: ...", `rendering: not-installed`) rather than rendering unescaped text, while
+# `GET /api/read/<id>/document.md` keeps answering: the markdown is the corpus's own projection and
+# needs no optional dependency. Observed working: markdown-it-py 4.2.0, nh3 0.3.7 (a wheel; no Rust
+# toolchain needed). Also pinned in docs/demo/requirements-demo.txt.
 demo = ["markdown-it-py==4.2.0", "nh3==0.3.7"]
 
 [project.scripts]
