@@ -39,19 +39,22 @@ class TextLayerProbe(Protocol):
 class ReadSink(Protocol):
     """A caller watching an Extraction happen, page by page (ADR-0014).
 
-    ``on_delta`` is the engine's own output as it arrives, exactly as the worker emitted it and before
-    any normalization -- echoed prompt, fences and layout markers included -- tagged with the 1-based
-    page number it belongs to, because a read may have several pages in flight at once. ``on_page`` is
-    the Page Text the read exports for a page, as soon as that page is complete and in page-number
-    order: the same text a batch run would export for the same page. ``on_page_count`` is how many pages
-    the read will report in all, known from routing before the first delta, so a viewer can draw a
-    placeholder for every page from the start rather than inventing one from the pages that arrived.
+    An engine that streams reports to it. ``on_delta`` is the engine's own output as it arrives, exactly
+    as the worker emitted it and before any normalization -- echoed prompt, fences and layout markers
+    included -- tagged with the 1-based page number it belongs to, because a read may have several pages
+    in flight at once. ``on_page`` is the Page Text the read exports for a page, as soon as that page is
+    complete: the same text a batch run would export for the same page.
 
     An engine with nothing arriving page by page -- the text layer, a local command that writes its
-    results when it finishes -- has nothing to report and calls none of these, so a caller that received
-    nothing knows the lane did not stream instead of inferring a cadence of its own. A watcher that only
-    forwards deltas implements ``on_page_count`` as a no-op, which is why the count is one call here and
-    not a second protocol a caller negotiates for.
+    results when it finishes -- has nothing to report and calls neither of those, so a caller that
+    received nothing knows the lane did not stream instead of inferring a cadence of its own.
+
+    ``on_page_count`` is the one method no engine calls. The use case that starts the read reports it
+    from routing, before the first delta and before any lane has run, so a viewer can draw a placeholder
+    for every page from the start rather than inventing one from the pages that arrived -- the count is
+    routing's answer, and no engine knows it. It is part of this protocol rather than a second one
+    because the same watcher answers both questions; a watcher with no use for the count implements it
+    as a no-op.
     """
 
     def on_delta(self, page_number: int, text: str) -> None: ...

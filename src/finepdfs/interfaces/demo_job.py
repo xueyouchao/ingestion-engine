@@ -6,9 +6,10 @@ one object owns all of it and every pane reads it -- the events endpoint asks th
 the document answer for its view, and ``GET /api/read/<id>`` for its eight keys. Nothing is merged after
 the fact: a third pane is a method here, not a second store for the server to join.
 
-The job is the ``ReadSink`` the engine reports to. Routing's page count and every completed Page Text
-land in it; a delta goes to the transcript and never to the document, because that pane is built from
-Page Text only and a half-parsed table is therefore never rendered.
+The job is the ``ReadSink`` the read reports to. The use case hands it routing's page count before the
+first delta; the engine hands it every delta and every completed Page Text. A delta goes to the
+transcript and never to the document, because that pane is built from Page Text only and a half-parsed
+table is therefore never rendered.
 
 **A finished Reading is authoritative, and it is held once.** Its Page Texts are the accepted ones, so
 the pane reads them from the outcome and the job drops whatever a lane reported mid-read rather than
@@ -78,8 +79,9 @@ class DocumentView:
 class DemoJob:
     """One upload's per-job state, as every pane sees it.
 
-    ``advance`` is the stage the read reached and ``finish`` is what it answered; ``on_delta``,
-    ``on_page`` and ``on_page_count`` are the ``ReadSink`` the engine reports to. The reader thread writes
+    ``advance`` is the stage the read reached and ``finish`` is what it answered; ``on_delta`` and
+    ``on_page`` are what the engine reports, and ``on_page_count`` is what the use case reports before
+    the engine runs at all (``domain.ports.ReadSink``). The reader thread writes
     and a handler thread reads, so every field is touched under one lock and every view is a copy taken
     under it. ``redact`` is what a failure's words are shown through on the wire: a configured address or
     token in an engine's error is a leak, and the composition root is the one place that knows both.
@@ -195,7 +197,7 @@ class DemoJob:
             transcript.on_delta(page_number, text)
 
     def on_page(self, page: PageText) -> None:
-        """One completed Page Text: the document keeps it, and the stream reports it to the raw pane.
+        """One completed Page Text: the document keeps it, and the stream reports it to the raw transcript.
 
         The page event is what a visitor watching the middle pane sees when a page completes, so it is
         reported before the page is kept: the two panes are fed from one report, not two.
@@ -207,7 +209,7 @@ class DemoJob:
             self._pages[page.number] = page
 
     def on_page_count(self, page_count: int) -> None:
-        """Learn how many pages the read will report, so every page's placeholder exists from the start."""
+        """Learn how many pages the read will report, before its first delta: routing's answer, not a lane's."""
         with self._lock:
             self._total = page_count
 
