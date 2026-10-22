@@ -554,14 +554,21 @@ def test_a_second_upload_is_refused_while_one_is_reading() -> None:
     assert answer["outcome"] == "read"
 
 
-def test_an_unknown_job_id_is_a_404() -> None:
-    with (
-        _serving(_app(FakeProbe(HEALTHY), FakeEndpoint())) as base,
-        pytest.raises(urllib.error.HTTPError) as caught,
-    ):
-        _get(base + "/api/read/0123456789abcdef")
+def test_an_unknown_job_id_is_one_404_from_every_answer() -> None:
+    """The job, its document, its markdown and its transcript also say one sentence for no such job.
 
-    assert caught.value.code == 404
+    Four builders answer an id this process never issued, and a visitor who mistypes one must not be
+    told four different things about it.
+    """
+    answers: dict[str, tuple[int, dict]] = {}
+    with _serving(_app(FakeProbe(HEALTHY), FakeEndpoint())) as base:
+        for suffix in ("", "/document", "/document.md", "/events"):
+            with pytest.raises(urllib.error.HTTPError) as caught:
+                _get(base + "/api/read/0123456789abcdef" + suffix)
+            answers[suffix or "/"] = (caught.value.code, json.loads(caught.value.read()))
+
+    assert {status for status, _ in answers.values()} == {404}
+    assert {body["error"] for _, body in answers.values()} == {"no job 0123456789abcdef"}
 
 
 def _snapshot(root: Path) -> dict[str, tuple[bytes, int]]:

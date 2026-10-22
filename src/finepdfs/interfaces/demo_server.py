@@ -1,9 +1,10 @@
 """The live upload demo's HTTP server, and the composition root that puts its GPU in reach.
 
 A visitor uploads a document -- a PDF, or a scan as PNG, JPEG or TIFF -- the demo routes it with the
-pipeline's own policy, and the page shows the decision and the text the chosen lane read. Uploads are
-jobs, not long requests (ADR-0012): the POST answers ``202`` with an id, the page polls that id for its
-stage, and the Reading Queue beside this module runs one Reading at a time so the per-Reading
+pipeline's own policy, and the page shows the decision beside three panes: what was sent, the raw
+transcript of what the worker emitted, and the rendered document the read would publish (ADR-0014).
+Uploads are jobs, not long requests (ADR-0012): the POST answers ``202`` with an id, the page polls that
+id for its stage, and the Reading Queue beside this module runs one Reading at a time so the per-Reading
 environment lease is safe.
 
 This module is the composition root. It reads the demo's own limits from ``FINEPDFS_DEMO_*``, leases the
@@ -480,7 +481,7 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         else:
             job = self.app.job(target)
             if job is None:
-                self._error(HTTPStatus.NOT_FOUND, f"no job {target}", head=head)
+                self._no_job(target, head=head)
                 return
             self._json(job.answer(), head=head)
 
@@ -488,7 +489,7 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         """The inert fragment for one job; an explicit absence when the ``[demo]`` extra is missing."""
         document = self.app.document(job_id)
         if document is None:
-            self._error(HTTPStatus.NOT_FOUND, f"no job {job_id}", head=head)
+            self._no_job(job_id, head=head)
             return
         try:
             fragment = render_document(document)
@@ -509,7 +510,7 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         """The `.md` the pane offers for download: the same projection the corpus writes."""
         markdown = self.app.markdown(job_id)
         if markdown is None:
-            self._error(HTTPStatus.NOT_FOUND, f"no job {job_id}", head=head)
+            self._no_job(job_id, head=head)
             return
         self._body("text/markdown; charset=utf-8", markdown, head=head)
 
@@ -572,7 +573,7 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         transcript = self.app.transcript(job_id)
         if transcript is None:
             if self.app.job(job_id) is None:
-                self._error(HTTPStatus.NOT_FOUND, f"no job {job_id}")
+                self._no_job(job_id)
             else:
                 self._error(
                     HTTPStatus.GONE,
@@ -593,6 +594,14 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             # The visitor closed the tab or stopped reading. The Reading is unaffected and already
             # charged (ADR-0012): a disconnect is not a refund.
             return
+
+    def _no_job(self, job_id: str, *, head: bool = False) -> None:
+        """The one answer an id this process never issued gets: the same status and the same sentence.
+
+        All four answers -- the job, its document, its markdown and its transcript -- are addressed by
+        the same id, so an id that names nothing must be refused identically by each of them.
+        """
+        self._error(HTTPStatus.NOT_FOUND, f"no job {job_id}", head=head)
 
     def _write_chunk(self, chunk: bytes) -> None:
         self.wfile.write(chunk)
