@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Collection, Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 from finepdfs.domain.chunks import Chunk
 from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
@@ -43,27 +43,20 @@ class ReadSink(Protocol):
     any normalization -- echoed prompt, fences and layout markers included -- tagged with the 1-based
     page number it belongs to, because a read may have several pages in flight at once. ``on_page`` is
     the Page Text the read exports for a page, as soon as that page is complete and in page-number
-    order: the same text a batch run would export for the same page.
+    order: the same text a batch run would export for the same page. ``on_page_count`` is how many pages
+    the read will report in all, known from routing before the first delta, so a viewer can draw a
+    placeholder for every page from the start rather than inventing one from the pages that arrived.
 
     An engine with nothing arriving page by page -- the text layer, a local command that writes its
-    results when it finishes -- has nothing to report and calls neither method, so a caller that
-    received nothing knows the lane did not stream instead of inferring a cadence of its own.
+    results when it finishes -- has nothing to report and calls none of these, so a caller that received
+    nothing knows the lane did not stream instead of inferring a cadence of its own. A watcher that only
+    forwards deltas implements ``on_page_count`` as a no-op, which is why the count is one call here and
+    not a second protocol a caller negotiates for.
     """
 
     def on_delta(self, page_number: int, text: str) -> None: ...
 
     def on_page(self, page: PageText) -> None: ...
-
-
-@runtime_checkable
-class PageCountSink(Protocol):
-    """A ReadSink that also learns how many pages the read will report before the first delta.
-
-    The count comes from routing, so a viewer can draw a placeholder for every page from the start
-    rather than inventing one from the pages that have arrived. It is separate from ``ReadSink`` because
-    watching a read does not require it: a sink that only forwards deltas and pages implements
-    ``ReadSink`` alone, and a caller offers the count only to a sink that asked for it.
-    """
 
     def on_page_count(self, page_count: int) -> None: ...
 

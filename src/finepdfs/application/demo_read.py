@@ -36,7 +36,6 @@ from finepdfs.domain.ports import (
     OcrEndpointUnavailable,
     OcrEngine,
     OcrWorker,
-    PageCountSink,
     ReadSink,
     TextLayerProbe,
 )
@@ -82,7 +81,9 @@ class FailedReading:
     """A lane was chosen and the read failed: ``lane`` names it and ``reason`` is the error's own words.
 
     ``kind`` is the exclusion kind the pipeline already uses for a failure, so a failed Reading says the
-    same thing about a document that a batch run does.
+    same thing about a document that a batch run does. ``payload`` is the one shape a failure is told in:
+    the transcript's ``error`` event and the job answer both carry these three fields, so neither can
+    grow a vocabulary of its own.
     """
 
     kind: Literal["failed"]
@@ -90,6 +91,19 @@ class FailedReading:
     reason: str
     plan: RoutingPlan | None
     thresholds: OcrRoutingPolicy
+
+    @classmethod
+    def broke(cls, error: BaseException) -> FailedReading:
+        """The demo's own breakage, before any lane could answer: no plan was made and none is named.
+
+        The demo server's queue wraps what it cannot turn into one of the three outcomes in this, so a
+        composition that raised still ends a job with the same shape every other failure has.
+        """
+        return cls(kind="failed", lane="", reason=_words(error), plan=None, thresholds=OcrRoutingPolicy())
+
+    def payload(self) -> dict[str, str]:
+        """The failure as the transcript's ``error`` event and the job answer's ``failure`` carry it."""
+        return {"kind": self.kind, "lane": self.lane, "reason": self.reason}
 
 
 ReadingOutcome = Reading | Refusal | FailedReading
@@ -181,8 +195,8 @@ class DemoRead:
             return closed
 
         # The page count is routing's answer, so a pane that draws one placeholder per page can start
-        # before the first delta (ADR-0014). A sink that only watches deltas is not asked for it.
-        if isinstance(sink, PageCountSink):
+        # before the first delta (ADR-0014). A watcher with no use for it has a no-op.
+        if sink is not None:
             sink.on_page_count(page_count)
 
         if ocr_pages is not None:

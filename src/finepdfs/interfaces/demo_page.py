@@ -536,7 +536,7 @@ function openRawStream(jobId) {
   for (const name of ["delta", "truncated", "page"]) source.addEventListener(name, apply);
   source.addEventListener("error", (event) => {
     // The server's own ``error`` event carries the read's words; the EventSource failure has no data
-    // and means this endpoint will answer nothing more for the job (a finished job keeps no store).
+    // and means this endpoint will answer nothing more for the job (a finished job frees its transcript).
     if (event.data) {
       apply(event);
       return;

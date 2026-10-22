@@ -1,7 +1,7 @@
 """The demo's document fragment: Page Text rendered to HTML by the pinned, allowlisted pair.
 
 ADR-0014 makes the rendered pane a server-side answer built from Page Text, and the page inserts exactly
-one fragment at one call site. This module is that renderer and nothing else -- no HTTP, no store:
+one fragment at one call site. This module is that renderer and nothing else -- no HTTP, no job state:
 
 - ``markdown-it-py`` renders the Page Text as Markdown (``commonmark``, raw HTML off, tables on).
 - ``nh3`` sanitizes the result against a structural allowlist: headings, paragraphs, lists, emphasis,
@@ -23,7 +23,7 @@ of showing unescaped text.
 
 from __future__ import annotations
 
-from finepdfs.interfaces.demo_document import DocumentView
+from finepdfs.interfaces.demo_job import DocumentView
 
 # What the answer says when the extra is not installed: the same sentence the server serves, so the
 # endpoint and the renderer cannot describe the absence differently.

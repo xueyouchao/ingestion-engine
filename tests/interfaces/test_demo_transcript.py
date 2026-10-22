@@ -136,7 +136,7 @@ def test_a_quiet_read_sends_a_heartbeat_and_a_finished_read_ends_the_stream() ->
     assert b'event: done\ndata: {"outcome": "read"}\n\n' in written
 
 
-# -- the queue's ownership of the store ---------------------------------------------------------------
+# -- the job's ownership of its transcript ------------------------------------------------------------
 
 
 class _StreamingReader:
@@ -204,17 +204,17 @@ def test_the_queue_hands_its_reader_a_transcript_and_frees_it_when_the_job_finis
         job = queue.submit(b"one", "203.0.113.7")
         assert reader.started.wait(5)
 
-        transcript = queue.transcript(job.id)
+        transcript = queue.job(job.id).transcript()
         assert transcript is not None, "a running job keeps its transcript"
         names = [event.name for event in transcript.since(0)[0]]
         assert names == ["delta", "delta", "delta", "page"]
-        assert "transcript" not in job.as_json() and "events" not in job.as_json()
+        assert "transcript" not in job.answer() and "events" not in job.answer()
 
         reader.release.set()
-        _wait_until(lambda: queue.get(job.id) is not None and queue.get(job.id).stage == "done")
+        _wait_until(lambda: queue.job(job.id) is not None and queue.job(job.id).stage == "done")
 
-        assert queue.transcript(job.id) is None, "a finished job frees its transcript"
-        answer = queue.get(job.id).as_json()
+        assert queue.job(job.id).transcript() is None, "a finished job frees its transcript"
+        answer = queue.job(job.id).answer()
         assert answer["reading"]["pages"] == [{"number": 1, "text": "the page"}]
     finally:
         queue.close()
@@ -231,12 +231,12 @@ def test_the_queue_bounds_each_page_to_the_limit_and_marks_the_drop() -> None:
         job = queue.submit(b"one", "203.0.113.7")
         assert reader.started.wait(5)
 
-        transcript = queue.transcript(job.id)
+        transcript = queue.job(job.id).transcript()
         assert transcript is not None
         events = [(event.name, event.data) for event in transcript.since(0)[0]]
 
         reader.release.set()
-        _wait_until(lambda: queue.get(job.id) is not None and queue.get(job.id).stage == "done")
+        _wait_until(lambda: queue.job(job.id) is not None and queue.job(job.id).stage == "done")
     finally:
         queue.close()
 
@@ -257,9 +257,9 @@ def test_a_transcript_ceiling_of_zero_keeps_no_text_at_all() -> None:
         job = queue.submit(b"one", "203.0.113.7")
         assert reader.started.wait(5)
 
-        assert queue.transcript(job.id) is None, "a zero ceiling keeps no transcript at all"
+        assert queue.job(job.id).transcript() is None, "a zero ceiling keeps no transcript at all"
         reader.release.set()
-        _wait_until(lambda: queue.get(job.id) is not None and queue.get(job.id).stage == "done")
+        _wait_until(lambda: queue.job(job.id) is not None and queue.job(job.id).stage == "done")
     finally:
         queue.close()
 
@@ -498,7 +498,7 @@ def test_the_real_server_streams_the_raw_read_and_a_reload_replays_it_from_the_s
     assert worker.bodies[0]["stream"] is True
     assert ledger.usage("127.0.0.1").reads_in_window == 1
     assert ledger.usage("127.0.0.1").ocr_pages_today == 1
-    assert app.transcript(job) is None, "the finished job keeps no transcript"
+    assert app.job(job).transcript() is None, "the finished job keeps no transcript"
 
 
 def test_closing_the_connection_mid_stream_charges_exactly_one_read_and_its_pages() -> None:

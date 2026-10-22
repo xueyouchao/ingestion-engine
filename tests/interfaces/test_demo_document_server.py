@@ -117,14 +117,20 @@ def _reads(pages: tuple[PageText, ...]) -> Callable:
 
 
 class BlockingReader:
-    """A reader held open until the test releases it, so a job can be seen mid-read."""
+    """A reader held open until the test releases it, so a job can be seen mid-read.
+
+    ``sink`` is the job's own, kept so a test can report the page count and a completed page through the
+    same interface a lane reports through -- there is no store to reach into.
+    """
 
     def __init__(self, outcome: Reading | FailedReading) -> None:
         self._outcome = outcome
         self.started = threading.Event()
         self.release = threading.Event()
+        self.sink = None
 
     def __call__(self, content, client, on_stage, name, sink=None):
+        self.sink = sink
         on_stage("routing")
         on_stage("reading")
         self.started.set()
@@ -230,10 +236,9 @@ def test_a_page_still_being_read_is_only_a_skeleton_and_a_delta_never_reaches_th
     with _serving(app) as base:
         job_id = _post(base)
         assert reader.started.wait(5)
-        app.documents.begin(job_id, page_count=2)
-        app.documents.page(job_id, PageText(1, "the first completed page"))
-        sink = app.documents.sink(job_id)
-        sink.on_delta(2, "| a half | parsed table |")  # a delta is the transcript pane's, not this one
+        reader.sink.on_page_count(2)
+        reader.sink.on_page(PageText(1, "the first completed page"))
+        reader.sink.on_delta(2, "| a half | parsed table |")  # a delta is the transcript pane's
 
         with _get(f"{base}/api/read/{job_id}/document") as response:
             html = response.read().decode("utf-8")
@@ -265,8 +270,8 @@ def test_a_failed_read_keeps_the_pages_that_already_completed() -> None:
     with _serving(app) as base:
         job_id = _post(base)
         assert reader.started.wait(5)
-        app.documents.begin(job_id, page_count=2)
-        app.documents.page(job_id, PageText(1, "the page that completed before the failure"))
+        reader.sink.on_page_count(2)
+        reader.sink.on_page(PageText(1, "the page that completed before the failure"))
         with _get(f"{base}/api/read/{job_id}/document") as response:
             html = response.read().decode("utf-8")
         reader.release.set()
@@ -475,7 +480,7 @@ def test_a_completed_page_shows_before_the_reading_finishes_and_the_rest_stay_sk
                 final_html = response.read().decode("utf-8")
             with _get(f"{base}/api/read/{job_id}/document.md") as response:
                 final_markdown = response.read().decode("utf-8")
-            stored = app.documents.view(job_id)
+            stored = app.job(job_id).document()
     finally:
         app.close()
 
