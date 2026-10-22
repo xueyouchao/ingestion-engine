@@ -18,7 +18,7 @@ import pytest
 
 import finepdfs.interfaces.demo_render as demo_render
 from finepdfs.domain.document import PageText
-from finepdfs.interfaces.demo_document import DocumentView
+from finepdfs.interfaces.demo_job import DocumentView
 
 REPO = Path(__file__).resolve().parents[2]
 

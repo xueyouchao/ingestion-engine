@@ -3,7 +3,7 @@
 ADR-0014 makes the raw read proof of work, not evidence. A Reading hands every delta to this store from
 the engine-call pool thread; the store keeps a per-page ring buffer with a byte ceiling and lets any
 number of subscribers replay it from the beginning. Nothing here is written to disk, put in the job
-answer or cited, and the queue releases the store the moment the Reading finishes.
+answer or cited, and the job that owns it releases it the moment the Reading finishes.
 
 The wire contract, which the page asset and the HTTP tests depend on. Every event is an SSE
 ``event:``/``data:`` pair whose data is one compact JSON object:
@@ -23,7 +23,8 @@ the EventSource on ``done`` rather than letting it reconnect. A late or reloaded
 from the store's start, which for a truncated page is the truncated event plus the retained tail.
 
 The store is ephemeral by construction: an absent job id is answered with an HTTP error before a stream
-starts, and a finished Reading's store is detached by the queue, so there is nothing left to replay.
+starts, and a finished Reading's store is detached by the job that held it, so there is nothing left to
+replay.
 
 Delta text is the worker's own output and is never markup: a subscriber shows it with ``textContent`` (or
 an equivalent escape) and never parses it as HTML. The same rule the ADR gives the raw pane lives here,

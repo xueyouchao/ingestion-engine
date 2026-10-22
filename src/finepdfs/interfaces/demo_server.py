@@ -17,11 +17,13 @@ Nothing here imports a vendor SDK, and nothing here writes: the uploaded bytes a
 the page images are rendered from memory, and no file, page or job outlives the process.
 
 The rendered document is its own answer, never a field of the job JSON (ADR-0014):
-``GET /api/read/<id>/document`` returns the inert HTML fragment described in ``demo_document`` and
+``GET /api/read/<id>/document`` returns the inert HTML fragment described in ``demo_job`` and
 ``demo_render``, and ``GET /api/read/<id>/document.md`` returns the same Page Texts in the corpus's one
 projection, as the download the page offers. ``GET /api/read/<id>`` keeps exactly its old shape, so the
-data answer never carries markup. Both document answers need the page store's pages and nothing else; the
-fragment additionally needs the pinned ``[demo]`` pair and answers ``503`` in words when it is absent.
+data answer never carries markup. Every answer here is a method on one ``DemoJob`` -- its stage and
+outcome, its transcript, its document -- so this module asks the job and never joins two stores to
+assemble a pane. Both document answers need the job's own pages and nothing else; the fragment
+additionally needs the pinned ``[demo]`` pair and answers ``503`` in words when it is absent.
 
     finepdfs-live-demo --host 127.0.0.1 --port 8766
     PYTHONPATH=src python -m finepdfs.interfaces.demo_server
@@ -46,7 +48,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from finepdfs.application.curate import CurationPolicy
-from finepdfs.application.demo_read import DemoRead, Reading, ReadingOutcome
+from finepdfs.application.demo_read import DemoRead
 from finepdfs.domain.demo import (
     DEFAULT_DAILY_OCR_PAGE_BUDGET,
     DEFAULT_HEARTBEAT_SECONDS,
@@ -74,11 +76,10 @@ from finepdfs.infrastructure.demo.ledger import InMemoryGateLedger
 from finepdfs.infrastructure.engines.environment import ENGINE_COMMAND, engine_config, ocr_routing_policy
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextLayerProbe
 from finepdfs.infrastructure.engines.registry import PADDLEOCR_VL_ENGINE, build_engines, engine_endpoint
-from finepdfs.interfaces.demo_document import DocumentStore, DocumentView
-from finepdfs.interfaces.demo_jobs import QueueFull, Reader, ReadingJob, ReadingQueue
+from finepdfs.interfaces.demo_job import DemoJob, DocumentView
+from finepdfs.interfaces.demo_jobs import QueueFull, Reader, ReadingQueue
 from finepdfs.interfaces.demo_page import DEMO_HTML
 from finepdfs.interfaces.demo_render import RenderingNotInstalled, render_document
-from finepdfs.interfaces.demo_sinks import FanOutReadSink
 from finepdfs.interfaces.demo_transcript import (
     STREAM_WRITE_TIMEOUT_SECONDS,
     RawTranscript,
@@ -261,25 +262,13 @@ class DemoApp:
         self._engine_name = engine_name if engine_name is not None else configured_engine(self._environ)
         self._ledger = ledger if ledger is not None else InMemoryGateLedger(clock=clock, limits=self._limits)
         self._use_case = self._demo_read()
-        # The document pane's store (ADR-0014): a page a lane reports mid-read lands here, keyed by job
-        # id, while a finished job's own Reading stays the authority for what the pane shows.
-        self._documents = DocumentStore()
+        # One queue, and one ``DemoJob`` per upload: the job is the sink every pane reads, so there is no
+        # second store to build here and nothing to join when an answer is asked for (ADR-0014).
         self._queue = ReadingQueue(
             read if read is not None else self._use_case.read,
             self._limits,
             redact=self._redact,
-            sinks=self._watch,
-            finished=self._job_finished,
         )
-
-    def _watch(self, job_id: str, transcript: RawTranscript | None) -> FanOutReadSink:
-        """The one sink a job's read reports to: the raw transcript when it is kept, and the document."""
-        return FanOutReadSink(transcript, self._documents.sink(job_id))
-
-    def _job_finished(self, job_id: str, outcome: ReadingOutcome | None) -> None:
-        """A finished Reading is authoritative for the document pane, even if a page never reported."""
-        if isinstance(outcome, Reading):
-            self._documents.completed(job_id, outcome.pages)
 
     @property
     def limits(self) -> DemoLimits:
@@ -309,27 +298,10 @@ class DemoApp:
     def queue(self) -> ReadingQueue:
         return self._queue
 
-    @property
-    def documents(self) -> DocumentStore:
-        """The document pane's per-job store: where a mid-read lane reports each completed Page Text."""
-        return self._documents
-
     def document(self, job_id: str) -> DocumentView | None:
-        """One job's document as the pane sees it, or ``None`` for an id this process never issued.
-
-        A finished Reading is authoritative: its pages are the accepted Page Texts, in their original
-        1-based numbers. While a job is still reading, the store holds the pages completed so far and
-        the page count the job has learned, so the pane can show a skeleton for the rest. A failed read
-        keeps the pages that completed before it, because the store is not cleared by the outcome.
-        """
-        job = self.job(job_id)
-        if job is None:
-            return None
-        reading = job.outcome if isinstance(job.outcome, Reading) else None
-        if reading is not None:
-            pages = tuple(sorted(reading.pages, key=lambda page: page.number))
-            return DocumentView(pages=pages, total=len(pages))
-        return self._documents.view(job_id)
+        """One job's document as the pane sees it, or ``None`` for an id this process never issued."""
+        job = self._queue.job(job_id)
+        return None if job is None else job.document()
 
     def markdown(self, job_id: str) -> str | None:
         """The `.md` the pane offers for download: the shared projection, or ``None`` for no such job."""
@@ -350,17 +322,18 @@ class DemoApp:
             "ocr_endpoint_configured": _endpoint_configured(self._environ),
         }
 
-    def submit(self, content: bytes, client: str, name: str = DEFAULT_UPLOAD_NAMES[PDF_MEDIA_TYPE]) -> ReadingJob:
+    def submit(self, content: bytes, client: str, name: str = DEFAULT_UPLOAD_NAMES[PDF_MEDIA_TYPE]) -> DemoJob:
         """Queue one upload; ``QueueFull`` is the handler's 503 and nothing else is refused here."""
         return self._queue.submit(content, client, name)
 
-    def job(self, job_id: str) -> ReadingJob | None:
-        """One job's standing, or ``None`` for an id this process never issued or no longer keeps."""
-        return self._queue.get(job_id)
+    def job(self, job_id: str) -> DemoJob | None:
+        """The job this id names, or ``None`` for an id this process never issued or no longer keeps."""
+        return self._queue.job(job_id)
 
     def transcript(self, job_id: str) -> RawTranscript | None:
         """The raw transcript of a job that is running or waiting; ``None`` once it finished."""
-        return self._queue.transcript(job_id)
+        job = self._queue.job(job_id)
+        return None if job is None else job.transcript()
 
     def close(self) -> None:
         """Stop the queue's worker; the process is ending or the test is done."""
@@ -453,10 +426,6 @@ def _endpoint_configured(values: Mapping[str, str]) -> bool:
     )
 
 
-def _words(error: BaseException) -> str:
-    return str(error) or type(error).__name__
-
-
 class DemoRequestHandler(BaseHTTPRequestHandler):
     """Serve the page, the status answer, the upload and the job poll; every path is explicit."""
 
@@ -513,7 +482,7 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             if job is None:
                 self._error(HTTPStatus.NOT_FOUND, f"no job {target}", head=head)
                 return
-            self._json(job.as_json(), head=head)
+            self._json(job.answer(), head=head)
 
     def _document_html(self, job_id: str, *, head: bool) -> None:
         """The inert fragment for one job; an explicit absence when the ``[demo]`` extra is missing."""
@@ -591,10 +560,11 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
     def _events(self, job_id: str, *, head: bool = False) -> None:
         """Stream one job's raw transcript (ADR-0014), or answer honestly when there is none left.
 
-        The store exists only while the Reading does, so an id this process never issued is a ``404`` and
-        a job that already finished -- whose transcript was freed -- is a ``410``. Neither is answered
-        with an empty stream that a browser would keep reconnecting to. The stream itself is bounded by
-        the store's own finish and by a write timeout, so a client that stops reading releases the thread.
+        The transcript exists only while the job holds it, so an id this process never issued is a
+        ``404`` and a job that already finished -- and so freed its transcript -- is a ``410``. Neither
+        is answered with an empty stream that a browser would keep reconnecting to. The stream itself is
+        bounded by the transcript's own finish and by a write timeout, so a client that stops reading
+        releases the thread.
         """
         if head:
             self._error(HTTPStatus.METHOD_NOT_ALLOWED, "HEAD is not served for the events stream", head=True)

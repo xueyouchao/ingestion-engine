@@ -3,6 +3,8 @@
 The queue is the demo's own, not Modal's (ADR-0012), so it is tested on its own: a fake reader stands
 where the composition root would build a ``DemoRead`` inside a lease, and the assertions are what a
 visitor's browser sees -- a stage, an outcome, a refusal kind, a failure lane -- never a private counter.
+Each job is the ``DemoJob`` the queue hands out, so this file also pins that the queue's one retention
+bound is the only one: a forgotten job takes its document with it.
 """
 
 from __future__ import annotations
@@ -94,11 +96,15 @@ def _queue(read, limits: DemoLimits | None = None, retained_jobs: int = 32):
         queue.close()
 
 
+def _job(queue: ReadingQueue, job_id: str):
+    job = queue.job(job_id)
+    assert job is not None, "the queue forgot a job it should still answer"
+    return job
+
+
 def _done(queue: ReadingQueue, job_id: str) -> dict:
-    _wait_until(lambda: queue.get(job_id) is not None and queue.get(job_id).stage == "done")
-    job = queue.get(job_id)
-    assert job is not None
-    return job.as_json()
+    _wait_until(lambda: queue.job(job_id) is not None and queue.job(job_id).stage == "done")
+    return _job(queue, job_id).answer()
 
 
 def test_the_queue_reads_one_document_at_a_time_and_stages_each_job() -> None:
@@ -108,8 +114,8 @@ def test_the_queue_reads_one_document_at_a_time_and_stages_each_job() -> None:
         assert reader.started.wait(5)
         second = queue.submit(b"second", "203.0.113.7", "second.pdf")
 
-        assert queue.get(first.id).stage == "routing"
-        assert queue.get(second.id).stage == "queued"
+        assert queue.job(first.id).stage == "routing"
+        assert queue.job(second.id).stage == "queued"
         assert queue.depth() == {"active": 1, "waiting": 1}
 
         reader.release.set()
@@ -127,7 +133,7 @@ def test_a_job_that_is_still_waiting_is_a_stage_with_no_outcome_yet() -> None:
         job = queue.submit(b"one", "203.0.113.7", "mine.pdf")
         assert reader.started.wait(5)
 
-        answer = queue.get(job.id).as_json()
+        answer = _job(queue, job.id).answer()
 
         assert answer["stage"] == "routing"
         assert answer["outcome"] is None
@@ -160,7 +166,7 @@ def test_a_job_is_never_shown_finished_before_its_answer_is_stored() -> None:
         job = queue.submit(b"one", "203.0.113.7", "mine.pdf")
         assert answered.wait(5)
 
-        answer = queue.get(job.id).as_json()
+        answer = _job(queue, job.id).answer()
 
         assert answer["stage"] == "reading", "the queue publishes done only together with the outcome"
         assert answer["outcome"] is None
@@ -180,7 +186,7 @@ def test_a_full_waiting_list_is_refused_with_the_busy_kind() -> None:
 
         assert caught.value.kind == "busy"
         assert "reading" in caught.value.reason
-        assert queue.get(first.id) is not None, "a refused submission never displaces the running job"
+        assert queue.job(first.id) is not None, "a refused submission never displaces the running job"
         assert queue.depth() == {"active": 1, "waiting": 1}
         reader.release.set()
 
@@ -192,18 +198,23 @@ def test_a_finished_job_is_still_readable_for_a_late_poll() -> None:
         answer = _done(queue, job.id)
 
         assert answer["stage"] == "done"
-        assert queue.get(job.id) is not None, "an idle page polls the job after the worker moved on"
+        assert queue.job(job.id) is not None, "an idle page polls the job after the worker moved on"
 
 
 def test_only_the_most_recent_finished_jobs_are_kept() -> None:
+    """One bound, one eviction: forgetting a job forgets its document too, because the job holds it."""
     with _queue(lambda content, client, on_stage, name, sink=None: _reading(), retained_jobs=1) as queue:
         first = queue.submit(b"one", "203.0.113.7")
         _done(queue, first.id)
         second = queue.submit(b"two", "203.0.113.7")
         _done(queue, second.id)
 
-        assert queue.get(first.id) is None, "the demo keeps no job state beyond the most recent ones"
-        assert queue.get(second.id) is not None
+        assert queue.job(first.id) is None, "the demo keeps no job state beyond the most recent ones"
+        assert queue.job(second.id) is not None
+        assert [(page.number, page.text) for page in queue.job(second.id).document().pages] == [
+            (1, "one"),
+            (2, "two"),
+        ], "the retained job still answers its document; there is no second bound to outlive it"
 
 
 def test_a_read_job_carries_the_decision_the_pages_and_the_measured_warm_up() -> None:

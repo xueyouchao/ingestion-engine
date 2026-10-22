@@ -157,8 +157,18 @@ restart of the demo server forgives every counter. Pages are charged when a Read
 success, and a refusal charges nothing.
 
 **Reading Queue** — the demo server's single slot and the bounded list of Readings waiting behind it
-(`ReadingQueue`). One Reading runs at a time, which is what makes leasing the GPU per Reading safe; an
-upload that finds every place taken is refused with kind `busy` rather than waiting unboundedly.
+(`ReadingQueue`, `interfaces/demo_jobs.py`). One Reading runs at a time, which is what makes leasing the
+GPU per Reading safe; an upload that finds every place taken is refused with kind `busy` rather than
+waiting unboundedly. It keeps the slot, the admission decision, the waiting list and one retention bound
+for finished jobs -- **and it names no pane**: what a job *has* is its own Demo Job.
+
+**Demo Job** — one upload's per-job state as every pane of the live upload demo sees it (`DemoJob`,
+`interfaces/demo_job.py`): the stage its Reading reached, the outcome it answered with, the raw
+transcript its deltas went into, and the document view built from its Page Texts. It is the `ReadSink` the
+engine reports to, so the events endpoint, the document answer and the job JSON all read one object
+rather than two stores joined after the fact. A job retires itself: it publishes `done` with its answer,
+frees its transcript, and drops the pages a lane reported mid-read in favour of the finished Reading's own
+Page Texts, which are held once (ADR-0012, ADR-0014).
 
 **Warm Control** — the operator command that reports and moves the deployed OCR worker's floor —
 `python -m deploy.modal.warm status|on|off`, in `deploy/modal/warm.py` — and names what that floor costs per

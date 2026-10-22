@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from finepdfs.domain.document import PageText
 from finepdfs.domain.language import LanguageOutcome
-from finepdfs.domain.publishing import PublishPolicy
+from finepdfs.domain.publishing import PublishPolicy, document_markdown, pages_in_order
 
 
 def _pages(text: str, count: int = 1) -> list[PageText]:
@@ -41,3 +41,13 @@ def test_a_language_outside_the_allowed_set_is_dropped() -> None:
 
     assert published is False
     assert "not one of the required languages (eng, deu)" in reason
+
+
+def test_page_texts_are_put_in_their_own_numeric_order_by_one_rule() -> None:
+    """The one ordering rule: 1-based page numbers, compared as numbers and not as text."""
+    pages = [PageText(number, f"page {number}") for number in (10, 2, 1)]
+
+    ordered = pages_in_order(pages)
+
+    assert [page.number for page in ordered] == [1, 2, 10]
+    assert document_markdown(ordered) == "page 1\n\npage 2\n\npage 10"

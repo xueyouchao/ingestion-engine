@@ -37,10 +37,10 @@ The commands name how to check machine state; they do not claim what the answer 
 | `deploy/gpu/server.py` | the in-container launcher both postures spawn; `--print-command` prints the pinned command with the bearer masked |
 | `deploy/modal/image.py` | the pinned worker image, `WORKER_ENTRYPOINT` and the weights Volume |
 | `src/finepdfs/interfaces/demo_server.py` | the demo host: HTTP surface, composition root, `FINEPDFS_DEMO_*` reader |
-| `src/finepdfs/interfaces/demo_jobs.py` | the Reading Queue and the job JSON a page polls |
+| `src/finepdfs/interfaces/demo_jobs.py` | the Reading Queue: the slot, admission, the waiting list and the retention bound |
 | `src/finepdfs/interfaces/demo_page.py` | the page asset (self-contained HTML): the three panes |
 | `src/finepdfs/interfaces/demo_transcript.py` | the raw read's bounded per-page store and its `text/event-stream` (§13) |
-| `src/finepdfs/interfaces/demo_document.py` | the document pane's per-job store: completed pages, skeletons, retention |
+| `src/finepdfs/interfaces/demo_job.py` | one job's per-job state: stage, answer, transcript, document view (retention is the queue's) |
 | `src/finepdfs/interfaces/demo_render.py` | the pinned renderer and sanitizer behind `/document`; the `503` sentence when they are absent |
 | `src/finepdfs/domain/demo.py` | the limits' defaults and `SpendGatePolicy` |
 | `src/finepdfs/infrastructure/demo/ledger.py` | `InMemoryGateLedger`, the only Gate Ledger adapter |
