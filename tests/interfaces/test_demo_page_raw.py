@@ -66,8 +66,16 @@ def test_the_raw_pane_is_fed_by_the_events_endpoint_and_sets_it_as_text_only() -
     assert 'new EventSource("/api/read/" + encodeURIComponent(jobId) + "/events")' in page
     assert "renderRaw" in page
 
-    for forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
+    # Ticket 37 gives the page its one insertion: the rendered document's fragment, whose own test
+    # (`test_demo_page_document.py`) pins that it is the only innerHTML in the asset. This pane's path
+    # is still text only, so the assertion moves from the whole page to the transcript's own functions.
+    assert page.count("innerHTML") == 1, "the raw pane adds no second place that parses text"
+    for forbidden in ("outerHTML", "insertAdjacentHTML", "document.write", "eval("):
         assert forbidden not in page, f"the page never parses text on the transcript path ({forbidden})"
+    for transcript_function in ("renderRaw", "openRawStream", "settleRaw", "copyRaw", "applyRawEvent", "node"):
+        assert "innerHTML" not in _function(transcript_function), (
+            f"{transcript_function} writes text, never markup"
+        )
     render = _function("renderRaw")
     assert "textContent" in render, "the raw text is assigned as text"
     assert "replaceChildren" in render

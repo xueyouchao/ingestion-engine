@@ -324,16 +324,19 @@ def test_the_page_states_where_the_bytes_go_and_what_is_kept_before_the_upload()
     limits = html.index('id="limits"')
     upload = html.index('id="upload-file"')
     assert statements < limits < upload, "the limits and the two statements come before the upload control"
-    # The ticket lists the read's parts in this order: the decision, the text it read, then the identity
-    # that produced it -- a visitor reads the answer before the provenance.
-    assert html.index('id="decision"') < html.index('id="pages"') < html.index('id="engine-identity"')
+    # Ticket 37's three panes are one row in reading order -- what was sent, what came back, what would
+    # be published -- and the decision and the identity that produced it follow the answer.
+    panes = [html.index(f'<section id="{pane}"') for pane in ("input-pane", "raw", "document-pane")]
+    assert panes == sorted(panes), "the panes read left to right as they happened"
+    assert panes[-1] < html.index('id="decision"') < html.index('id="engine-identity"')
     assert "rented GPU" in html
     assert "nothing is kept" in html
     for identifier in (
         'id="timeline"',
         'id="decision"',
         'id="engine-identity"',
-        'id="pages"',
+        'id="document-pane"',
+        'id="document"',
         'id="refusal"',
         'id="failure"',
         'id="warm-measured"',
