@@ -440,7 +440,6 @@ function applyRawEvent(model, name, data) {
     model.finished = true;
     model.outcome = data.outcome === undefined ? null : data.outcome;
   }
-  return model;
 }
 
 function rawPages(model) {
@@ -728,7 +727,6 @@ async function refreshDocument(jobId) {
   setDocumentNote(documentNote(state.document.completed, state.document.total, state.document.finished));
   setDocumentControls(true);
 }
-
 
 function renderRefusal(refusal) {
   hideResults();
