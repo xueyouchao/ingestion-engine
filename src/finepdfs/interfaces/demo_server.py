@@ -46,7 +46,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from finepdfs.application.curate import CurationPolicy
-from finepdfs.application.demo_read import DemoRead, Reading
+from finepdfs.application.demo_read import DemoRead, Reading, ReadingOutcome
 from finepdfs.domain.demo import (
     DEFAULT_DAILY_OCR_PAGE_BUDGET,
     DEFAULT_HEARTBEAT_SECONDS,
@@ -78,6 +78,7 @@ from finepdfs.interfaces.demo_document import DocumentStore, DocumentView
 from finepdfs.interfaces.demo_jobs import QueueFull, Reader, ReadingJob, ReadingQueue
 from finepdfs.interfaces.demo_page import DEMO_HTML
 from finepdfs.interfaces.demo_render import RenderingNotInstalled, render_document
+from finepdfs.interfaces.demo_sinks import FanOutReadSink
 from finepdfs.interfaces.demo_transcript import (
     STREAM_WRITE_TIMEOUT_SECONDS,
     RawTranscript,
@@ -264,8 +265,21 @@ class DemoApp:
         # id, while a finished job's own Reading stays the authority for what the pane shows.
         self._documents = DocumentStore()
         self._queue = ReadingQueue(
-            read if read is not None else self._use_case.read, self._limits, redact=self._redact
+            read if read is not None else self._use_case.read,
+            self._limits,
+            redact=self._redact,
+            sinks=self._watch,
+            finished=self._job_finished,
         )
+
+    def _watch(self, job_id: str, transcript: RawTranscript | None) -> FanOutReadSink:
+        """The one sink a job's read reports to: the raw transcript when it is kept, and the document."""
+        return FanOutReadSink(transcript, self._documents.sink(job_id))
+
+    def _job_finished(self, job_id: str, outcome: ReadingOutcome | None) -> None:
+        """A finished Reading is authoritative for the document pane, even if a page never reported."""
+        if isinstance(outcome, Reading):
+            self._documents.completed(job_id, outcome.pages)
 
     @property
     def limits(self) -> DemoLimits:

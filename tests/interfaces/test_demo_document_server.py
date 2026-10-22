@@ -386,3 +386,115 @@ def test_an_unknown_job_has_no_document() -> None:
             with pytest.raises(urllib.error.HTTPError) as caught:
                 _get(f"{base}/api/read/0123456789abcdef/{suffix}")
             assert caught.value.code == 404
+
+class _PageByPageEngine:
+    """An OCR lane's engine that reports page 1, waits, then answers with both pages.
+
+    Page 1 arrives through the sink while the Reading is still running, so the pane can be asked what it
+    has before the job finishes. Page 2 is deliberately never reported: the finished Reading must remain
+    authoritative for it.
+    """
+
+    def __init__(self) -> None:
+        self.identity = EngineIdentity("paddleocr-vl", "weights-c5630abae1d9")
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self._pages = (PageText(1, "the first page"), PageText(2, "the second page"))
+
+    def extract(self, document, sink=None):
+        from finepdfs.domain.document import ExtractedDocument
+
+        assert sink is not None, "the demo handed its engine no read sink"
+        sink.on_page(self._pages[0])
+        self.started.set()
+        assert self.release.wait(5), "the test never released the second page"
+        return ExtractedDocument(pages=self._pages, engine=self.identity)
+
+
+class _ReadyEndpoint:
+    def ready(self) -> bool:
+        return True
+
+
+class _Lease:
+    def __init__(self, engine) -> None:
+        self._engine = engine
+
+    def __enter__(self):
+        return self._engine, _ReadyEndpoint()
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+
+class _ScannedProbe:
+    """Routing's answer for a two-page scan: the OCR lane, and the page count the pane needs at once."""
+
+    def measure(self, content: bytes) -> TextLayerQuality:
+        return TextLayerQuality(
+            page_count=2, pages_with_text=0, character_count=0, garbled_ratio=0.0, image_dominated_pages=2
+        )
+
+
+def test_a_completed_page_shows_before_the_reading_finishes_and_the_rest_stay_skeletons() -> None:
+    """The page count starts with routing, page 1 lands when it completes, and the answer ends complete."""
+    from datetime import datetime
+
+    from finepdfs.application.curate import CurationPolicy
+    from finepdfs.application.demo_read import DemoRead
+    from finepdfs.domain.demo import DemoLimits, SpendGatePolicy
+    from finepdfs.infrastructure.demo.ledger import InMemoryGateLedger
+
+    engine = _PageByPageEngine()
+    limits = DemoLimits()
+    ledger = InMemoryGateLedger(clock=lambda: datetime.now(), limits=limits)
+    read = DemoRead(
+        probe=_ScannedProbe(),
+        engines={},
+        policy=CurationPolicy(engine_name=ENGINE.name, routing=OcrRoutingPolicy()),
+        gates=SpendGatePolicy(limits),
+        ledger=ledger,
+        worker=lambda: _Lease(engine),
+    ).read
+    app = DemoApp(limits=limits, engine_name=ENGINE.name, environ={}, ledger=ledger, read=read)
+    try:
+        with _serving(app) as base:
+            job_id = _post(base)
+            assert engine.started.wait(5)
+
+            with _get(f"{base}/api/read/{job_id}/document") as response:
+                mid_html = response.read().decode("utf-8")
+                mid_pages = response.headers["X-Document-Pages"]
+                mid_completed = response.headers["X-Document-Completed"]
+            with _get(f"{base}/api/read/{job_id}/document.md") as response:
+                mid_markdown = response.read().decode("utf-8")
+
+            engine.release.set()
+            _wait_for_done(base, job_id)
+            with _get(f"{base}/api/read/{job_id}/document") as response:
+                final_html = response.read().decode("utf-8")
+            with _get(f"{base}/api/read/{job_id}/document.md") as response:
+                final_markdown = response.read().decode("utf-8")
+            stored = app.documents.view(job_id)
+    finally:
+        app.close()
+
+    mid = Document(mid_html)
+    assert mid_pages == "2", "the pane knows every page from routing, before the read ends"
+    assert mid_completed == "1"
+    assert 'data-pages="2"' in mid_html
+    assert mid.section("1")[1] == "complete"
+    assert mid.section("2")[1] == "pending"
+    assert "the first page" in mid.section("1")[2]
+    assert "the second page" not in mid.text, "a page appears only once its Page Text exists"
+    assert mid_markdown == "the first page"
+
+    final = Document(final_html)
+    assert [final.section(number)[1] for number in ("1", "2")] == ["complete", "complete"]
+    assert "the first page" in final.section("1")[2]
+    assert "the second page" in final.section("2")[2]
+    assert final_markdown == "the first page\n\nthe second page"
+    assert [(page.number, page.text) for page in stored.pages] == [
+        (1, "the first page"),
+        (2, "the second page"),
+    ], "the finished Reading was recorded as the job's completed document"

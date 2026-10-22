@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Collection, Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from finepdfs.domain.chunks import Chunk
 from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
@@ -53,6 +53,19 @@ class ReadSink(Protocol):
     def on_delta(self, page_number: int, text: str) -> None: ...
 
     def on_page(self, page: PageText) -> None: ...
+
+
+@runtime_checkable
+class PageCountSink(Protocol):
+    """A ReadSink that also learns how many pages the read will report before the first delta.
+
+    The count comes from routing, so a viewer can draw a placeholder for every page from the start
+    rather than inventing one from the pages that have arrived. It is separate from ``ReadSink`` because
+    watching a read does not require it: a sink that only forwards deltas and pages implements
+    ``ReadSink`` alone, and a caller offers the count only to a sink that asked for it.
+    """
+
+    def on_page_count(self, page_count: int) -> None: ...
 
 
 class OcrEngine(Protocol):
