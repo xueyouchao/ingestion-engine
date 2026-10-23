@@ -21,7 +21,7 @@ from finepdfs.application.demo_read import DemoRead, FailedReading, Reading, Ref
 from finepdfs.domain.demo import DemoLimits, SpendGatePolicy, UsageSnapshot
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText, TextLayerQuality
 from finepdfs.domain.ocr import OcrRoutingPolicy
-from finepdfs.domain.ports import OcrEndpointUnavailable
+from finepdfs.domain.ports import OcrEndpointUnavailable, PageCountSink, ReadSink
 from finepdfs.infrastructure.engines.paddleocr_vl import PaddleOcrVlCliEngine
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextLayerProbe
 from finepdfs.infrastructure.engines.subprocess_support import CommandResult
@@ -262,6 +262,59 @@ class TwoMethodSink:
 
     def on_page(self, page: PageText) -> None:
         self.pages.append(page)
+
+
+class CountingSink:
+    """A watcher that wants routing's page count as well as what the lane reports, in arrival order."""
+
+    def __init__(self) -> None:
+        self.order: list[str] = []
+        self.deltas: list[tuple[int, str]] = []
+        self.pages: list[PageText] = []
+
+    def on_page_count(self, pages: int) -> None:
+        self.order.append(f"count {pages}")
+
+    def on_delta(self, page_number: int, text: str) -> None:
+        self.order.append(f"delta {page_number}")
+        self.deltas.append((page_number, text))
+
+    def on_page(self, page: PageText) -> None:
+        self.order.append(f"page {page.number}")
+        self.pages.append(page)
+
+
+class StreamingEngine(FakeEngine):
+    """An engine that reports what a streaming lane reports: each page as it completes."""
+
+    def extract(self, document: Document, sink=None) -> ExtractedDocument:
+        extracted = super().extract(document, sink)
+        if sink is not None:
+            for page in extracted.pages:
+                sink.on_page(page)
+        return extracted
+
+
+def test_a_watcher_that_only_reports_what_the_engine_reports_satisfies_the_engine_s_port() -> None:
+    """Two methods are the whole engine side of the contract; a page count is not an engine capability."""
+    sink = TwoMethodSink()
+
+    assert isinstance(sink, ReadSink), "on_delta and on_page are all an engine reports"
+    assert not isinstance(sink, PageCountSink), "a watcher with no use for the count never implements it"
+
+
+def test_the_page_count_is_offered_to_a_sink_that_asks_for_it_before_the_lane_reports() -> None:
+    """ADR-0014: routing's count reaches a watcher that wants it, so a pane can draw a page per page."""
+    demo, fakes = _demo(HEALTHY)
+    fakes.engines[NATIVE_TEXT_ENGINE] = StreamingEngine(NATIVE_TEXT_ENGINE, _pages("native"))
+    sink = CountingSink()
+
+    outcome = demo.read(b"%PDF-1.7 healthy bytes", "10.0.0.1", lambda stage: None, sink=sink)
+
+    assert isinstance(outcome, Reading)
+    assert sink.order == ["count 2", "page 1", "page 2"], (
+        "routing's count arrives before the first page a lane reports, which is what a pane draws from"
+    )
 
 
 def test_a_sink_from_before_the_page_count_still_gets_its_reading() -> None:

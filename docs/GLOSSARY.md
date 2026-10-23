@@ -165,8 +165,9 @@ for finished jobs -- **and it names no pane**: what a job *has* is its own Demo 
 **Demo Job** — one upload's per-job state as every pane of the live upload demo sees it (`DemoJob`,
 `interfaces/demo_job.py`): the stage its Reading reached, the outcome it answered with, the raw
 transcript its deltas went into, and the document view built from its Page Texts. It is the `ReadSink` the
-engine reports to, so the events endpoint, the document answer and the job JSON all read one object
-rather than two stores joined after the fact. A job retires itself: it publishes `done` with its answer,
+engine reports to and the `PageCountSink` the use case hands routing's page count to, so the events
+endpoint, the document answer and the job JSON all read one object rather than two stores joined after
+the fact. A job retires itself: it publishes `done` with its answer,
 frees its transcript, and drops the pages a lane reported mid-read in favour of the finished Reading's own
 Page Texts, which are held once (ADR-0012, ADR-0014).
 

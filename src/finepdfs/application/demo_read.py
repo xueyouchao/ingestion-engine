@@ -36,6 +36,7 @@ from finepdfs.domain.ports import (
     OcrEndpointUnavailable,
     OcrEngine,
     OcrWorker,
+    PageCountSink,
     ReadSink,
     TextLayerProbe,
 )
@@ -93,13 +94,17 @@ class FailedReading:
     thresholds: OcrRoutingPolicy
 
     @classmethod
-    def broke(cls, error: BaseException) -> FailedReading:
+    def broke(cls, error: BaseException, redact: Callable[[str], str] = str) -> FailedReading:
         """The demo's own breakage, before any lane could answer: no plan was made and none is named.
 
         The demo server's queue wraps what it cannot turn into one of the three outcomes in this, so a
-        composition that raised still ends a job with the same shape every other failure has.
+        composition that raised still ends a job with the same shape every other failure has. Its words
+        are arbitrary -- a worker or an engine that could not be built may quote the address it was
+        configured with and the bearer it was handed -- so they are shown through ``redact``, exactly as
+        a lane's failure is: this reason reaches both the transcript's ``error`` event and the job
+        answer, and both are public.
         """
-        return cls(kind="failed", lane="", reason=_words(error), plan=None, thresholds=OcrRoutingPolicy())
+        return cls(kind="failed", lane="", reason=redact(_words(error)), plan=None, thresholds=OcrRoutingPolicy())
 
     def payload(self) -> dict[str, str]:
         """The failure as the transcript's ``error`` event and the job answer's ``failure`` carry it."""
@@ -172,7 +177,8 @@ class DemoRead:
     ) -> ReadingOutcome:
         """Route the upload, pass the gates, read it with the lane the decision chose.
 
-        ``sink`` watches the chosen lane's read (ADR-0014); every outcome is the same with or without one,
+        ``sink`` watches the chosen lane's read (ADR-0014) and, when it is also a ``PageCountSink``, is
+        offered routing's page count before the first delta; every outcome is the same with or without one,
         and a caller that leaves it out -- the batch flow, every existing test -- is served as before.
         """
         started = self._clock()
@@ -195,14 +201,11 @@ class DemoRead:
             return closed
 
         # The page count is routing's answer, so a pane that draws one placeholder per page can start
-        # before the first delta (ADR-0014). A sink written against the older two-method contract has no
-        # ``on_page_count`` at all, so the count is offered only to a sink that provides it: it is an
-        # informational extra, and an absent method here must never turn a readable upload into a
-        # failed job.
-        if sink is not None:
-            count_page = getattr(sink, "on_page_count", None)
-            if count_page is not None:
-                count_page(page_count)
+        # before the first delta (ADR-0014). It is not an engine capability, so it is offered only to a
+        # sink that asked for it by implementing ``PageCountSink``: an engine's sink, and a watcher with
+        # no use for the count, is never asked and never has to answer.
+        if isinstance(sink, PageCountSink):
+            sink.on_page_count(page_count)
 
         if ocr_pages is not None:
             return self._read_ocr(plan, content, name, on_stage, started, client, ocr_pages, sink)

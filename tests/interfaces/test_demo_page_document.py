@@ -45,7 +45,7 @@ PANE_IDS = ("input-pane", "raw", "document-pane")
 
 def _function(name: str) -> str:
     """The page's source for one top-level function, so Node can run exactly what the browser does."""
-    found = re.search(rf"(function {name}\(.*?\n\}})", demo_page.DEMO_HTML, re.S)
+    found = re.search(rf"((?:async )?function {name}\(.*?\n\}})", demo_page.DEMO_HTML, re.S)
     assert found is not None, f"the page asset defines {name}()"
     return found.group(1)
 
@@ -137,6 +137,56 @@ def test_the_pane_orders_nothing_and_has_no_second_status_vocabulary() -> None:
     assert 'cache: "no-store"' in refresh
     assert "setInterval" not in page, "the pane rides the job poll's cadence, not a second clock"
     assert "refreshDocument(jobId)" in _function("renderJob"), "each job tick asks the document again"
+
+
+@requires_node
+def test_the_document_pane_is_shown_even_when_its_first_answer_cannot_be_read() -> None:
+    """A fetch that fails writes its sentence into a pane the visitor can see, not into a hidden one."""
+    stubs = """
+const shown = new Map([["document-pane", new Set(["hidden"])]]);
+function element(id) {
+  const classes = shown.get(id) || new Set();
+  shown.set(id, classes);
+  return {
+    classList: {
+      remove: (name) => classes.delete(name),
+      add: (name) => classes.add(name),
+      contains: (name) => classes.has(name),
+    },
+    textContent: "",
+    replaceChildren() {},
+    disabled: false,
+  };
+}
+const elements = {};
+for (const id of ["document-pane", "document-note", "document", "document-copy", "document-download"]) {
+  elements[id] = element(id);
+}
+globalThis.byId = (id) => elements[id];
+globalThis.fetch = async () => { throw new Error("connection reset"); };
+const state = {
+  document: { job: "job-1", completed: 0, total: null, finished: false, failed: false, absent: false },
+  fileName: "",
+};
+"""
+    source = "\n".join(
+        _function(name) for name in ("setDocumentNote", "setDocumentControls", "refreshDocument")
+    )
+    script = (
+        f"{stubs}\n{source}\n"
+        "refreshDocument('job-1').then(() => {\n"
+        "  console.log(JSON.stringify({\n"
+        "    visible: !elements['document-pane'].classList.contains('hidden'),\n"
+        "    note: elements['document-note'].textContent,\n"
+        "  }));\n"
+        "});"
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    answered = json.loads(result.stdout)
+
+    assert answered["visible"] is True, "the pane is shown before its answer, so its failure is readable"
+    assert "could not be read" in answered["note"], "the failure is said in the pane's own note"
 
 
 # -- the real server, end to end --------------------------------------------------------------------

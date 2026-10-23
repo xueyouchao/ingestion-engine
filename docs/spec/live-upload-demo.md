@@ -190,9 +190,12 @@ returns one inert HTML fragment: an `<article class="document">` holding one `<s
 class="document-page" data-page="N" data-state="complete|pending|unread">` per page, in the original
 1-based numeric order, each complete page introduced by its `Page N` separator; a page still being read
 is a `pending` skeleton and a delta never reaches it, so a half-read table cannot appear, and after a
-failed read the pages it never reached are `unread` and say they were not read -- a failed read is not
-still reading. The page numbers are the pages the job has plus the count routing gave it: with no count,
-no page the read never reported is drawn and no page after the last one is invented.
+failed read the pages it never reached are `unread` and say they were not read -- a failed read, the
+queue's own breakage included, is not still reading. The page numbers are the pages the job has plus the
+count routing gave it, and the last one is whichever of the two is greater: with no count, no page the
+read never reported is drawn and no page after the last one reported is invented, and a page the read did
+report is never cut off by a smaller count. A failure keeps the count, which names the pages it never
+reached; a refusal drops it, because a read that never ran has no page to come.
 `X-Document-Completed` and (once the job knows it) `X-Document-Pages` say how much of it is real. `GET /api/read/<id>/document.md`
 returns the same completed pages as the markdown the corpus writes -- the one shared projection
 (`document_markdown`), byte for byte -- and needs no optional dependency. The pane offers a copy button

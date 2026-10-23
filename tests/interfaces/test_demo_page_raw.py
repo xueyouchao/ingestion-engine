@@ -82,6 +82,86 @@ def test_the_raw_pane_is_fed_by_the_events_endpoint_and_sets_it_as_text_only() -
     assert "element.textContent = String(text);" in _function("node"), "every node's text is its textContent"
 
 
+# A DOM stand-in small enough to run the pane's own renderer in Node: elements hold their children and
+# text, and a full rebuild is counted, so the test can say how often the pane was rebuilt.
+FAKE_DOM = """
+function element(tag) {
+  return {
+    tagName: tag,
+    className: "",
+    dataset: {},
+    children: [],
+    rebuilds: 0,
+    _text: "",
+    classList: { remove() {}, add() {} },
+    setAttribute() {},
+    append(...kids) { this.children.push(...kids); },
+    replaceChildren() { this.children = []; this.rebuilds += 1; },
+    set textContent(value) { this._text = String(value); },
+    get textContent() {
+      return this._text + this.children.map((child) => (child.textContent === undefined ? "" : child.textContent)).join("");
+    },
+  };
+}
+const panes = {};
+for (const id of ["raw", "raw-note", "raw-copy", "raw-transcript"]) panes[id] = element("div");
+const container = panes["raw-transcript"];
+globalThis.document = {
+  getElementById: (id) => panes[id],
+  createElement: (tag) => element(tag),
+  createTextNode: (text) => ({ textContent: String(text), children: [] }),
+};
+globalThis.byId = (id) => panes[id];
+"""
+
+
+def test_a_delta_appends_to_the_page_it_belongs_to_and_only_a_new_page_rebuilds() -> None:
+    """A streamed token costs one append: the page's text grows once, and no page is rebuilt for it."""
+    events = [
+        ("delta", {"page": 1, "text": "one "}),
+        ("delta", {"page": 1, "text": "two "}),
+        ("delta", {"page": 1, "text": "three"}),
+    ]
+    functions = ("rawModel", "applyRawEvent", "appendRawEvent", "rawPages", "rawNote", "rawText", "rawTruncation", "node", "renderRaw")
+    source = "\n".join(_function(name) for name in functions)
+    script = (
+        f"{FAKE_DOM}\n{source}\nconst events = {json.dumps(events)};\n"
+        "const model = rawModel();\n"
+        "const steps = [];\n"
+        "let firstArticle = null;\n"
+        "for (const [name, data] of events) {\n"
+        "  const appended = appendRawEvent(model, name, data);\n"
+        "  if (!appended) renderRaw(model);\n"
+        "  if (firstArticle === null) firstArticle = container.children[0];\n"
+        "  steps.push({appended: appended, rebuilds: container.rebuilds});\n"
+        "}\n"
+        "const sameArticle = container.children[0] === firstArticle;\n"
+        "const truncated = appendRawEvent(model, \"truncated\", {page: 1, dropped_bytes: 4});\n"
+        "if (!truncated) renderRaw(model);\n"
+        "console.log(JSON.stringify({\n"
+        "  steps: steps,\n"
+        "  sameArticle: sameArticle,\n"
+        "  pre: container.children[0].children[container.children[0].children.length - 1].textContent,\n"
+        "  pages: rawPages(model),\n"
+        "  truncatedRebuilt: truncated === false && container.rebuilds === 2,\n"
+        "}));"
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    rendered = json.loads(result.stdout)
+
+    assert rendered["steps"][0] == {"appended": False, "rebuilds": 1}, "a page first appearing is drawn"
+    assert rendered["steps"][1:] == [{"appended": True, "rebuilds": 1}, {"appended": True, "rebuilds": 1}], (
+        "the later deltas append to that page, with no second rebuild"
+    )
+    assert rendered["sameArticle"] is True, "the page's element is the one drawn when it first appeared"
+    assert rendered["pre"] == "one two three", "the pane's text is the concatenation the model holds"
+    assert rendered["pages"] == [{"number": 1, "text": "one two three", "dropped": 4}], (
+        "the model kept every delta's text, and the truncation marker is the last thing applied"
+    )
+    assert rendered["truncatedRebuilt"] is True, "a truncation marker changes the structure, so it redraws"
+
+
 @requires_node
 def test_a_hostile_delta_reaches_the_raw_pane_as_text() -> None:
     """A delta is the worker's bytes, not markup: it survives verbatim and the renderer sets text."""
@@ -436,6 +516,77 @@ def test_a_failed_read_keeps_the_transcript_it_produced_and_the_failure_panel_na
     page = demo_page.DEMO_HTML
     assert 'id="failure-lane"' in page and 'id="failure-reason"' in page
     assert '"raw"' not in _function("hideResults"), "a new outcome never hides the transcript it produced"
+
+
+STREAM_STUBS = """
+const state = { raw: null, rawJob: null, events: null };
+let renders = 0;
+function renderRaw() { renders += 1; }
+const opened = [];
+class FakeEventSource {
+  constructor(url) {
+    this.url = url;
+    this.listeners = {};
+    this.closed = false;
+    opened.push(this);
+  }
+  addEventListener(name, handler) {
+    (this.listeners[name] = this.listeners[name] || []).push(handler);
+  }
+  close() { this.closed = true; }
+  fire(name, event) { for (const handler of this.listeners[name] || []) handler(event); }
+}
+globalThis.EventSource = FakeEventSource;
+"""
+
+
+@requires_node
+def test_a_stale_streams_done_and_error_leave_the_new_jobs_stream_and_pane_alone() -> None:
+    """A handler from the job an upload replaced still fires; it may not close or write the new job's stream."""
+    source = "\n".join(
+        _function(name)
+        for name in ("rawModel", "applyRawEvent", "appendRawEvent", "closeRawStream", "openRawStream")
+    )
+    script = (
+        f"{STREAM_STUBS}\n{source}\n"
+        "openRawStream('old');\n"
+        "const older = opened[0];\n"
+        "older.fire('delta', {data: JSON.stringify({page: 1, text: 'the old job text'})});\n"
+        "openRawStream('new');\n"
+        "const newer = opened[1];\n"
+        "const model = state.raw;\n"
+        "const rendersBeforeStale = renders;\n"
+        "older.fire('done', {data: JSON.stringify({outcome: 'read'})});\n"
+        "const afterDone = {open: !newer.closed && state.events === newer, pane: state.raw === model};\n"
+        "older.fire('error', {});\n"
+        "const afterError = {\n"
+        "  open: !newer.closed && state.events === newer,\n"
+        "  pane: state.raw === model && model.available === true && model.finished === false,\n"
+        "};\n"
+        "const rendersAfterStale = renders;\n"
+        "state.raw = null;\n"
+        "newer.fire('error', {});\n"
+        "console.log(JSON.stringify({\n"
+        "  afterDone: afterDone,\n"
+        "  afterError: afterError,\n"
+        "  staleRenders: rendersAfterStale - rendersBeforeStale,\n"
+        "  oldClosed: older.closed,\n"
+        "  nullRawDidNotThrow: true,\n"
+        "}));"
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    answered = json.loads(result.stdout)
+
+    assert answered["afterDone"] == {"open": True, "pane": True}, (
+        "an old job's ``done`` never closes the new job's stream or replaces its model"
+    )
+    assert answered["afterError"] == {"open": True, "pane": True}, (
+        "an old job's connection error leaves the new job's stream open and its pane untouched"
+    )
+    assert answered["staleRenders"] == 0, "neither stale handler redraws the new job's pane"
+    assert answered["oldClosed"] is True, "the open that replaced the old job still closed the old stream"
+    assert answered["nullRawDidNotThrow"] is True, "an error while ``state.raw`` is null does not throw"
 
 
 def test_the_page_opens_one_event_stream_per_job_and_closes_it_on_done() -> None:

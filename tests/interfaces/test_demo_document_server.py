@@ -23,7 +23,7 @@ import pytest
 
 import finepdfs.interfaces.demo_render as demo_render
 from finepdfs.application.curate import RoutingPlan
-from finepdfs.application.demo_read import FailedReading, Reading
+from finepdfs.application.demo_read import FailedReading, Reading, Refusal
 from finepdfs.domain.document import EngineIdentity, PageText, TextLayerQuality
 from finepdfs.domain.ocr import OcrRoutingPolicy, RoutingDecision
 from finepdfs.domain.publishing import PAGE_SEPARATOR, PageRecord
@@ -508,3 +508,89 @@ def test_a_completed_page_shows_before_the_reading_finishes_and_the_rest_stay_sk
         (1, "the first page"),
         (2, "the second page"),
     ], "the finished Reading was recorded as the job's completed document"
+
+
+class ReportingReader:
+    """A reader that reports what it can through the sink, then answers ``outcome`` -- or raises.
+
+    A reader that raises is the queue's own breakage: the use case never answered, so the job's document
+    view is what the pane has to draw the pages it never reached from.
+    """
+
+    def __init__(self, pages: int, page: PageText, *, outcome: Reading | Refusal | None = None,
+                 error: Exception | None = None) -> None:
+        self._pages = pages
+        self._page = page
+        self._outcome = outcome
+        self._error = error
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, content, client, on_stage, name, sink=None):
+        on_stage("routing")
+        on_stage("reading")
+        sink.on_page_count(self._pages)
+        sink.on_page(self._page)
+        self.started.set()
+        assert self.release.wait(5), "the test never released the reading"
+        if self._error is not None:
+            raise self._error
+        return self._outcome
+
+
+def test_a_breakage_after_the_count_renders_every_page_it_never_reached_as_unread() -> None:
+    """A reader that raised ended the job: the pages it never reached are unread, not still being read."""
+    reader = ReportingReader(
+        3,
+        PageText(1, "the page that completed before the queue broke"),
+        error=RuntimeError("the OCR engine could not be built from the worker's lease"),
+    )
+    app = _app(reader)
+    with _serving(app) as base:
+        job_id = _post(base)
+        assert reader.started.wait(5)
+        reader.release.set()
+        answer = _wait_for_done(base, job_id)
+        with _get(f"{base}/api/read/{job_id}/document") as response:
+            html = response.read().decode("utf-8")
+            headers = dict(response.headers)
+
+    assert answer["outcome"] is None, "a breakage is carried in ``failure``, as the demo always answered"
+    assert answer["failure"]["kind"] == "failed"
+    document = Document(html)
+    assert headers["X-Document-Pages"] == "3", "the count routing gave the job still names the pages"
+    assert headers["X-Document-Completed"] == "1"
+    assert [section[0] for section in document.sections] == ["1", "2", "3"]
+    assert [section[1] for section in document.sections] == ["complete", "unread", "unread"], (
+        "a page the failed read never reached names itself unread, never a skeleton nothing replaces"
+    )
+    assert "the page that completed before the queue broke" in document.section("1")[2]
+    assert "still being read" not in html
+
+
+def test_a_refusal_after_the_count_draws_no_page_still_being_read() -> None:
+    """A refusal read nothing: the count routing gave it must not leave the pane promising a page."""
+    refusal = Refusal(
+        kind="unavailable",
+        reason="the demo could not reach its OCR worker: no address is configured",
+        plan=_reading((PageText(1, "a page no lane read"),)).plan,
+        thresholds=OcrRoutingPolicy(),
+    )
+    reader = ReportingReader(
+        2, PageText(1, "a page no lane read"), outcome=refusal
+    )
+    app = _app(reader)
+    with _serving(app) as base:
+        job_id = _post(base)
+        assert reader.started.wait(5)
+        reader.release.set()
+        answer = _wait_for_done(base, job_id)
+        with _get(f"{base}/api/read/{job_id}/document") as response:
+            html = response.read().decode("utf-8")
+            headers = dict(response.headers)
+
+    assert answer["outcome"] == "refused"
+    assert "X-Document-Pages" not in headers, "a refusal never has a page count to promise"
+    assert 'data-pages=' not in html
+    assert 'data-page=' not in html, "no page is drawn for a read that never ran"
+    assert "still being read" not in html

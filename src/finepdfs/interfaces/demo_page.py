@@ -422,12 +422,26 @@ function hideResults() {
 // -- the raw transcript (ADR-0014) -----------------------------------------------------------------
 //
 // The middle pane is the worker's own output, escaped and never parsed: every function here that
-// touches the DOM only ever assigns ``textContent`` or ``replaceChildren``. Its entire state is the
-// event stream read from sequence zero, so a reloaded page replays what the server retained instead
-// of showing a delta this page happened to remember.
+// touches the DOM only ever assigns ``textContent``, ``replaceChildren`` or a text node appended to a
+// page's own ``<pre>``. Its entire state is the event stream read from sequence zero, so a reloaded page
+// replays what the server retained instead of showing a delta this page happened to remember.
 
 function rawModel() {
-  return { deltas: [], dropped: {}, failure: null, outcome: null, finished: false, available: true };
+  // ``panes`` is the one piece of DOM this model holds: each drawn page's own <pre>, so a later delta for
+  // it is a single append rather than a rebuild of the whole transcript.
+  return { deltas: [], dropped: {}, panes: {}, failure: null, outcome: null, finished: false, available: true };
+}
+
+function appendRawEvent(model, name, data) {
+  // A delta for a page that is already drawn is one append: that page's <pre> grows by the new bytes and
+  // nothing is re-concatenated or rebuilt, which is what keeps a token-by-token stream linear instead of
+  // quadratic. A page first appearing, a truncation marker, a completed page and the end of the read each
+  // change what the pane holds, so each of them returns false and the caller redraws it once.
+  applyRawEvent(model, name, data);
+  const pane = name === "delta" ? model.panes[data.page] : undefined;
+  if (pane === undefined) return false;
+  pane.append(document.createTextNode(String(data.text)));
+  return true;
 }
 
 function applyRawEvent(model, name, data) {
@@ -493,6 +507,9 @@ function renderRaw(model) {
   const container = byId("raw-transcript");
   container.setAttribute("aria-busy", model.finished ? "false" : "true");
   container.replaceChildren();
+  // The rebuild is also what re-learns where each page is: every page it draws is one a later delta can
+  // append to, and a page it does not draw is one that must be drawn when it first appears.
+  model.panes = {};
   for (const page of rawPages(model)) {
     const article = node("article", null, "raw-page");
     article.dataset.page = String(page.number);
@@ -502,7 +519,9 @@ function renderRaw(model) {
     if (page.dropped > 0) {
       article.append(node("p", rawTruncation(page.number, page.dropped), "raw-truncated"));
     }
-    article.append(node("pre", page.text, "raw-text"));
+    const pre = node("pre", page.text, "raw-text");
+    model.panes[page.number] = pre;
+    article.append(pre);
     container.append(article);
   }
 }
@@ -531,10 +550,13 @@ function openRawStream(jobId) {
     } catch (error) {
       return;
     }
-    applyRawEvent(state.raw, event.type, data);
+    if (appendRawEvent(state.raw, event.type, data)) return;
     renderRaw(state.raw);
   };
   for (const name of ["delta", "truncated", "page"]) source.addEventListener(name, apply);
+  // A handler from the job an upload replaced still fires after the new job's stream is open, so both
+  // terminal handlers check that they are still the current job's before touching ``state.events`` or
+  // ``state.raw``: a stale ``done`` or error may only end the stream it belongs to.
   source.addEventListener("error", (event) => {
     // The server's own ``error`` event carries the read's words; the EventSource failure has no data
     // and means this endpoint will answer nothing more for the job (a finished job frees its transcript).
@@ -542,11 +564,16 @@ function openRawStream(jobId) {
       apply(event);
       return;
     }
+    if (state.rawJob !== jobId) return;
     closeRawStream();
+    // ``upload()`` resets ``state.raw`` to null; an error that arrives around that reset has no pane to
+    // write, and closing the stream is the whole answer.
+    if (state.raw === null) return;
     state.raw.available = false;
     renderRaw(state.raw);
   });
   source.addEventListener("done", (event) => {
+    if (state.rawJob !== jobId) return;
     apply(event);
     closeRawStream();
   });
@@ -708,6 +735,9 @@ async function refreshDocument(jobId) {
   // page completes. The fragment is replaced whole: its page numbers, order and states are the
   // server's answer, not an accumulation this page keeps.
   if (state.document === null || state.document.job !== jobId) return;
+  // The pane is shown before its first answer, and independently of it: when the fetch fails, the
+  // sentence saying so must be written into a pane the visitor can see rather than a hidden element.
+  byId("document-pane").classList.remove("hidden");
   let response;
   try {
     response = await fetch("/api/read/" + encodeURIComponent(jobId) + "/document", { cache: "no-store" });
@@ -716,7 +746,6 @@ async function refreshDocument(jobId) {
     return;
   }
   if (state.document === null || state.document.job !== jobId) return;
-  byId("document-pane").classList.remove("hidden");
   if (response.status === 503) {
     state.document.absent = true;
     byId("document").replaceChildren();

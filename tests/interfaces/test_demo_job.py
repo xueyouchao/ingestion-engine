@@ -12,6 +12,7 @@ from finepdfs.application.curate import RoutingPlan
 from finepdfs.application.demo_read import FailedReading, Reading, Refusal
 from finepdfs.domain.document import EngineIdentity, PageText, TextLayerQuality
 from finepdfs.domain.ocr import OcrRoutingPolicy, RoutingDecision
+from finepdfs.domain.ports import PageCountSink, ReadSink
 from finepdfs.interfaces.demo_job import DemoJob, DocumentView
 from finepdfs.interfaces.demo_transcript import RawTranscript
 
@@ -24,6 +25,7 @@ PLAN = RoutingPlan(
     engine_name="pymupdf",
 )
 WORKER = "http://127.0.0.1:9/v1"
+LEASE_BEARER = "eyJhbGciOiJIUzI1NiJ9.a-lease-token"
 
 
 def _reading(pages: tuple[PageText, ...] = (PageText(1, "one"), PageText(2, "two"))) -> Reading:
@@ -38,7 +40,7 @@ def _reading(pages: tuple[PageText, ...] = (PageText(1, "one"), PageText(2, "two
 
 
 def _redact(message: str) -> str:
-    return message.replace(WORKER, "<the OCR worker>")
+    return message.replace(WORKER, "<the OCR worker>").replace(LEASE_BEARER, "<the bearer>")
 
 
 def _job(transcript_bytes: int = 1024) -> DemoJob:
@@ -48,6 +50,14 @@ def _job(transcript_bytes: int = 1024) -> DemoJob:
 def _events(transcript: RawTranscript) -> list[tuple[str, dict]]:
     """The transcript's own events, read whether or not the job still holds it."""
     return [(event.name, event.data) for event in transcript.since(0)[0]]
+
+
+def test_a_job_is_the_engine_s_sink_and_also_the_one_that_wants_the_page_count() -> None:
+    """One watcher answers both questions, but they are two ports: the count is nobody's engine report."""
+    job = _job()
+
+    assert isinstance(job, ReadSink), "a lane reports its deltas and pages to the job"
+    assert isinstance(job, PageCountSink), "the use case offers the job routing's count before the lane runs"
 
 
 def test_a_job_that_has_reported_nothing_is_an_empty_document_not_a_guess() -> None:
@@ -116,6 +126,41 @@ def test_a_page_number_that_repeats_is_replaced_rather_than_duplicated() -> None
     job.on_page(PageText(1, "the final telling"))
 
     assert [(page.number, page.text) for page in job.document().pages] == [(1, "the final telling")]
+
+
+def test_a_breakage_after_the_count_is_a_failed_read_not_a_job_still_reading() -> None:
+    """The queue's own record ends the job, so no page it never reached may still be drawn as pending."""
+    job = _job()
+    job.on_page_count(3)
+    job.on_page(PageText(1, "the page that completed before the queue broke"))
+
+    job.finish(None, FailedReading.broke(RuntimeError("the worker could not be built")))
+
+    view = job.document()
+    assert view.failed is True, "the queue's breakage is a failure, not a document nothing will complete"
+    assert view.total == 3, "the pages the failure never reached keep the numbers routing gave them"
+    assert [(page.number, page.text) for page in view.pages] == [
+        (1, "the page that completed before the queue broke")
+    ], "the page that really completed is kept"
+
+
+def test_a_refusal_after_the_count_promises_no_page_that_can_never_arrive() -> None:
+    """A refusal read nothing, so a count routing gave must not leave a page still being read."""
+    refusal = Refusal(
+        kind="unavailable",
+        reason="the demo could not reach its OCR worker: no address is configured",
+        plan=PLAN,
+        thresholds=OcrRoutingPolicy(),
+    )
+    job = _job()
+    job.on_page_count(2)
+
+    job.finish(refusal)
+
+    view = job.document()
+    assert view.total is None, "no page can ever arrive for a refusal, so no count may promise one"
+    assert view.failed is False, "a refusal is not a failure; the refusal panel is the whole answer"
+    assert view.pages == ()
 
 
 def test_a_finished_reading_is_the_document_and_its_page_texts_are_held_once() -> None:
@@ -207,23 +252,28 @@ def test_the_job_is_not_finished_by_the_stage_a_reader_announces_after_its_last_
     assert job.answer()["outcome"] is None
 
 
-def test_the_jobs_own_breakage_is_redacted_for_the_transcript_and_quoted_in_the_answer() -> None:
-    """A failure's words reach the stream through the configured redaction and the answer as they were."""
+def test_the_jobs_own_breakage_is_redacted_where_a_visitor_can_read_it() -> None:
+    """A breakage reaches the stream and the job answer through the redaction, in one telling.
+
+    Both are public, and a composition that could not build its worker may quote the address and the
+    bearer it was handed: ``broke`` shows its words through the redactor that call site was given.
+    """
     job = _job()
     job.advance("reading")
     transcript = job.transcript()
     assert transcript is not None
-    broken = FailedReading(
-        kind="failed", lane="", reason=f"connect to {WORKER} failed", plan=None, thresholds=OcrRoutingPolicy()
+    broken = FailedReading.broke(
+        RuntimeError(f"connect to {WORKER} failed with bearer {LEASE_BEARER}"), _redact
     )
 
     job.finish(None, broken)
 
+    shown = "connect to <the OCR worker> failed with bearer <the bearer>"
     assert _events(transcript) == [
-        ("error", {"kind": "failed", "lane": "", "reason": "connect to <the OCR worker> failed"}),
+        ("error", {"kind": "failed", "lane": "", "reason": shown}),
         ("done", {"outcome": "failed"}),
-    ], "the worker's address never reaches the stream"
+    ], "the worker's address and the bearer never reach the stream"
     assert job.transcript() is None
-    assert job.answer()["failure"] == {"kind": "failed", "lane": "", "reason": f"connect to {WORKER} failed"}
+    assert job.answer()["failure"] == {"kind": "failed", "lane": "", "reason": shown}
     assert job.answer()["outcome"] is None, "a breakage is carried in ``failure``, as the demo always answered"
     assert job.stage == "done"

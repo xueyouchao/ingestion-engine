@@ -142,6 +142,25 @@ def test_the_streamed_wire_states_a_replayed_marker_once_and_before_its_tail() -
     assert names == ["truncated", "delta", "delta", "done"], "each event once, the marker before the tail"
 
 
+def test_a_subscriber_waking_after_a_few_events_reads_only_those_events() -> None:
+    """A writer wakes once per delta, so a long read must cost what it writes, never the whole transcript."""
+    transcript = RawTranscript(ceiling_bytes=4096)
+    for number in range(1, 51):
+        transcript.on_delta(1, f"token {number} ")
+    cursor = transcript.since(0)[0][-1].sequence
+    assert transcript.events_examined == 50, "a replay from the start reads the whole retained transcript"
+
+    transcript.on_delta(1, "one more ")
+    transcript.on_delta(1, "and one more ")
+    events, finished = transcript.since(cursor)
+
+    assert [event.data["text"] for event in events] == ["one more ", "and one more "]
+    assert finished is False
+    assert transcript.events_examined == 2, (
+        "the wake reads the two new deltas, not the fifty-one retained ones"
+    )
+
+
 def test_a_failure_is_an_error_event_and_finishing_is_a_done_event() -> None:
     """The stream says why it failed in the same words the job answer shows, then ends."""
     transcript = RawTranscript()

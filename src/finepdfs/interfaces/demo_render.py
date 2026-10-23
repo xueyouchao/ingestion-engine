@@ -14,10 +14,11 @@ one fragment at one call site. This module is that renderer and nothing else -- 
   ``.skeleton`` paragraph for a page that has not completed. A page number with no completed Page Text
   is never rendered from anything else, so a half-parsed table cannot appear.
 - The page numbers come from the pages the job has and the count it knows, never from a guess: the
-  ordering rule is ``domain.publishing.pages_in_order``, and the last page is the job's count when it has
-  one and the highest page number it produced otherwise, so a document without a count claims no page the
-  read never reported. After a failed read the pages it never reached are ``data-state="unread"`` and say
-  they were not read, rather than promising a skeleton that will never be replaced.
+  ordering rule is ``domain.publishing.pages_in_order``, and the last page is whichever is greater, the
+  job's count or the highest page number it produced, so a page the read reported is never cut off by a
+  smaller count and a document without a count claims no page the read never reported. After a failed
+  read the pages it never reached are ``data-state="unread"`` and say they were not read, rather than
+  promising a skeleton that will never be replaced.
 
 Both dependencies are pinned in the optional ``[demo]`` extra (``pyproject.toml`` and
 ``docs/demo/requirements-demo.txt``) and imported lazily by ``_dependencies`` -- never when this module
@@ -97,9 +98,11 @@ def render_document(view: DocumentView) -> str:
     renderer.enable("table")
     pages = pages_in_order(view.pages)
     completed = {page.number: page for page in pages}
-    # The count is the job's when it knows one, and the highest page number it has otherwise: a page the
-    # read has not reported is only drawn when routing already said it exists.
-    last = view.total if view.total is not None else (pages[-1].number if pages else 0)
+    # The last page is the count the job knows or the highest page number it has, whichever is greater: a
+    # page the read has not reported is drawn only when the count says it exists, and a page the read did
+    # report is never cut off by a smaller count -- a finished Reading's total is just its page count.
+    highest = pages[-1].number if pages else 0
+    last = max(view.total if view.total is not None else 0, highest)
 
     attributes = f' data-pages="{view.total}"' if view.total is not None else ""
     parts = [f'<article class="{DOCUMENT_CLASS}"{attributes} data-completed="{len(completed)}">']
