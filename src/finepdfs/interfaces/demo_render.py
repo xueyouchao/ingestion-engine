@@ -97,9 +97,11 @@ def render_document(view: DocumentView) -> str:
     renderer.enable("table")
     pages = pages_in_order(view.pages)
     completed = {page.number: page for page in pages}
-    # The count is the job's when it knows one, and the highest page number it has otherwise: a page the
-    # read has not reported is only drawn when routing already said it exists.
-    last = view.total if view.total is not None else (pages[-1].number if pages else 0)
+    # The last page is the count the job knows or the highest page number it has, whichever is greater: a
+    # page the read has not reported is drawn only when the count says it exists, and a page the read did
+    # report is never cut off by a smaller count -- a finished Reading's total is just its page count.
+    highest = pages[-1].number if pages else 0
+    last = max(view.total if view.total is not None else 0, highest)
 
     attributes = f' data-pages="{view.total}"' if view.total is not None else ""
     parts = [f'<article class="{DOCUMENT_CLASS}"{attributes} data-completed="{len(completed)}">']

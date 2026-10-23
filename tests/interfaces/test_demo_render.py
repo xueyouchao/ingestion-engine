@@ -111,6 +111,23 @@ def test_pages_that_arrive_out_of_order_land_in_numeric_order_and_no_later_page_
     assert "data-pages=" not in fragment, "the pane claims no count the job has not learned"
 
 
+def test_a_page_beyond_the_count_is_still_drawn_and_its_text_is_not_dropped() -> None:
+    """A finished Reading's total is ``len(pages)``, so a lane that reported pages 1 and 3 makes two pages.
+
+    Page 3 was really read: it must be drawn, in its own place, rather than vanish behind the count that
+    the Reading's own length supplied.
+    """
+    view = DocumentView(pages=(PageText(1, "the first page"), PageText(3, "the third page")), total=2)
+
+    fragment = demo_render.render_document(view)
+
+    assert _page_numbers(fragment) == ["1", "2", "3"], "the reported page is not cut off by a smaller count"
+    assert "the third page" in _text(fragment), "page 3's words are not dropped"
+    assert 'data-page="2" data-state="pending"' in fragment, "the page between them is still a skeleton"
+    assert _states(fragment) == ["complete", "pending", "complete"]
+    assert 'data-completed="2"' in fragment, "what was drawn is what the count says completed"
+
+
 def test_a_failed_read_names_the_pages_it_never_read_instead_of_promising_them() -> None:
     """ADR-0014: a read that failed read nothing more; the pane says so rather than still reading."""
     view = DocumentView(
