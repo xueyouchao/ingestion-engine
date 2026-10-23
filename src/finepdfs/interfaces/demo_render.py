@@ -3,6 +3,10 @@
 ADR-0014 makes the rendered pane a server-side answer built from Page Text, and the page inserts exactly
 one fragment at one call site. This module is that renderer and nothing else -- no HTTP, no job state:
 
+- ``render_pages`` is the projection's page: one ``<section class="document-page">`` per Page Text, in
+  page order, allowlisted. It is exported because the exported bundle's document pane builds its readings
+  with it (``interfaces/bundle.py``), so a second pane cannot grow a second renderer or a second copy of
+  the allowlist.
 - ``markdown-it-py`` renders the Page Text as Markdown (``commonmark``, raw HTML off, tables on).
 - ``nh3`` sanitizes the result against a structural allowlist: headings, paragraphs, lists, emphasis,
   code blocks, blockquotes, horizontal rules and tables, with ``colspan``/``rowspan`` the only data an
@@ -29,6 +33,9 @@ of showing unescaped text.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
+from finepdfs.domain.document import PageText
 from finepdfs.domain.publishing import pages_in_order
 from finepdfs.interfaces.demo_job import DocumentView
 
@@ -88,15 +95,23 @@ class RenderingNotInstalled(RuntimeError):
     """The pinned renderer/sanitizer pair is absent, so the demo has no honest fragment to serve."""
 
 
+def render_pages(pages: Iterable[PageText]) -> list[str]:
+    """One page fragment per Page Text, in page-number order: the projection's page, and nothing else.
+
+    This is the seam another pane renders through -- the exported bundle builds its page readings with
+    it -- so the allowlist, the page vocabulary and the ordering rule cannot be restated anywhere. The
+    wrapper is the caller's: a fragment starts at ``<section class="document-page" ...>``.
+    """
+    renderer, nh3 = _renderer()
+    return [_complete(page.number, _sanitize(nh3, renderer.render(page.text))) for page in pages_in_order(pages)]
+
+
 def render_document(view: DocumentView) -> str:
     """The document pane's fragment for one job's pages, inert by construction."""
-    try:
-        markdown_it, nh3 = _dependencies()
-    except ImportError as error:  # the extra is optional; falling back to text would be a lie
-        raise RenderingNotInstalled(NOT_INSTALLED) from error
-    renderer = markdown_it("commonmark", {"html": False, "linkify": False, "typographer": False})
-    renderer.enable("table")
     pages = pages_in_order(view.pages)
+    # Rendered before anything else, so a document with no page still says the extra is absent rather
+    # than showing an empty article as if the projection had run.
+    fragments = dict(zip((page.number for page in pages), render_pages(pages), strict=True))
     completed = {page.number: page for page in pages}
     # The last page is the count the job knows or the highest page number it has, whichever is greater: a
     # page the read has not reported is drawn only when the count says it exists, and a page the read did
@@ -109,16 +124,25 @@ def render_document(view: DocumentView) -> str:
     if last == 0:
         parts.append(_empty(view.failed))
     for number in range(1, last + 1):
-        page = completed.get(number)
-        if page is not None:
-            body = _sanitize(nh3, renderer.render(page.text))
-            parts.append(_complete(number, body))
+        if number in completed:
+            parts.append(fragments[number])
         elif view.failed:
             parts.append(_unread(number))
         else:
             parts.append(_pending(number))
     parts.append("</article>")
     return "\n".join(parts)
+
+
+def _renderer():
+    """The pinned renderer and sanitizer, or the honest absence: the extra is optional, so import lazily."""
+    try:
+        markdown_it, nh3 = _dependencies()
+    except ImportError as error:
+        raise RenderingNotInstalled(NOT_INSTALLED) from error
+    renderer = markdown_it("commonmark", {"html": False, "linkify": False, "typographer": False})
+    renderer.enable("table")
+    return renderer, nh3
 
 
 def _sanitize(nh3, fragment: str) -> str:
