@@ -9,6 +9,7 @@ PaddleOCR-VL page, so no network and no model are needed and the wire is the rea
 from __future__ import annotations
 
 import http.client
+import inspect
 import json
 from pathlib import Path
 from typing import Self
@@ -17,6 +18,7 @@ import pymupdf
 import pytest
 
 from finepdfs.domain.document import Document
+from finepdfs.infrastructure.engines import vlm_chat
 from finepdfs.infrastructure.engines.paddleocr_vl import (
     OCR_PROMPT,
     PaddleOcrError,
@@ -175,7 +177,12 @@ def test_a_sink_that_breaks_is_not_reported_as_the_worker_breaking_its_stream() 
 
 
 class _BreakingResponse:
-    """A response whose stream fails while it is being read, the way a cut connection does."""
+    """A response whose stream fails while it is being read, the way a cut connection does.
+
+    ``HTTPResponse.__iter__`` returns ``self`` and performs no read, so a dropped connection can only
+    surface from the line read itself: this stand-in raises from ``__next__``, which is the call the
+    adapter's own read makes.
+    """
 
     def __init__(self, error: BaseException) -> None:
         self._error = error
@@ -187,7 +194,24 @@ class _BreakingResponse:
         return None
 
     def __iter__(self):
+        return self
+
+    def __next__(self):
         raise self._error
+
+
+def test_a_dropped_connection_is_caught_once_around_the_line_read_it_happens_in() -> None:
+    """``iter(response)`` cannot fail, so the read has exactly one guard, and it is the line read."""
+    source = inspect.getsource(vlm_chat._streamed_answer)
+    guard = "except (OSError, http.client.HTTPException)"
+
+    assert source.count(guard) == 1, (
+        "one place catches a dropped connection; a try around iter() can never fire, because "
+        "HTTPResponse.__iter__ returns self and reads nothing"
+    )
+    assert "next(lines, None)" in source[: source.index(guard)], (
+        "the one guard wraps the line read, which is the only call that touches the connection"
+    )
 
 
 def test_a_connection_cut_mid_stream_is_named_as_the_transport_failure_it_is() -> None:

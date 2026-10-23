@@ -155,10 +155,9 @@ def _streamed_answer(response: Any, endpoint: ChatEndpoint, on_delta: Callable[[
     url = endpoint.chat_completions_url()
     pieces: list[str] = []
     finish_reason: str | None = None
-    try:
-        lines = iter(response)
-    except (OSError, http.client.HTTPException) as error:  # the connection failed before a line arrived
-        raise VlmTransportError(f"{url} broke its stream off: {error}") from error
+    # ``iter`` is ``HTTPResponse.__iter__``, which returns ``self`` and reads nothing, so the line read
+    # below is the only call that can fail: one guard, in the place the connection is touched.
+    lines = iter(response)
     while True:
         try:
             line = next(lines, None)
