@@ -251,12 +251,12 @@ def _message_answer(payload: dict, endpoint: ChatEndpoint) -> StreamedAnswer:
         ) from error
     reason = choice.get("finish_reason") if isinstance(choice, dict) else None
     return StreamedAnswer(
-        text=_first_message_content(content, payload, endpoint),
+        text=_first_message_content(content, endpoint),
         finish_reason=reason if isinstance(reason, str) else None,
     )
 
 
-def _first_message_content(content: Any, payload: dict, endpoint: ChatEndpoint) -> str:
+def _first_message_content(content: Any, endpoint: ChatEndpoint) -> str:
     """The answer's text from its content, which a server may send as a string or as parts."""
     if isinstance(content, str):
         return content
