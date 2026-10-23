@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import time
+from bisect import bisect_left, bisect_right
 from collections import OrderedDict, defaultdict, deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -82,6 +83,10 @@ class RawTranscript:
         self._ceiling = max(int(ceiling_bytes), 0)
         self._lock = Condition()
         self._events: OrderedDict[int, TranscriptEvent] = OrderedDict()
+        # The same events' sequence numbers in insertion order, which is also sorted order, so a replay
+        # finds its first event with one bisect instead of scanning everything retained.
+        self._sequences: list[int] = []
+        self._examined = 0
         self._page_events: dict[int, deque[int]] = defaultdict(deque)
         self._page_bytes: dict[int, int] = defaultdict(int)
         self._dropped: dict[int, int] = defaultdict(int)
@@ -104,7 +109,8 @@ class RawTranscript:
             dropped = len(raw) - kept_bytes
             while self._page_bytes[page_number] + kept_bytes > self._ceiling:
                 oldest = self._page_events[page_number].popleft()
-                gone = self._events.pop(oldest)
+                gone = self._events[oldest]
+                self._discard(oldest)
                 size = len(str(gone.data["text"]).encode("utf-8"))
                 self._page_bytes[page_number] -= size
                 dropped += size
@@ -150,6 +156,16 @@ class RawTranscript:
         with self._lock:
             return self._finished
 
+    @property
+    def events_examined(self) -> int:
+        """How many retained events the most recent replay looked at; a test's own cost reading.
+
+        A subscriber wakes once per delta, so this number is what a wake costs: it is the events after
+        the caller's cursor, never the whole retained transcript. Nothing on the wire carries it.
+        """
+        with self._lock:
+            return self._examined
+
     def since(self, cursor: int = 0) -> tuple[list[TranscriptEvent], bool]:
         """Every retained event after ``cursor``, and whether the read has finished."""
         with self._lock:
@@ -175,12 +191,19 @@ class RawTranscript:
             return ""
         return raw[-self._ceiling :].decode("utf-8", errors="ignore")
 
+    def _discard(self, sequence: int) -> None:
+        """Forget one retained event, keeping the insertion-order sequence list bisectable."""
+        self._events.pop(sequence, None)
+        index = bisect_left(self._sequences, sequence)
+        if index < len(self._sequences) and self._sequences[index] == sequence:
+            self._sequences.pop(index)
+
     def _mark_truncated(self, page_number: int, dropped: int) -> None:
         """Name the drop: replace this page's marker with one carrying the cumulative byte count."""
         self._dropped[page_number] += dropped
         previous = self._truncated.get(page_number)
         if previous is not None:
-            self._events.pop(previous, None)
+            self._discard(previous)
         event = self._append("truncated", {"page": page_number, "dropped_bytes": self._dropped[page_number]})
         self._truncated[page_number] = event.sequence
 
@@ -188,10 +211,13 @@ class RawTranscript:
         self._sequence += 1
         event = TranscriptEvent(sequence=self._sequence, name=name, data=data)
         self._events[event.sequence] = event
+        self._sequences.append(event.sequence)
         return event
 
     def _after(self, cursor: int) -> list[TranscriptEvent]:
-        events = [event for sequence, event in self._events.items() if sequence > cursor]
+        start = bisect_right(self._sequences, cursor)
+        self._examined = len(self._sequences) - start
+        events = [self._events[sequence] for sequence in self._sequences[start:]]
         # A subscriber already watching (a cursor past the start) is told of a drop when it happens; one
         # replaying from the start reads each truncated page's marker before the tail that survived it.
         return events if cursor else _marker_first(events)
