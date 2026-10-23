@@ -82,6 +82,86 @@ def test_the_raw_pane_is_fed_by_the_events_endpoint_and_sets_it_as_text_only() -
     assert "element.textContent = String(text);" in _function("node"), "every node's text is its textContent"
 
 
+# A DOM stand-in small enough to run the pane's own renderer in Node: elements hold their children and
+# text, and a full rebuild is counted, so the test can say how often the pane was rebuilt.
+FAKE_DOM = """
+function element(tag) {
+  return {
+    tagName: tag,
+    className: "",
+    dataset: {},
+    children: [],
+    rebuilds: 0,
+    _text: "",
+    classList: { remove() {}, add() {} },
+    setAttribute() {},
+    append(...kids) { this.children.push(...kids); },
+    replaceChildren() { this.children = []; this.rebuilds += 1; },
+    set textContent(value) { this._text = String(value); },
+    get textContent() {
+      return this._text + this.children.map((child) => (child.textContent === undefined ? "" : child.textContent)).join("");
+    },
+  };
+}
+const panes = {};
+for (const id of ["raw", "raw-note", "raw-copy", "raw-transcript"]) panes[id] = element("div");
+const container = panes["raw-transcript"];
+globalThis.document = {
+  getElementById: (id) => panes[id],
+  createElement: (tag) => element(tag),
+  createTextNode: (text) => ({ textContent: String(text), children: [] }),
+};
+globalThis.byId = (id) => panes[id];
+"""
+
+
+def test_a_delta_appends_to_the_page_it_belongs_to_and_only_a_new_page_rebuilds() -> None:
+    """A streamed token costs one append: the page's text grows once, and no page is rebuilt for it."""
+    events = [
+        ("delta", {"page": 1, "text": "one "}),
+        ("delta", {"page": 1, "text": "two "}),
+        ("delta", {"page": 1, "text": "three"}),
+    ]
+    functions = ("rawModel", "applyRawEvent", "appendRawEvent", "rawPages", "rawNote", "rawText", "rawTruncation", "node", "renderRaw")
+    source = "\n".join(_function(name) for name in functions)
+    script = (
+        f"{FAKE_DOM}\n{source}\nconst events = {json.dumps(events)};\n"
+        "const model = rawModel();\n"
+        "const steps = [];\n"
+        "let firstArticle = null;\n"
+        "for (const [name, data] of events) {\n"
+        "  const appended = appendRawEvent(model, name, data);\n"
+        "  if (!appended) renderRaw(model);\n"
+        "  if (firstArticle === null) firstArticle = container.children[0];\n"
+        "  steps.push({appended: appended, rebuilds: container.rebuilds});\n"
+        "}\n"
+        "const sameArticle = container.children[0] === firstArticle;\n"
+        "const truncated = appendRawEvent(model, \"truncated\", {page: 1, dropped_bytes: 4});\n"
+        "if (!truncated) renderRaw(model);\n"
+        "console.log(JSON.stringify({\n"
+        "  steps: steps,\n"
+        "  sameArticle: sameArticle,\n"
+        "  pre: container.children[0].children[container.children[0].children.length - 1].textContent,\n"
+        "  pages: rawPages(model),\n"
+        "  truncatedRebuilt: truncated === false && container.rebuilds === 2,\n"
+        "}));"
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    rendered = json.loads(result.stdout)
+
+    assert rendered["steps"][0] == {"appended": False, "rebuilds": 1}, "a page first appearing is drawn"
+    assert rendered["steps"][1:] == [{"appended": True, "rebuilds": 1}, {"appended": True, "rebuilds": 1}], (
+        "the later deltas append to that page, with no second rebuild"
+    )
+    assert rendered["sameArticle"] is True, "the page's element is the one drawn when it first appeared"
+    assert rendered["pre"] == "one two three", "the pane's text is the concatenation the model holds"
+    assert rendered["pages"] == [{"number": 1, "text": "one two three", "dropped": 4}], (
+        "the model kept every delta's text, and the truncation marker is the last thing applied"
+    )
+    assert rendered["truncatedRebuilt"] is True, "a truncation marker changes the structure, so it redraws"
+
+
 @requires_node
 def test_a_hostile_delta_reaches_the_raw_pane_as_text() -> None:
     """A delta is the worker's bytes, not markup: it survives verbatim and the renderer sets text."""
