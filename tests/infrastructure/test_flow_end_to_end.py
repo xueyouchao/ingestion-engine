@@ -62,7 +62,7 @@ class CountingEngine:
     def identity(self) -> EngineIdentity:
         return self._identity
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink=None) -> ExtractedDocument:
         self.calls += 1
         return ExtractedDocument(pages=self._pages, engine=self._identity)
 
@@ -489,7 +489,7 @@ class NamedEngine:
     def identity(self) -> EngineIdentity:
         return self._identity
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink=None) -> ExtractedDocument:
         self.calls += 1
         texts = self._pages[len(document.content)]
         pages = tuple(PageText(number=index + 1, text=text) for index, text in enumerate(texts))
@@ -705,7 +705,7 @@ class BarrierEngine:
     def identity(self) -> EngineIdentity:
         return self._identity
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink=None) -> ExtractedDocument:
         with self._lock:
             self._in_flight += 1
             self.peak_in_flight = max(self.peak_in_flight, self._in_flight)

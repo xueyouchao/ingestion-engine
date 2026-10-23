@@ -33,7 +33,7 @@ class CountingEngine:
     def __init__(self) -> None:
         self.calls = 0
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink=None) -> ExtractedDocument:
         self.calls += 1
         return ExtractedDocument(
             pages=(PageText(number=1, text="The committee reviewed meteorological instruments in Geneva. " * 20),),
@@ -152,7 +152,7 @@ DROPPED_DUPLICATE = "https://e.example/dropped.pdf"
 class SameTextEngine(CountingEngine):
     """Every Document reads to the same controlled text, so the near decision is about URLs only."""
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink=None) -> ExtractedDocument:
         self.calls += 1
         return ExtractedDocument(
             pages=(PageText(number=1, text="The committee reviewed meteorological instruments. " * 20),),

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from typing import Literal
 
@@ -10,6 +10,31 @@ from finepdfs.domain.document import PageText
 from finepdfs.domain.language import LanguageOutcome
 
 OutcomeStatus = Literal["published", "dropped", "failed"]
+
+# The blank line a Published Document's Markdown puts between two Page Texts. Named because the demo's
+# document pane offers the same bytes for download, so the one projection below is the only place the
+# join rule can change (ADR-0014).
+PAGE_SEPARATOR = "\n\n"
+
+
+def pages_in_order(pages: Iterable[PageText]) -> tuple[PageText, ...]:
+    """Page Texts in their original 1-based *numeric* order, whichever order they arrived in.
+
+    The one ordering rule, beside the one join rule: a page that arrives out of order still lands where
+    its number says, numerically -- page 2 before page 10 -- and the corpus, the demo's document pane and
+    the job answer all read this function rather than restating a sort (ADR-0014).
+    """
+    return tuple(sorted(pages, key=lambda page: page.number))
+
+
+def document_markdown(pages: Sequence[PageText]) -> str:
+    """A Published Document's Markdown: its Page Texts in page-number order, blank-line joined.
+
+    One function because the corpus and the demo's document pane must not restate the ordering or the
+    join rule: a page that arrives out of order still lands where its 1-based number says, and a
+    projection read from the demo is the same bytes the corpus would write (ADR-0014).
+    """
+    return PAGE_SEPARATOR.join(page.text for page in pages_in_order(pages))
 
 
 @dataclass(frozen=True, slots=True)

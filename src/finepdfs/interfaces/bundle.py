@@ -15,6 +15,13 @@ The bundle is a **derived artifact**, never declared state. It reads `run-summar
 The images stay separate on purpose: inlining them makes one 28 MiB file, which a browser preview pane
 or a mail attachment will not take. `--inline` does it anyway for a single-file copy.
 
+The page's third pane is the document as it would be published, and it is rendered **here**, when the
+bundle is built: every page reading carries the fragment `demo_render.render_pages` gives for its text,
+so the reader shows the demo's own projection without shipping a markdown parser to the browser. The
+markdown view is not embedded -- it is the page texts joined by `domain.publishing.PAGE_SEPARATOR`, which
+the manifest carries -- so the export gains the fragments and no second copy of the text. That makes the
+pinned `[demo]` pair a build dependency: absent, the build is refused with a sentence naming it.
+
 It never curates, deduplicates, routes or publishes, it never writes into a state directory, and it does
 not carry a timing sidecar: the page shows declared facts only. It also writes nothing into the served
 directory until every render succeeded and the budget check passed, so a refused rebuild leaves the
@@ -38,7 +45,10 @@ from typing import Any
 
 import pymupdf
 
+from finepdfs.domain.document import PageText
+from finepdfs.domain.publishing import PAGE_SEPARATOR
 from finepdfs.interfaces.bundle_page import BUNDLE_HTML
+from finepdfs.interfaces.demo_render import RenderingNotInstalled, render_pages
 
 BUNDLE_VERSION = 1
 DEFAULT_DPI = 72
@@ -48,6 +58,13 @@ IMAGES = "images"
 INDEX_NAME = "index.html"
 CONTRACT_NAME = "bundle.json"
 SUMMARY_NAME = "run-summary.json"
+# The page's document pane is rendered here, through the demo's own projection, so the pair that renders
+# it is a build dependency now. Said as a sentence, because an ImportError traceback is not an answer.
+NOT_RENDERED = (
+    "cannot render the reader's document pane: the [demo] extra is not installed, and the pane is built "
+    "with the same projection the live demo's is (markdown-it-py and nh3). Install it with "
+    "`pip install -e '.[demo]'` and build again."
+)
 # Every declared directory whose files the page copies a fact from, so the fingerprint covers them.
 DECLARED_GLOBS = ("records/*.json", "pages/*.jsonl", "chunks/*.jsonl", "excluded/*.json")
 # What this exporter names its renders: only files matching it are ever deleted by a rebuild.
@@ -158,6 +175,29 @@ def _state_block(run: StateRun) -> dict[str, Any]:
 
 def _page_key(doc_id: str, page_number: int) -> str:
     return f"{doc_id}:{page_number}"
+
+
+def _render_page_readings(readings: dict[tuple[str, int], dict[str, Any]]) -> None:
+    """Give each page reading the fragment the demo's document pane would show it as.
+
+    The fragment is the projection's -- ``demo_render.render_pages`` -- rendered once per document and
+    reading, so the markdown parser is built once per document rather than once per page. The reading's
+    own markdown is not stored: it is the page texts joined by ``PAGE_SEPARATOR``, which the payload
+    carries instead, so the exported page gains the fragments and no second copy of the text.
+    """
+    by_document: dict[tuple[str, str], list[int]] = {}
+    for (doc_id, page_number), entry in readings.items():
+        for label in entry["readings"]:
+            by_document.setdefault((doc_id, label), []).append(page_number)
+    for (doc_id, label), numbers in sorted(by_document.items()):
+        numbers.sort()
+        pages = [PageText(number, readings[(doc_id, number)]["readings"][label]["text"]) for number in numbers]
+        try:
+            fragments = render_pages(pages)
+        except RenderingNotInstalled as error:
+            raise BundleError(NOT_RENDERED) from error
+        for number, fragment in zip(numbers, fragments, strict=True):
+            readings[(doc_id, number)]["readings"][label]["html"] = fragment
 
 
 def _words(page: pymupdf.Page, dpi: int) -> list[list[Any]] | None:
@@ -280,6 +320,10 @@ def build_bundle(
         "documents": {},
         "pages": {},
         "excluded": {},
+        # The document pane's markdown view joins the page texts with the projection's own separator: the
+        # reader must not restate a blank line (ADR-0014), and the markdown itself is derivable from the
+        # texts, so only the separator travels.
+        "page_separator": PAGE_SEPARATOR,
     }
 
     for run in runs:
@@ -329,6 +373,9 @@ def build_bundle(
                 "end": _utf16_offset(reading["text"], chunk["end_offset"]),
                 "ordinal": chunk["ordinal"],
             })
+
+    # Before any page is rendered: an absent projection is refused in a sentence, not after 300 renders.
+    _render_page_readings(readings)
 
     # Keyed by PDF and page: two source URLs can name the same PDF, and one render serves both.
     renders: dict[tuple[str, int], dict[str, Any]] = {}

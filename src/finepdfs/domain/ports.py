@@ -9,12 +9,12 @@ from __future__ import annotations
 from collections.abc import Collection, Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from finepdfs.domain.chunks import Chunk
 from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
 from finepdfs.domain.demo import UsageSnapshot
-from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, TextLayerQuality
+from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText, TextLayerQuality
 from finepdfs.domain.language import PageLanguage
 from finepdfs.domain.publishing import PageRecord
 from finepdfs.domain.search import IndexFailure, IndexState, SearchHit, SearchQuery
@@ -36,13 +36,63 @@ class TextLayerProbe(Protocol):
     def measure(self, content: bytes) -> TextLayerQuality: ...
 
 
+@runtime_checkable
+class ReadSink(Protocol):
+    """A caller watching an Extraction happen, page by page (ADR-0014).
+
+    An engine that streams reports to it. ``on_delta`` is the engine's own output as it arrives, exactly
+    as the worker emitted it and before any normalization -- echoed prompt, fences and layout markers
+    included -- tagged with the 1-based page number it belongs to, because a read may have several pages
+    in flight at once. Those calls come from whichever engine threads are reading those pages, so a sink
+    may be called by several threads at the same time and has to be safe to. It may also be called after
+    the read has failed: a request a worker has already started cannot be cancelled, so deltas for a
+    sibling page keep arriving until that page's stream ends, and a sink that has given up must ignore
+    them rather than treat them as a second answer (ADR-0010, ADR-0014). ``on_page`` is called on the
+    thread that started the read, in page-number order, and carries the Page Text the read exports for a
+    page as soon as that page is complete: the same text a batch run would export for the same page.
+
+    An engine with nothing arriving page by page -- the text layer, a local command that writes its
+    results when it finishes -- has nothing to report and calls neither of those, so a caller that
+    received nothing knows the lane did not stream instead of inferring a cadence of its own.
+
+    These two are everything an engine reports, so they are the whole port. The page count is not an
+    engine capability -- routing answers it before any lane runs -- and a watcher that wants it is also
+    a ``PageCountSink``, which the use case asks separately.
+    """
+
+    def on_delta(self, page_number: int, text: str) -> None: ...
+
+    def on_page(self, page: PageText) -> None: ...
+
+
+@runtime_checkable
+class PageCountSink(Protocol):
+    """A watcher that wants the page count routing reported, before the first delta (ADR-0014).
+
+    No engine calls this. The use case that starts the read offers routing's answer once, before a lane
+    runs, so a viewer can draw a placeholder for every page from the start instead of inventing a count
+    from the pages that arrived. It is a protocol of its own because the count is not an engine
+    capability and the engine's sink may only promise what an engine can report; a watcher with no use
+    for the count simply does not implement it, and is never asked.
+    """
+
+    def on_page_count(self, pages: int) -> None: ...
+
+
 class OcrEngine(Protocol):
     """Turns document bytes into page texts."""
 
     @property
     def identity(self) -> EngineIdentity: ...
 
-    def extract(self, document: Document) -> ExtractedDocument: ...
+    def extract(self, document: Document, sink: ReadSink | None = None) -> ExtractedDocument:
+        """Read the document; a caller may pass a sink to watch the read and may always leave it out.
+
+        The answer is the same either way -- the sink only reports what the read is doing as it happens
+        -- so a caller with nothing to watch, and every batch run, passes no sink and is served exactly
+        as before.
+        """
+        ...
 
 
 class LanguageIdentifier(Protocol):

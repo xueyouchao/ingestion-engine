@@ -33,7 +33,7 @@ class ControlledEngine:
     def __init__(self) -> None:
         self.calls = 0
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink=None) -> ExtractedDocument:
         self.calls += 1
         return ExtractedDocument(
             pages=(

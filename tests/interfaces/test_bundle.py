@@ -14,8 +14,12 @@ from pathlib import Path
 
 import pytest
 
+from finepdfs.domain.document import PageText
+from finepdfs.domain.publishing import PAGE_SEPARATOR
 from finepdfs.infrastructure.corpus.index import document_key
+from finepdfs.interfaces import demo_render
 from finepdfs.interfaces.bundle import BundleError, build_bundle, check_bundle, read_state
+from tests.interfaces.test_demo_render import _elements, _text
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 URL = "https://a.example/wp-content/uploads/2025/03/Resolution-XXVI-6.pdf"
@@ -254,6 +258,92 @@ def _data(bundle: Path) -> dict:
     page = (bundle / "index.html").read_text(encoding="utf-8")
     start = page.index("const DATA = ") + len("const DATA = ")
     return json.loads(page[start:page.index(";\n", start)])
+
+
+def _strings(node) -> set[str]:
+    """Every string the payload carries, wherever it sits in it."""
+    if isinstance(node, str):
+        return {node}
+    if isinstance(node, dict):
+        return {item for value in node.values() for item in _strings(value)}
+    if isinstance(node, list):
+        return {item for value in node for item in _strings(value)}
+    return set()
+
+
+def test_a_page_reading_carries_the_fragment_the_demo_pane_would_show(tmp_path) -> None:
+    """The pane is the projection, not a second renderer: the same function, the same bytes."""
+    out = _write_run(tmp_path, "out", pages=(1, 2), engine="pymupdf@1.28.2")
+    bundle = tmp_path / "bundle"
+
+    build_bundle(bundle, [read_state("pymupdf", out)], tmp_path / "corpus")
+
+    data = _data(bundle)
+    for number in (1, 2):
+        reading = data["pages"][f"{KEY}:{number}"]["readings"]["pymupdf"]
+        assert [reading["html"]] == demo_render.render_pages((PageText(number, TEXT[number]),)), (
+            f"page {number}'s fragment is demo_render.render_pages' own, not a copy of its markup"
+        )
+    assert data["page_separator"] == PAGE_SEPARATOR, "the markdown view joins with the projection's separator"
+
+
+def test_the_payload_carries_no_second_copy_of_the_documents_markdown(tmp_path) -> None:
+    """The markdown view is derived from the page texts; embedding it too would double the page's bytes."""
+    out = _write_run(tmp_path, "out", pages=(1, 2, 3), engine="pymupdf@1.28.2")
+    bundle = tmp_path / "bundle"
+
+    build_bundle(bundle, [read_state("pymupdf", out)], tmp_path / "corpus")
+
+    markdown = PAGE_SEPARATOR.join(TEXT[number] for number in (1, 2, 3))
+    assert markdown not in _strings(_data(bundle))
+    assert markdown not in (bundle / "index.html").read_text(encoding="utf-8")
+
+
+def test_building_without_the_rendering_extra_names_what_to_install(tmp_path, monkeypatch) -> None:
+    """A build-time renderer that is absent is a sentence about the extra, not an ImportError traceback."""
+    out = _write_run(tmp_path, "out", pages=(1,), engine="pymupdf@1.28.2")
+
+    def missing():
+        raise ImportError("No module named 'nh3'")
+
+    monkeypatch.setattr(demo_render, "_dependencies", missing)
+
+    with pytest.raises(BundleError, match=r"\[demo\]") as caught:
+        build_bundle(tmp_path / "bundle", [read_state("pymupdf", out)], tmp_path / "corpus")
+
+    assert "pip install" in str(caught.value) and "nh3" in str(caught.value)
+    assert not (tmp_path / "bundle").exists(), "nothing is written when the projection cannot be rendered"
+
+
+def test_a_hostile_page_reaches_the_public_page_inert(tmp_path) -> None:
+    """The pane inserts a fragment in a public page: the allowlist, not the reader, keeps it inert."""
+    out = _write_run(tmp_path, "out", pages=(1,), engine="pymupdf@1.28.2")
+    hostile = (
+        "# A page the model wrote\n\n"
+        "<script>alert('script')</script>\n\n"
+        '<img src="x" onerror="alert(1)">\n\n'
+        "[click](javascript:alert('target'))\n"
+    )
+    (out / "pages" / f"{KEY}.jsonl").write_text(
+        json.dumps({"doc_id": KEY, "source_url": URL, "digest": _corpus_digest(tmp_path), "page_number": 1,
+                    "text": hostile, "engine": "pymupdf@1.28.2"}) + "\n",
+        encoding="utf-8",
+    )
+    bundle = tmp_path / "bundle"
+
+    build_bundle(bundle, [read_state("pymupdf", out)], tmp_path / "corpus")
+
+    html = _data(bundle)["pages"][f"{KEY}:1"]["readings"]["pymupdf"]["html"]
+    elements = _elements(html)
+    assert {tag for tag, _ in elements} <= demo_render.ALLOWED_TAGS | {"section"}
+    for tag, attrs in elements:
+        for name, value in attrs.items():
+            assert not name.lower().startswith("on"), f"{tag}[{name}] is an event handler"
+            assert name.lower() not in {"href", "src", "action", "srcdoc"}
+            assert "alert(" not in (value or "").lower()
+    assert "<h1>A page the model wrote</h1>" in html, "the page's structure survives"
+    assert "&lt;script&gt;" in html and "&lt;img" in html, "the page's markup arrived as text"
+    assert "click" in _text(html), "the text survives; the navigation does not"
 
 
 def test_a_refused_rebuild_leaves_the_served_bundle_alone(tmp_path) -> None:

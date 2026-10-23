@@ -97,7 +97,7 @@ class CountingEngine:
     def identity(self) -> EngineIdentity:
         return self._identity
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink=None) -> ExtractedDocument:
         self.extracted.append(document)
         return ExtractedDocument(pages=(), engine=self._identity)
 

@@ -29,6 +29,7 @@ from finepdfs.application.curate import CurationPolicy, RoutingPlan
 from finepdfs.application.demo_read import DemoRead, Reading
 from finepdfs.domain.demo import (
     DEFAULT_DAILY_OCR_PAGE_BUDGET,
+    DEFAULT_HEARTBEAT_SECONDS,
     DEFAULT_PAGE_CAP,
     DEFAULT_POLL_INTERVAL_SECONDS,
     DEFAULT_QUEUE_DEPTH,
@@ -88,7 +89,7 @@ class FakeEngine:
     def identity(self) -> EngineIdentity:
         return self._identity
 
-    def extract(self, document: Document) -> ExtractedDocument:
+    def extract(self, document: Document, sink=None) -> ExtractedDocument:
         self.calls += 1
         return ExtractedDocument(pages=tuple(self._pages), engine=self._identity)
 
@@ -128,7 +129,7 @@ class RecordingReader:
     def __init__(self) -> None:
         self.calls: list[bytes] = []
 
-    def __call__(self, content, client, on_stage, name):
+    def __call__(self, content, client, on_stage, name, sink=None):
         self.calls.append(content)
         on_stage("routing")
         on_stage("done")
@@ -142,7 +143,7 @@ class BlockingReader:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def __call__(self, content, client, on_stage, name):
+    def __call__(self, content, client, on_stage, name, sink=None):
         on_stage("routing")
         self.started.set()
         assert self.release.wait(5), "the test never released the reading"
@@ -324,16 +325,19 @@ def test_the_page_states_where_the_bytes_go_and_what_is_kept_before_the_upload()
     limits = html.index('id="limits"')
     upload = html.index('id="upload-file"')
     assert statements < limits < upload, "the limits and the two statements come before the upload control"
-    # The ticket lists the read's parts in this order: the decision, the text it read, then the identity
-    # that produced it -- a visitor reads the answer before the provenance.
-    assert html.index('id="decision"') < html.index('id="pages"') < html.index('id="engine-identity"')
+    # Ticket 37's three panes are one row in reading order -- what was sent, what came back, what would
+    # be published -- and the decision and the identity that produced it follow the answer.
+    panes = [html.index(f'<section id="{pane}"') for pane in ("input-pane", "raw", "document-pane")]
+    assert panes == sorted(panes), "the panes read left to right as they happened"
+    assert panes[-1] < html.index('id="decision"') < html.index('id="engine-identity"')
     assert "rented GPU" in html
     assert "nothing is kept" in html
     for identifier in (
         'id="timeline"',
         'id="decision"',
         'id="engine-identity"',
-        'id="pages"',
+        'id="document-pane"',
+        'id="document"',
         'id="refusal"',
         'id="failure"',
         'id="warm-measured"',
@@ -551,14 +555,21 @@ def test_a_second_upload_is_refused_while_one_is_reading() -> None:
     assert answer["outcome"] == "read"
 
 
-def test_an_unknown_job_id_is_a_404() -> None:
-    with (
-        _serving(_app(FakeProbe(HEALTHY), FakeEndpoint())) as base,
-        pytest.raises(urllib.error.HTTPError) as caught,
-    ):
-        _get(base + "/api/read/0123456789abcdef")
+def test_an_unknown_job_id_is_one_404_from_every_answer() -> None:
+    """The job, its document, its markdown and its transcript also say one sentence for no such job.
 
-    assert caught.value.code == 404
+    Four builders answer an id this process never issued, and a visitor who mistypes one must not be
+    told four different things about it.
+    """
+    answers: dict[str, tuple[int, dict]] = {}
+    with _serving(_app(FakeProbe(HEALTHY), FakeEndpoint())) as base:
+        for suffix in ("", "/document", "/document.md", "/events"):
+            with pytest.raises(urllib.error.HTTPError) as caught:
+                _get(base + "/api/read/0123456789abcdef" + suffix)
+            answers[suffix or "/"] = (caught.value.code, json.loads(caught.value.read()))
+
+    assert {status for status, _ in answers.values()} == {404}
+    assert {body["error"] for _, body in answers.values()} == {"no job 0123456789abcdef"}
 
 
 def _snapshot(root: Path) -> dict[str, tuple[bytes, int]]:
@@ -623,6 +634,21 @@ def test_the_demo_limits_default_to_the_specs_numbers_and_read_the_environment()
 def test_a_mistyped_limit_names_the_variable_it_came_from() -> None:
     with pytest.raises(ValueError, match="FINEPDFS_DEMO_PAGE_CAP"):
         demo_server.demo_limits({"FINEPDFS_DEMO_PAGE_CAP": "twenty-five"})
+
+
+def test_a_non_positive_heartbeat_is_refused_by_name_and_reason() -> None:
+    """A zero quiet interval never blocks, so the events loop would spin and flood the connection."""
+    with pytest.raises(ValueError, match="FINEPDFS_DEMO_HEARTBEAT_SECONDS") as raised:
+        demo_server.demo_limits({"FINEPDFS_DEMO_HEARTBEAT_SECONDS": "0"})
+
+    assert "positive" in str(raised.value)
+    with pytest.raises(ValueError, match="FINEPDFS_DEMO_HEARTBEAT_SECONDS"):
+        demo_server.demo_limits({"FINEPDFS_DEMO_HEARTBEAT_SECONDS": "-1"})
+
+
+def test_the_heartbeat_default_and_a_positive_override_are_still_accepted() -> None:
+    assert demo_server.demo_limits({}).heartbeat_seconds == DEFAULT_HEARTBEAT_SECONDS
+    assert demo_server.demo_limits({"FINEPDFS_DEMO_HEARTBEAT_SECONDS": "2.5"}).heartbeat_seconds == 2.5
 
 
 def test_the_console_script_serves_loopback_8766_by_default(monkeypatch) -> None:
@@ -869,9 +895,9 @@ def test_a_visitor_name_that_is_not_latin_1_still_arrives() -> None:
             super().__init__()
             self.names: list[str] = []
 
-        def __call__(self, content, client, on_stage, name):
+        def __call__(self, content, client, on_stage, name, sink=None):
             self.names.append(name)
-            return super().__call__(content, client, on_stage, name)
+            return super().__call__(content, client, on_stage, name, sink)
 
     reader = Naming()
     app = DemoApp(environ={}, read=reader)
@@ -890,9 +916,9 @@ def test_a_name_that_was_never_encoded_is_kept_as_it_is() -> None:
             super().__init__()
             self.names: list[str] = []
 
-        def __call__(self, content, client, on_stage, name):
+        def __call__(self, content, client, on_stage, name, sink=None):
             self.names.append(name)
-            return super().__call__(content, client, on_stage, name)
+            return super().__call__(content, client, on_stage, name, sink)
 
     reader = Naming()
     app = DemoApp(environ={}, read=reader)
@@ -912,9 +938,9 @@ def test_a_percent_escape_in_a_name_is_decoded_like_the_page_meant_it() -> None:
             super().__init__()
             self.names: list[str] = []
 
-        def __call__(self, content, client, on_stage, name):
+        def __call__(self, content, client, on_stage, name, sink=None):
             self.names.append(name)
-            return super().__call__(content, client, on_stage, name)
+            return super().__call__(content, client, on_stage, name, sink)
 
     reader = Naming()
     app = DemoApp(environ={}, read=reader)

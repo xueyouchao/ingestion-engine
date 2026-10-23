@@ -4,10 +4,13 @@ Date: 2026-10-22
 
 ## Status
 
-Proposed for review. Nothing in this ADR is implemented, run or measured.
+Accepted. Scope: the live upload demo's page (ADR-0012). The decisions below are implemented and pinned
+offline by the tests named under [What implementation proved](#what-implementation-proved); the numbers
+that no one has measured against a live worker are named there and kept in
+[Open items](#open-items).
 
-If accepted it extends ADR-0012's live upload demo (the page, the job queue and the deployed Modal
-worker) and amends the page contract in [`docs/spec/live-upload-demo.md`](../spec/live-upload-demo.md):
+It extends ADR-0012's live upload demo (the page, the job queue and the deployed Modal worker) and amends
+the page contract in [`docs/spec/live-upload-demo.md`](../spec/live-upload-demo.md):
 the transcript and the rendered document are two new page surfaces, and the spec's sixth user story
 ("the page text the chosen lane actually read") is kept as the source of the second one. It leaves
 ADR-0011's static bundle untouched: a bundle cannot contain a transcript that was never declared. It
@@ -16,7 +19,7 @@ id or search index moves because of this ADR.
 
 ## Context
 
-### What the live demo shows today
+### What the live demo showed before this decision
 
 A visitor uploads a PDF or an image, the demo routes it, and `renderReading` puts each accepted page's
 text in a `<pre>` beside its page number (`src/finepdfs/interfaces/demo_page.py`). The job is polled at
@@ -81,6 +84,13 @@ command engine (Docling, MinerU) writes process output, not page tokens, and sho
 states which case it is in -- "this lane does not stream" -- rather than animating a fake one or
 inventing a token cadence.
 
+**A page the worker cut off is a failure, not a short page.** A streamed page ends when the worker says
+it did: `stop`, or nothing named before `[DONE]`, is a whole page; any other `finish_reason` -- the
+model's token limit above all -- ended the stream before the page was finished, and the read fails in
+the worker's own words rather than exporting what arrived. The blocking answer a batch run reads
+carries the same `finish_reason`, and is held to the same rule: a cut page never reaches the corpus.
+A truncated page in both panes would be a reading the product does not have.
+
 **The transcript is ephemeral and bounded.** The job keeps a per-page ring buffer of raw deltas (a
 ceiling in bytes, truncation marked explicitly with a `truncated` event rather than silently dropping
 the start), serves it over `text/event-stream` at `/api/read/<id>/events`, and frees it when the job
@@ -102,8 +112,8 @@ the fix is in that engine's adapter and lands in the corpus too -- the demo must
 the product.
 
 **Rendering is server-side, allowlisted and pinned.** A markdown renderer plus a sanitizer, both pinned
-in a new optional `[demo]` extra and recorded in `docs/demo/requirements-demo.txt`, turn Page Text into
-an HTML fragment. The allowlist is structural only: headings, paragraphs, lists, emphasis, code blocks,
+in a new optional `[demo]` extra, carried by `dev` as well so the offline gate can run the pane's tests,
+and recorded in `docs/demo/requirements-demo.txt`, turn Page Text into an HTML fragment. The allowlist is structural only: headings, paragraphs, lists, emphasis, code blocks,
 blockquotes, rules, and tables with `colspan`/`rowspan`; no `script`, `style`, `iframe`, `img`, no
 `on*` attributes and no links in the first cut (model output must not create navigation). Math is
 rendered as text until there is a reason to ship a MathJax-class dependency. The page inserts exactly
@@ -129,6 +139,62 @@ it is a separate, declared, opt-in step with its own evidence, not a rendering f
   failure panel still names the lane and the reason.
 - The page budget is charged once per OCR page, including when the visitor closes the tab mid-stream.
 - A hostile page cannot execute script through the rendered pane.
+
+## What implementation proved
+
+Recorded on 2026-10-22 against `feature/adr-0014-raw-read` (tickets 33-37). Every proof is an offline
+test: a fake endpoint, a fixture, or the demo's own `ThreadingHTTPServer` on port 0. **No test in this
+list ran against a deployed worker**, and nothing below is a latency or a byte count observed on a live
+stream.
+
+| What this ADR required | The test that proves it, by name |
+| --- | --- |
+| A recorded raw fixture, replayed through the fake endpoint, concatenates to exactly the Page Text the pipeline exports -- no delta lost | `tests/infrastructure/test_vlm_streaming.py::test_the_recorded_page_streams_to_exactly_the_page_text_the_adapter_exports`, over `tests/fixtures/paddleocr_stream_page.sse` through `tests/fake_streaming_worker.py` |
+| The document pane's text equals the `out/pages/<key>.jsonl` entry for the same document, engine and page (a golden test, not a screenshot) | `tests/interfaces/test_demo_document_server.py::test_the_document_carries_the_page_records_bytes_in_page_order_with_page_separators`, over the hand-written records in `tests/fixtures/pages/ba02d52504f527bb.jsonl` |
+| A reload mid-stream replays from the beginning and converges on the same final document | `tests/interfaces/test_demo_page_raw.py::test_a_reload_mid_stream_replays_from_the_start_and_converges_on_the_jobs_answer` and `tests/interfaces/test_demo_transcript.py::test_the_real_server_streams_the_raw_read_and_a_reload_replays_it_from_the_start` |
+| A job that fails mid-page emits `error`, the document pane keeps the pages already completed, and the failure panel still names the lane and the reason | `tests/interfaces/test_demo_transcript.py::test_a_failed_read_ends_the_stream_with_its_kind_lane_and_redacted_words`, `tests/interfaces/test_demo_document_server.py::test_a_failed_read_keeps_the_pages_that_already_completed`, `tests/interfaces/test_demo_page_document.py::test_a_failed_read_keeps_the_completed_pages_and_the_failure_names_the_lane` |
+| The page budget is charged once per OCR page, including when the visitor closes the tab mid-stream | `tests/interfaces/test_demo_transcript.py::test_closing_the_connection_mid_stream_charges_exactly_one_read_and_its_pages`, and for a read of several pages `::test_an_admitted_multi_page_ocr_read_charges_exactly_its_pages_once` and `::test_a_multi_page_read_disconnected_mid_stream_still_charges_every_page_once` |
+| A hostile page cannot execute script through the rendered pane | `tests/interfaces/test_demo_render.py::test_a_hostile_page_renders_inert_markup_only`, `tests/interfaces/test_demo_document_server.py::test_a_hostile_page_renders_inert_and_the_job_json_still_carries_text_not_html`, and for the raw pane's escape `tests/interfaces/test_demo_page_raw.py::test_a_hostile_delta_reaches_the_raw_pane_as_text` |
+
+**"Recorded raw fixture" means the wire shape, not a capture.** `tests/fixtures/paddleocr_stream_page.sse`
+is hand-written in the shape vLLM sends for this model family -- `data:` frames, the echoed prompt and the
+fence split across frames, then `data: [DONE]` -- and replayed by a fake worker on `127.0.0.1:0`
+(`tests/fake_streaming_worker.py`). It is not a capture from a deployed worker, so what is proven is that
+this wire shape concatenates and normalizes to the exported Page Text; a live worker's own frames are
+still unobserved (see [Open items](#open-items)). The golden page records are hand-written for the same
+reason (`tests/fixtures/README.md`): their test proves the demo's projection of a given set of Page Texts,
+not that those texts came from a run.
+
+**"No marker leaking into the document pane" needed the code's reading, and it is narrower than it
+sounds.** Normalization is `strip_model_preamble` and nothing else: the recorded page's echoed `OCR:`
+prompt and markdown fence are gone from the exported Page Text, which the first test asserts by name.
+Layout markers (`<|det|>`, `<|ref|>`) are **not** stripped by anything, so an engine that emitted them
+would show them in both panes -- by design, since the fix belongs to that engine's adapter and lands in
+the corpus (the Decision's "normalization is one function, shared"). That the demo renders residue as
+residue rather than cleaning it is pinned by
+`tests/interfaces/test_demo_render.py::test_marker_residue_renders_as_the_residue_it_is` and
+`tests/interfaces/test_demo_document_server.py::test_marker_residue_renders_as_the_residue_and_the_markdown_keeps_it`.
+
+**What is pinned, and what that word does not cover.** The renderer/sanitizer pair is
+`markdown-it-py==4.2.0` and `nh3==0.3.7`, exact pins in the optional `[demo]` extra
+(`pyproject.toml`), the same pins in the `dev` extra so CI's `pip install -e '.[dev]'` can run the
+pane's tests, and in `docs/demo/requirements-demo.txt`; imported lazily so the base install never
+needs them. "Pinned" means the same Page Text renders to the same bytes on the pinned pair, which is what
+makes the golden and hostile tests meaningful; a bump is a reviewed change with the pane's evidence. It
+does **not** mean a live worker's Page Text has been through it -- every fragment these tests render comes
+from a fixture or a fake.
+
+**The two defaults that are now real.** The demo ships a transcript ceiling of **256 KiB of raw bytes per
+page** (`FINEPDFS_DEMO_TRANSCRIPT_BYTES`, flag `--transcript-bytes`; `0` keeps no transcript and the
+events endpoint then answers `410`) and a heartbeat of **15 seconds of quiet**
+(`FINEPDFS_DEMO_HEARTBEAT_SECONDS`, flag `--heartbeat-seconds`). Both are fields of `DemoLimits`
+(`src/finepdfs/domain/demo.py`), both appear in `GET /api/status` under `limits`, and both are listed and
+checked in the operator's two documents: the table in
+[`docs/spec/live-upload-demo.md`](../spec/live-upload-demo.md#the-demo-servers-own-limits) and the check
+in [`docs/deploy/live-demo-runbook.md`](../deploy/live-demo-runbook.md#13-the-raw-transcripts-two-bounds-and-how-to-check-them).
+Neither number is measured against a live worker: both are the shipped defaults, exercised by tests
+against a fake that streams on `127.0.0.1:0`, and nothing has streamed through the ceiling or waited out
+the heartbeat on a real read.
 
 ## Consequences
 
@@ -156,13 +222,23 @@ it is a separate, declared, opt-in step with its own evidence, not a rendering f
 
 ## Open items
 
-- The buffer ceiling and heartbeat interval are not measured; they belong in the runbook once the
-  endpoint exists.
-- The renderer/sanitizer pair is not chosen or pinned here; the requirement is a pinned, offline-installable
-  pair whose output is stable enough to golden-test.
-- Whether the OCR lane can stream depends on the worker: vLLM and SGLang both serve SSE for this model
-  family, but the demo's cold-start path and the page budget have not been exercised with a stream yet.
-- Figures/images from a page are dropped by normalization today; showing them in the rendered pane would
-  need a resolved artifact, not model-emitted `images/0.jpg` paths, and is out of scope.
-- "Raw Transcript" and "Rendered Document" are names for a demo pane, not domain vocabulary. If either
-  ever becomes an exported artifact, it enters `docs/GLOSSARY.md` first.
+- **The buffer ceiling and the heartbeat are defaults, not measurements.** They exist now -- 256 KiB of
+  raw bytes per page and 15 quiet seconds -- as the two demo limits named above, and the runbook carries
+  the command that reads them out of a running demo. No live worker has streamed through either, so
+  neither number has been sized from evidence: a page longer than 256 KiB will truncate, and how often
+  that happens is unknown until a real reading is watched.
+- **The renderer/sanitizer pair is pinned, and pinned is all it is.** `markdown-it-py==4.2.0` and
+  `nh3==0.3.7`, exact pins in `[demo]`, `dev` and `requirements-demo.txt`, with the fragment
+  golden-tested and the hostile input inert. No live worker has exercised the pair: every Page Text it has rendered came from a
+  fixture or a fake, so engine output that is odd in a way no fixture is (a malformed table, an unclosed
+  fence) has not been seen through it.
+- **Whether the OCR lane can stream depends on the worker**: vLLM and SGLang both serve SSE for this model
+  family, and the streaming transport is tested against a fake that speaks that wire shape. The demo's
+  cold-start path and the page budget have still not been exercised with a live stream -- the cold start
+  slot in the runbook stays unmeasured, and nothing has watched a stream run across a container's
+  scaledown window or a worker's own failure mid-page.
+- **Figures/images** from a page are dropped by normalization today; showing them in the rendered pane
+  would need a resolved artifact, not model-emitted `images/0.jpg` paths, and is out of scope.
+- **"Raw Transcript" and "Rendered Document" are names for a demo pane, not domain vocabulary.** No
+  exported artifact carries either name; `docs/GLOSSARY.md` now says so beside the demo's other terms. If
+  either ever becomes an exported artifact, it enters the glossary first.

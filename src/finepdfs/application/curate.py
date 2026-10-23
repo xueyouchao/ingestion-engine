@@ -15,8 +15,13 @@ from finepdfs.domain import text as text_rules
 from finepdfs.domain.document import Document, EngineIdentity, ExtractedDocument, PageText, TextLayerQuality
 from finepdfs.domain.language import LanguagePolicy
 from finepdfs.domain.ocr import OcrRoutingPolicy, RoutingDecision
-from finepdfs.domain.ports import LanguageIdentifier, OcrEngine, TextLayerProbe
-from finepdfs.domain.publishing import CurationOutcome, DocumentRecord, PublishPolicy
+from finepdfs.domain.ports import LanguageIdentifier, OcrEngine, ReadSink, TextLayerProbe
+from finepdfs.domain.publishing import (
+    CurationOutcome,
+    DocumentRecord,
+    PublishPolicy,
+    document_markdown,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +107,16 @@ class ExtractionStep:
         engine_name = self._policy.engine_name if decision.needs_ocr else NATIVE_TEXT_ENGINE
         return RoutingPlan(quality=quality, decision=decision, engine_name=engine_name)
 
-    def extract_with(self, document: Document, engine_name: str) -> ExtractedDocument:
-        return resolve_engine(self._engines, engine_name).extract(document)
+    def extract_with(
+        self, document: Document, engine_name: str, sink: ReadSink | None = None
+    ) -> ExtractedDocument:
+        """Read with the named engine, optionally watched: a caller may pass a sink, and may leave it out.
+
+        The sink only reports the read as it happens (ADR-0014); the answer is the engine's, and a
+        caller that passes none -- every batch run -- is served exactly as before.
+        """
+        engine = resolve_engine(self._engines, engine_name)
+        return engine.extract(document, sink)
 
     def extract(self, document: Document) -> ExtractionResult:
         plan = self.route(document.content)
@@ -143,7 +156,7 @@ class CurationStep:
         publishable, reason = self._policy.publish.judge(pages, language)
         if not publishable:
             return CurationOutcome(status="dropped", url=url, record=record, reason=reason)
-        markdown = "\n\n".join(page.text for page in pages)
+        markdown = document_markdown(pages)
         return CurationOutcome(
             status="published", url=url, record=record, pages=pages, markdown=markdown, reason=reason
         )

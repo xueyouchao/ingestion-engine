@@ -1,9 +1,10 @@
 """The live upload demo's HTTP server, and the composition root that puts its GPU in reach.
 
 A visitor uploads a document -- a PDF, or a scan as PNG, JPEG or TIFF -- the demo routes it with the
-pipeline's own policy, and the page shows the decision and the text the chosen lane read. Uploads are
-jobs, not long requests (ADR-0012): the POST answers ``202`` with an id, the page polls that id for its
-stage, and the Reading Queue beside this module runs one Reading at a time so the per-Reading
+pipeline's own policy, and the page shows the decision beside three panes: what was sent, the raw
+transcript of what the worker emitted, and the rendered document the read would publish (ADR-0014).
+Uploads are jobs, not long requests (ADR-0012): the POST answers ``202`` with an id, the page polls that
+id for its stage, and the Reading Queue beside this module runs one Reading at a time so the per-Reading
 environment lease is safe.
 
 This module is the composition root. It reads the demo's own limits from ``FINEPDFS_DEMO_*``, leases the
@@ -15,6 +16,15 @@ engine variable is introduced.
 
 Nothing here imports a vendor SDK, and nothing here writes: the uploaded bytes are opened from memory,
 the page images are rendered from memory, and no file, page or job outlives the process.
+
+The rendered document is its own answer, never a field of the job JSON (ADR-0014):
+``GET /api/read/<id>/document`` returns the inert HTML fragment described in ``demo_job`` and
+``demo_render``, and ``GET /api/read/<id>/document.md`` returns the same Page Texts in the corpus's one
+projection, as the download the page offers. ``GET /api/read/<id>`` keeps exactly its old shape, so the
+data answer never carries markup. Every answer here is a method on one ``DemoJob`` -- its stage and
+outcome, its transcript, its document -- so this module asks the job and never joins two stores to
+assemble a pane. Both document answers need the job's own pages and nothing else; the fragment
+additionally needs the pinned ``[demo]`` pair and answers ``503`` in words when it is absent.
 
     finepdfs-live-demo --host 127.0.0.1 --port 8766
     PYTHONPATH=src python -m finepdfs.interfaces.demo_server
@@ -42,17 +52,20 @@ from finepdfs.application.curate import CurationPolicy
 from finepdfs.application.demo_read import DemoRead
 from finepdfs.domain.demo import (
     DEFAULT_DAILY_OCR_PAGE_BUDGET,
+    DEFAULT_HEARTBEAT_SECONDS,
     DEFAULT_PAGE_CAP,
     DEFAULT_POLL_INTERVAL_SECONDS,
     DEFAULT_QUEUE_DEPTH,
     DEFAULT_RATE_LIMIT_READS,
     DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+    DEFAULT_TRANSCRIPT_BYTES,
     DEFAULT_UPLOAD_BYTES,
     DEFAULT_WARM_TIMEOUT_SECONDS,
     DemoLimits,
     SpendGatePolicy,
 )
 from finepdfs.domain.ports import GateLedger, OcrEndpointProbe, OcrEngine
+from finepdfs.domain.publishing import document_markdown
 from finepdfs.infrastructure.compute.endpoint import ENGINE_API_KEY, ENGINE_BASE_URL
 from finepdfs.infrastructure.compute.ocr_endpoint import endpoint_probe
 from finepdfs.infrastructure.compute.providers import (
@@ -64,8 +77,15 @@ from finepdfs.infrastructure.demo.ledger import InMemoryGateLedger
 from finepdfs.infrastructure.engines.environment import ENGINE_COMMAND, engine_config, ocr_routing_policy
 from finepdfs.infrastructure.engines.pymupdf_engine import PymupdfTextLayerProbe
 from finepdfs.infrastructure.engines.registry import PADDLEOCR_VL_ENGINE, build_engines, engine_endpoint
-from finepdfs.interfaces.demo_jobs import QueueFull, Reader, ReadingJob, ReadingQueue
+from finepdfs.interfaces.demo_job import DemoJob, DocumentView
+from finepdfs.interfaces.demo_jobs import QueueFull, Reader, ReadingQueue
 from finepdfs.interfaces.demo_page import DEMO_HTML
+from finepdfs.interfaces.demo_render import RenderingNotInstalled, render_document
+from finepdfs.interfaces.demo_transcript import (
+    STREAM_WRITE_TIMEOUT_SECONDS,
+    RawTranscript,
+    stream_events,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +112,9 @@ QUEUE_DEPTH = "FINEPDFS_DEMO_QUEUE_DEPTH"
 BACK_LINK = "FINEPDFS_DEMO_BACK_LINK"
 WARM_TIMEOUT_SECONDS = "FINEPDFS_DEMO_WARM_TIMEOUT_SECONDS"
 POLL_INTERVAL_SECONDS = "FINEPDFS_DEMO_POLL_INTERVAL_SECONDS"
+# ADR-0014's raw transcript: the per-page byte ceiling and the quiet stream's heartbeat interval.
+TRANSCRIPT_BYTES = "FINEPDFS_DEMO_TRANSCRIPT_BYTES"
+HEARTBEAT_SECONDS = "FINEPDFS_DEMO_HEARTBEAT_SECONDS"
 
 # What the upload accepts: a PDF, and the formats a scanner or a phone writes. A picture of a page is a
 # page to this demo -- the reader takes one page per image frame, an image-only page has no text layer,
@@ -126,7 +149,7 @@ _URL = re.compile(r"https?://[^\s'\"<>]+")
 
 
 class DemoLimitError(ValueError):
-    """A demo limit in the environment is not the kind of number that limit takes."""
+    """A demo limit in the environment is not a number that limit can take."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,12 +158,15 @@ class _Limit:
 
     ``noun`` earns its place twice: it is the help text of the flag that sets this limit, and it is the
     phrase an operator reads in the runbook, so the two cannot describe the same number differently.
+    ``positive`` is for a limit where zero is not a smaller setting but a broken one: a heartbeat of zero
+    never blocks, so it would turn the events loop into a spin that floods the connection.
     """
 
     variable: str
     default: float
     whole: bool
     noun: str
+    positive: bool = False
 
 
 _LIMITS = {
@@ -167,6 +193,16 @@ _LIMITS = {
     "poll_interval_seconds": _Limit(
         POLL_INTERVAL_SECONDS, DEFAULT_POLL_INTERVAL_SECONDS, whole=False, noun="seconds between readiness polls"
     ),
+    "transcript_bytes": _Limit(
+        TRANSCRIPT_BYTES, DEFAULT_TRANSCRIPT_BYTES, whole=True, noun="raw transcript bytes kept per page"
+    ),
+    "heartbeat_seconds": _Limit(
+        HEARTBEAT_SECONDS,
+        DEFAULT_HEARTBEAT_SECONDS,
+        whole=False,
+        noun="seconds between stream heartbeats",
+        positive=True,
+    ),
 }
 
 # The console script's overrides, named for the limit they set rather than for the variable, so an
@@ -180,6 +216,8 @@ _FLAGS = {
     "queue_depth": "--queue-depth",
     "warm_timeout_seconds": "--warm-timeout",
     "poll_interval_seconds": "--poll-interval",
+    "transcript_bytes": "--transcript-bytes",
+    "heartbeat_seconds": "--heartbeat-seconds",
 }
 
 
@@ -232,7 +270,13 @@ class DemoApp:
         self._engine_name = engine_name if engine_name is not None else configured_engine(self._environ)
         self._ledger = ledger if ledger is not None else InMemoryGateLedger(clock=clock, limits=self._limits)
         self._use_case = self._demo_read()
-        self._queue = ReadingQueue(read if read is not None else self._use_case.read, self._limits)
+        # One queue, and one ``DemoJob`` per upload: the job is the sink every pane reads, so there is no
+        # second store to build here and nothing to join when an answer is asked for (ADR-0014).
+        self._queue = ReadingQueue(
+            read if read is not None else self._use_case.read,
+            self._limits,
+            redact=self._redact,
+        )
 
     @property
     def limits(self) -> DemoLimits:
@@ -262,6 +306,16 @@ class DemoApp:
     def queue(self) -> ReadingQueue:
         return self._queue
 
+    def document(self, job_id: str) -> DocumentView | None:
+        """One job's document as the pane sees it, or ``None`` for an id this process never issued."""
+        job = self._queue.job(job_id)
+        return None if job is None else job.document()
+
+    def markdown(self, job_id: str) -> str | None:
+        """The `.md` the pane offers for download: the shared projection, or ``None`` for no such job."""
+        document = self.document(job_id)
+        return None if document is None else document_markdown(document.pages)
+
     def status(self) -> dict[str, Any]:
         """What the page is allowed to know: the limits, the budget, the depth, and whether OCR is wired.
 
@@ -276,13 +330,18 @@ class DemoApp:
             "ocr_endpoint_configured": _endpoint_configured(self._environ),
         }
 
-    def submit(self, content: bytes, client: str, name: str = DEFAULT_UPLOAD_NAMES[PDF_MEDIA_TYPE]) -> ReadingJob:
+    def submit(self, content: bytes, client: str, name: str = DEFAULT_UPLOAD_NAMES[PDF_MEDIA_TYPE]) -> DemoJob:
         """Queue one upload; ``QueueFull`` is the handler's 503 and nothing else is refused here."""
         return self._queue.submit(content, client, name)
 
-    def job(self, job_id: str) -> ReadingJob | None:
-        """One job's standing, or ``None`` for an id this process never issued or no longer keeps."""
-        return self._queue.get(job_id)
+    def job(self, job_id: str) -> DemoJob | None:
+        """The job this id names, or ``None`` for an id this process never issued or no longer keeps."""
+        return self._queue.job(job_id)
+
+    def transcript(self, job_id: str) -> RawTranscript | None:
+        """The raw transcript of a job that is running or waiting; ``None`` once it finished."""
+        job = self._queue.job(job_id)
+        return None if job is None else job.transcript()
 
     def close(self) -> None:
         """Stop the queue's worker; the process is ending or the test is done."""
@@ -356,6 +415,11 @@ def _number(limit: _Limit, raw: str) -> float | int:
     except ValueError as error:
         kind = "a whole number" if limit.whole else "a number"
         raise DemoLimitError(f"{limit.variable} is not {kind}: {raw!r}") from error
+    if limit.positive and value <= 0:
+        raise DemoLimitError(
+            f"{limit.variable} must be positive: {raw!r}; a zero or negative interval never blocks, so "
+            "the events stream would spin and flood the connection"
+        )
     if value < 0:
         raise DemoLimitError(f"{limit.variable} cannot be negative: {raw!r}")
     return value
@@ -373,10 +437,6 @@ def _endpoint_configured(values: Mapping[str, str]) -> bool:
         values.get(variable, "").strip()
         for variable in (ENGINE_BASE_URL, GPU_BASE_URL, GPU_START_COMMAND, ENGINE_COMMAND)
     )
-
-
-def _words(error: BaseException) -> str:
-    return str(error) or type(error).__name__
 
 
 class DemoRequestHandler(BaseHTTPRequestHandler):
@@ -408,18 +468,63 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not found", head=head)
             return
         if path in ("/", "/index.html"):
-            self._html(self.app.page_html(), head=head)
+            self._body("text/html; charset=utf-8", self.app.page_html(), head=head)
         elif path == "/api/status":
             self._json(self.app.status(), head=head)
+        elif path.startswith("/api/read/") and path.endswith("/events"):
+            job_id = path.removeprefix("/api/read/").removesuffix("/events")
+            self._events(job_id, head=head)
         elif path.startswith("/api/read/"):
-            job_id = path.removeprefix("/api/read/")
-            job = self.app.job(job_id)
-            if job is None:
-                self._error(HTTPStatus.NOT_FOUND, f"no job {job_id}", head=head)
-                return
-            self._json(job.as_json(), head=head)
+            self._answer_read(path.removeprefix("/api/read/"), head=head)
         else:
             self._error(HTTPStatus.NOT_FOUND, "not found", head=head)
+
+    def _answer_read(self, target: str, *, head: bool) -> None:
+        """The job answer, the document fragment and the document's markdown are three separate answers.
+
+        ``GET /api/read/<id>`` keeps exactly the shape it had: reading data, never HTML. The document is
+        its own endpoint (ADR-0014), so a caller that wants the rendered pane asks for it and a caller
+        that wants data is never handed markup.
+        """
+        if target.endswith("/document.md"):
+            self._document_markdown(target.removesuffix("/document.md"), head=head)
+        elif target.endswith("/document"):
+            self._document_html(target.removesuffix("/document"), head=head)
+        else:
+            job = self.app.job(target)
+            if job is None:
+                self._no_job(target, head=head)
+                return
+            self._json(job.answer(), head=head)
+
+    def _document_html(self, job_id: str, *, head: bool) -> None:
+        """The inert fragment for one job; an explicit absence when the ``[demo]`` extra is missing."""
+        document = self.app.document(job_id)
+        if document is None:
+            self._no_job(job_id, head=head)
+            return
+        try:
+            fragment = render_document(document)
+        except RenderingNotInstalled as absent:
+            self._error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                str(absent),
+                head=head,
+                rendering="not-installed",
+            )
+            return
+        extra = {"X-Document-Completed": str(document.completed)}
+        if document.total is not None:
+            extra["X-Document-Pages"] = str(document.total)
+        self._body("text/html; charset=utf-8", fragment, head=head, extra=extra)
+
+    def _document_markdown(self, job_id: str, *, head: bool) -> None:
+        """The `.md` the pane offers for download: the same projection the corpus writes."""
+        markdown = self.app.markdown(job_id)
+        if markdown is None:
+            self._no_job(job_id, head=head)
+            return
+        self._body("text/markdown; charset=utf-8", markdown, head=head)
 
     def _read(self) -> None:
         """Take one upload: refuse what cannot be read, otherwise queue it and answer its job id.
@@ -465,6 +570,62 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             return
         self._json({"job": job.id}, status=HTTPStatus.ACCEPTED)
 
+    def _events(self, job_id: str, *, head: bool = False) -> None:
+        """Stream one job's raw transcript (ADR-0014), or answer honestly when there is none left.
+
+        The transcript exists only while the job holds it, so an id this process never issued is a
+        ``404`` and a job that already finished -- and so freed its transcript -- is a ``410``. A demo
+        whose transcript ceiling is ``0`` keeps no transcript for any job, so it answers ``410`` for a
+        queued or running job too, and says that absence (``transcript ceiling is 0 bytes``) rather than
+        a finish the read may not have reached. Neither is answered with an empty stream that a browser
+        would keep reconnecting to. The stream itself is bounded by the transcript's own finish and by a
+        write timeout, so a client that stops reading releases the thread.
+        """
+        if head:
+            self._error(HTTPStatus.METHOD_NOT_ALLOWED, "HEAD is not served for the events stream", head=True)
+            return
+        transcript = self.app.transcript(job_id)
+        if transcript is None:
+            if self.app.job(job_id) is None:
+                self._no_job(job_id)
+            elif self.app.limits.transcript_bytes == 0:
+                self._error(
+                    HTTPStatus.GONE,
+                    f"the read {job_id} keeps no raw transcript: the demo's transcript ceiling is 0 bytes",
+                )
+            else:
+                self._error(
+                    HTTPStatus.GONE,
+                    f"the read {job_id} has finished; its raw transcript is not kept",
+                )
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        try:
+            self.connection.settimeout(STREAM_WRITE_TIMEOUT_SECONDS)
+            stream_events(transcript, self._write_chunk, self.app.limits.heartbeat_seconds)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            # The visitor closed the tab or stopped reading. The Reading is unaffected and already
+            # charged (ADR-0012): a disconnect is not a refund.
+            return
+
+    def _no_job(self, job_id: str, *, head: bool = False) -> None:
+        """The one answer an id this process never issued gets: the same status and the same sentence.
+
+        All four answers -- the job, its document, its markdown and its transcript -- are addressed by
+        the same id, so an id that names nothing must be refused identically by each of them.
+        """
+        self._error(HTTPStatus.NOT_FOUND, f"no job {job_id}", head=head)
+
+    def _write_chunk(self, chunk: bytes) -> None:
+        self.wfile.write(chunk)
+        self.wfile.flush()
+
     def _declared_length(self) -> int | None:
         raw = self.headers.get("Content-Length")
         if raw is None:
@@ -495,10 +656,18 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         if not head:
             self.wfile.write(body)
 
-    def _html(self, body: str, *, head: bool) -> None:
+    def _body(
+        self,
+        content_type: str,
+        body: str,
+        *,
+        head: bool,
+        extra: Mapping[str, str] | None = None,
+    ) -> None:
+        """One text answer -- the page, the fragment, the markdown -- with its type and its headers."""
         encoded = body.encode("utf-8")
         self.send_response(HTTPStatus.OK)
-        self._headers("text/html; charset=utf-8", len(encoded))
+        self._headers(content_type, len(encoded), extra=extra)
         self.end_headers()
         if not head:
             self.wfile.write(encoded)
@@ -507,19 +676,23 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         """A refusal, in the one shape every refused answer has: its kind and the visitor's sentence."""
         self._json({"outcome": "refused", "refusal": {"kind": kind, "reason": reason}}, status=status)
 
-    def _error(self, status: HTTPStatus, message: str, *, head: bool = False) -> None:
-        body = json.dumps({"error": message}, ensure_ascii=False).encode("utf-8")
+    def _error(
+        self, status: HTTPStatus, message: str, *, head: bool = False, **extra: str
+    ) -> None:
+        body = json.dumps({"error": message, **extra}, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self._headers("application/json; charset=utf-8", len(body))
         self.end_headers()
         if not head:
             self.wfile.write(body)
 
-    def _headers(self, content_type: str, length: int) -> None:
+    def _headers(self, content_type: str, length: int, *, extra: Mapping[str, str] | None = None) -> None:
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in (extra or {}).items():
+            self.send_header(name, value)
 
 
 def _client(handler: BaseHTTPRequestHandler) -> str:

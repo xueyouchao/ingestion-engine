@@ -1,10 +1,15 @@
 """The bundle's page asset: reader.html's layout, with a corpus search on top.
 
-The page is the prototype's reader — the same styles, the same two panes, the same page strip, the same
-find field and the same provenance footer — extended by one thing the prototype could not do: a search
-over every page's declared Chunks. Typing in it turns the strip into hits; clicking one lands on that
+The page is the prototype's reader — the same styles, the same panes, the same page strip, the same find
+field and the same provenance footer — extended by one thing the prototype could not do: a search over
+every page's declared Chunks. Typing in it turns the strip into hits; clicking one lands on that
 page with the phrase marked. Everything but the images is inlined by `bundle.py`, so the file opens
 from `file://` as well as from a host. It keeps no state beyond the browser tab and writes nothing.
+
+The third pane is the document as it would be published, behind a Rendered/Markdown toggle. Both views
+are the build's: `bundle.py` renders every page reading through the demo's own projection
+(`demo_render.render_pages`) and ships the projection's page separator, so this static file carries no
+markdown parser and the rendered page is the one the demo's pane would show.
 """
 
 from __future__ import annotations
@@ -62,8 +67,9 @@ nav button span, nav button small { display:block; overflow:hidden; text-overflo
   white-space:nowrap; }
 nav button small { color:var(--muted); font-size:.72rem; }
 nav mark { background:var(--mark); color:inherit; border-radius:2px; padding:0 1px; }
-main { display:grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap:1rem;
+main { display:grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr); gap:1rem;
   padding:1rem 1.2rem 2rem; align-items:start; }
+@media (max-width: 1200px) { main { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
 @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
 .pane { border:1px solid var(--line); border-radius:.8rem; overflow:hidden;
   background:color-mix(in srgb, var(--bg) 94%, var(--ink) 6%); }
@@ -96,6 +102,31 @@ main { display:grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap:1
 .chunk-label { color:var(--muted); font-size:.7rem; letter-spacing:.06em; text-transform:uppercase;
   display:block; margin:.5rem 0 .1rem; }
 .missing { color:var(--muted); }
+.docbar { display:flex; gap:.5rem; align-items:center; padding:.55rem .8rem; border-bottom:1px solid var(--line); }
+.document-body { padding:.5rem .9rem 1rem; max-height:72vh; overflow:auto; }
+/* The document pane is the product, not the transcript: the demo's own page vocabulary, styled as a
+   page. The page number is a caption, not the pane's heading the .pane h2 rule draws. */
+.document-page { border:1px solid var(--line); border-radius:.5rem; padding:.6rem .8rem; margin:.7rem 0;
+  background:var(--bg); }
+.document-page:first-child { margin-top:0; }
+.document-page .document-page-number { display:block; margin:0 0 .5rem; padding:0; border:0;
+  font-size:.7rem; font-weight:600; letter-spacing:.07em; text-transform:uppercase; color:var(--muted); }
+.document-page p { margin:.5rem 0; }
+.document-page h1, .document-page h2, .document-page h3, .document-page h4, .document-page h5,
+.document-page h6 { margin:.7rem 0 .35rem; padding:0; border:0; font-size:1rem; line-height:1.25;
+  letter-spacing:0; text-transform:none; color:var(--ink); }
+.document-page ul, .document-page ol { margin:.5rem 0; padding-left:1.3rem; }
+.document-page blockquote { margin:.5rem 0; padding-left:.7rem; border-left:3px solid var(--line);
+  color:var(--muted); }
+.document-page pre { margin:.5rem 0; padding:.55rem .7rem; border-radius:.4rem; overflow-x:auto;
+  background:color-mix(in srgb, var(--bg) 90%, var(--ink) 10%); }
+.document-page code { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:.9em; }
+.document-page table { border-collapse:collapse; width:100%; margin:.5rem 0; font-size:.9rem; }
+.document-page th, .document-page td { border:1px solid var(--line); padding:.25rem .4rem; text-align:left; }
+.document-page hr { border:0; border-top:1px solid var(--line); margin:.8rem 0; }
+.document-body .missing { display:block; margin:.4rem 0; }
+.markdown-source { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--ink);
+  font:13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
 footer { padding:.9rem 1.2rem; border-top:1px solid var(--line); color:var(--muted); font-size:.78rem; }
 footer code { color:var(--ink); }
 </style>
@@ -132,11 +163,19 @@ footer code { color:var(--ink); }
     </div>
     <div class="text"></div>
   </section>
+  <section class="pane" aria-label="the document">
+    <h2><span>the document</span><span id="document-count"></span></h2>
+    <div class="docbar">
+      <span class="toggle" id="document-views" role="group" aria-label="how to show the document"></span>
+    </div>
+    <div class="document-body" id="document-body"></div>
+  </section>
 </main>
 <footer class="prov"></footer>
 <script>
 const DATA = __DATA__;
-const state = { label: DATA.default_state, doc: null, page: null, find: "", corpus: "", hits: [], index: [] };
+const state = { label: DATA.default_state, doc: null, page: null, find: "", corpus: "", hits: [], index: [],
+  view: "rendered" };
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
   .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -291,6 +330,73 @@ function textPane(page) {
   }
   if (cursor < page.text.length) parts.push(esc(page.text.slice(cursor)));
   return parts.join("");
+}
+
+// -- the document pane: the projection, as a document ------------------------------------------------
+//
+// The bundle is a static directory with no markdown parser in it. `bundle.py` renders each page through
+// the demo's own projection when it builds, so this pane inserts the build's fragments and shows the
+// markdown source beside them, rather than parsing anything here.
+
+const VIEWS = [["rendered", "Rendered"], ["markdown", "Markdown"]];
+
+function documentPages() {
+  // The document on screen, in page order, as the reading the reader has selected published it: the
+  // top bar's reading decides this pane as it decides the text beside it.
+  const pages = [];
+  for (const key of pagesOf(state.doc)) {
+    const reading = DATA.pages[key].readings[state.label];
+    if (reading) pages.push({ number: pageNo(key), reading });
+  }
+  return pages;
+}
+
+function documentMarkdown(pages) {
+  // The published source, byte for byte: the projection's own separator, never one restated here.
+  return pages.map((page) => page.reading.text).join(DATA.page_separator);
+}
+
+function documentEmpty() {
+  return "The " + state.label + " reading published no page of this document.";
+}
+
+function documentUnrendered(count) {
+  return (count === 1
+    ? "One page of this bundle carries no rendered copy"
+    : count + " pages of this bundle carry no rendered copy")
+    + ", so the document is shown as its markdown source.";
+}
+
+function documentBody(pages, view) {
+  if (!pages.length) return '<p class="missing">' + esc(documentEmpty()) + "</p>";
+  const source = '<pre class="markdown-source">' + esc(documentMarkdown(pages)) + "</pre>";
+  if (view === "markdown") return source;
+  const unrendered = pages.filter((page) => !page.reading.html).length;
+  if (unrendered) return '<p class="missing">' + esc(documentUnrendered(unrendered)) + "</p>" + source;
+  return '<article class="document">' + pages.map((page) => page.reading.html).join("\\n") + "</article>";
+}
+
+function renderViews() {
+  const box = $("#document-views");
+  box.textContent = "";
+  for (const [view, label] of VIEWS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.setAttribute("aria-pressed", view === state.view ? "true" : "false");
+    button.addEventListener("click", () => {
+      state.view = view;
+      renderDocument();
+    });
+    box.appendChild(button);
+  }
+}
+
+function renderDocument() {
+  const pages = documentPages();
+  $("#document-count").textContent = pages.length + (pages.length === 1 ? " page" : " pages");
+  renderViews();
+  $("#document-body").innerHTML = documentBody(pages, state.view);
 }
 
 function drawBoxes(page) {
@@ -455,6 +561,7 @@ function renderReader() {
     ? "this document was routed to the " + laneName(view.routing) + " lane: " + view.engine
     : "this document is not in the " + state.label + " reading";
   renderLaneNote();
+  renderDocument();
 }
 
 function render() {

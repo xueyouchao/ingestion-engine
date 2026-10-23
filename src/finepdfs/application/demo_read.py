@@ -36,6 +36,8 @@ from finepdfs.domain.ports import (
     OcrEndpointUnavailable,
     OcrEngine,
     OcrWorker,
+    PageCountSink,
+    ReadSink,
     TextLayerProbe,
 )
 
@@ -80,7 +82,9 @@ class FailedReading:
     """A lane was chosen and the read failed: ``lane`` names it and ``reason`` is the error's own words.
 
     ``kind`` is the exclusion kind the pipeline already uses for a failure, so a failed Reading says the
-    same thing about a document that a batch run does.
+    same thing about a document that a batch run does. ``payload`` is the one shape a failure is told in:
+    the transcript's ``error`` event and the job answer both carry these three fields, so neither can
+    grow a vocabulary of its own.
     """
 
     kind: Literal["failed"]
@@ -88,6 +92,23 @@ class FailedReading:
     reason: str
     plan: RoutingPlan | None
     thresholds: OcrRoutingPolicy
+
+    @classmethod
+    def broke(cls, error: BaseException, redact: Callable[[str], str] = str) -> FailedReading:
+        """The demo's own breakage, before any lane could answer: no plan was made and none is named.
+
+        The demo server's queue wraps what it cannot turn into one of the three outcomes in this, so a
+        composition that raised still ends a job with the same shape every other failure has. Its words
+        are arbitrary -- a worker or an engine that could not be built may quote the address it was
+        configured with and the bearer it was handed -- so they are shown through ``redact``, exactly as
+        a lane's failure is: this reason reaches both the transcript's ``error`` event and the job
+        answer, and both are public.
+        """
+        return cls(kind="failed", lane="", reason=redact(_words(error)), plan=None, thresholds=OcrRoutingPolicy())
+
+    def payload(self) -> dict[str, str]:
+        """The failure as the transcript's ``error`` event and the job answer's ``failure`` carry it."""
+        return {"kind": self.kind, "lane": self.lane, "reason": self.reason}
 
 
 ReadingOutcome = Reading | Refusal | FailedReading
@@ -152,8 +173,14 @@ class DemoRead:
         client: str,
         on_stage: Callable[[ReadingStage], None],
         name: str = "upload.pdf",
+        sink: ReadSink | None = None,
     ) -> ReadingOutcome:
-        """Route the upload, pass the gates, read it with the lane the decision chose."""
+        """Route the upload, pass the gates, read it with the lane the decision chose.
+
+        ``sink`` watches the chosen lane's read (ADR-0014) and, when it is also a ``PageCountSink``, is
+        offered routing's page count before the first delta; every outcome is the same with or without one,
+        and a caller that leaves it out -- the batch flow, every existing test -- is served as before.
+        """
         started = self._clock()
         on_stage("routing")
         try:
@@ -173,13 +200,22 @@ class DemoRead:
         if closed is not None:
             return closed
 
+        # The page count is routing's answer, so a pane that draws one placeholder per page can start
+        # before the first delta (ADR-0014). It is not an engine capability, so it is offered only to a
+        # sink that asked for it by implementing ``PageCountSink``: an engine's sink, and a watcher with
+        # no use for the count, is never asked and never has to answer.
+        if isinstance(sink, PageCountSink):
+            sink.on_page_count(page_count)
+
         if ocr_pages is not None:
-            return self._read_ocr(plan, content, name, on_stage, started, client, ocr_pages)
+            return self._read_ocr(plan, content, name, on_stage, started, client, ocr_pages, sink)
 
         self._ledger.record_read(client)
         on_stage("reading")
         try:
-            extracted = self._extraction.extract_with(Document(name=name, content=content), plan.engine_name)
+            extracted = self._extraction.extract_with(
+                Document(name=name, content=content), plan.engine_name, sink
+            )
         except Exception as error:  # a failed lane is reported, not raised: the demo answers either way
             return self._failed(plan, error)
         on_stage("done")
@@ -201,6 +237,7 @@ class DemoRead:
         started: float,
         client: str,
         pages: int,
+        sink: ReadSink | None = None,
     ) -> ReadingOutcome:
         """The OCR lane, and the only place a worker is entered: admitted, then warmed, then read.
 
@@ -236,7 +273,7 @@ class DemoRead:
             else:
                 on_stage("reading")
                 try:
-                    extracted = engine.extract(Document(name=name, content=content))
+                    extracted = engine.extract(Document(name=name, content=content), sink)
                 except Exception as error:  # a failed lane is reported, not raised
                     outcome = self._failed(plan, error)
                 else:

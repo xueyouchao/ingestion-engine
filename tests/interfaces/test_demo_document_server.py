@@ -1,0 +1,596 @@
+"""The demo's document answer over HTTP: the rendered fragment and the markdown it offers.
+
+The document is its own answer, never a field of the job JSON (ADR-0014). These tests drive the real
+``ThreadingHTTPServer`` on port 0 with the real queue and a reader that answers fixed Page Texts, and
+check the two surfaces: the fragment, which is built from Page Text and is inert for hostile input, and
+the ``.md``, which is exactly the shared projection of the same pages. The golden case reads a checked-in
+page-record file shaped like ``out/pages/<key>.jsonl`` so the pane is proven against the corpus's bytes,
+not against a screenshot.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+import urllib.error
+import urllib.request
+from collections.abc import Callable
+from contextlib import contextmanager
+from html.parser import HTMLParser
+from pathlib import Path
+
+import pytest
+
+import finepdfs.interfaces.demo_render as demo_render
+from finepdfs.application.curate import RoutingPlan
+from finepdfs.application.demo_read import FailedReading, Reading, Refusal
+from finepdfs.domain.document import EngineIdentity, PageText, TextLayerQuality
+from finepdfs.domain.ocr import OcrRoutingPolicy, RoutingDecision
+from finepdfs.domain.publishing import PAGE_SEPARATOR, PageRecord
+from finepdfs.interfaces.demo_server import DemoApp, make_server
+
+FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
+GOLDEN = FIXTURES / "pages" / "ba02d52504f527bb.jsonl"
+ENGINE = EngineIdentity("paddleocr-vl", "weights-c5630abae1d9")
+
+
+class Document:
+    """What a page's fragment looks like, parsed: page sections with their state and attributes."""
+
+    def __init__(self, fragment: str) -> None:
+        self.fragment = fragment
+        self.elements: list[tuple[str, dict[str, str | None]]] = []
+        self.sections: list[tuple[str | None, str | None, str]] = []
+        self.text = ""
+        self._collect(fragment)
+
+    def _collect(self, fragment: str) -> None:
+        outer = self
+
+        class Parser(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__(convert_charrefs=True)
+                self.section: tuple[str | None, str | None, list[str]] | None = None
+                self.data: list[str] = []
+
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                outer.elements.append((tag, attrs))
+                if tag == "section":
+                    self.section = (attrs.get("data-page"), attrs.get("data-state"), [])
+
+            def handle_endtag(self, tag):
+                if tag == "section" and self.section is not None:
+                    outer.sections.append((self.section[0], self.section[1], "".join(self.section[2])))
+                    self.section = None
+
+            def handle_data(self, data):
+                self.data.append(data)
+                if self.section is not None:
+                    self.section[2].append(data)
+
+        parser = Parser()
+        parser.feed(fragment)
+        self.text = "".join(parser.data)
+
+    def section(self, number: str) -> tuple[str | None, str | None, str]:
+        for section in self.sections:
+            if section[0] == number:
+                return section
+        raise AssertionError(f"no page {number} in {self.fragment!r}")
+
+
+def _reading(pages: tuple[PageText, ...]) -> Reading:
+    quality = TextLayerQuality(
+        page_count=len(pages),
+        pages_with_text=len(pages),
+        character_count=sum(len(page.text) for page in pages),
+        garbled_ratio=0.0,
+        image_dominated_pages=0,
+    )
+    return Reading(
+        plan=RoutingPlan(
+            quality=quality,
+            decision=RoutingDecision(False, "the text layer is healthy", {"page_count": float(len(pages))}),
+            engine_name="pymupdf",
+        ),
+        thresholds=OcrRoutingPolicy(),
+        engine=ENGINE,
+        pages=pages,
+        elapsed_ms=1,
+        warm_ms=None,
+    )
+
+
+def _reads(pages: tuple[PageText, ...]) -> Callable:
+    def read(content, client, on_stage, name, sink=None):
+        on_stage("routing")
+        on_stage("reading")
+        on_stage("done")
+        return _reading(pages)
+
+    return read
+
+
+class BlockingReader:
+    """A reader held open until the test releases it, so a job can be seen mid-read.
+
+    ``sink`` is the job's own, kept so a test can report the page count and a completed page through the
+    same interface a lane reports through -- there is no store to reach into.
+    """
+
+    def __init__(self, outcome: Reading | FailedReading) -> None:
+        self._outcome = outcome
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.sink = None
+
+    def __call__(self, content, client, on_stage, name, sink=None):
+        self.sink = sink
+        on_stage("routing")
+        on_stage("reading")
+        self.started.set()
+        assert self.release.wait(5), "the test never released the reading"
+        on_stage("done")
+        return self._outcome
+
+
+@contextmanager
+def _serving(app: DemoApp):
+    server = make_server(app, "127.0.0.1", 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+        app.close()
+
+
+def _post(base: str, body: bytes = b"%PDF-1.7 uploaded") -> str:
+    request = urllib.request.Request(
+        base + "/api/read", data=body, method="POST", headers={"Content-Type": "application/pdf"}
+    )
+    with urllib.request.urlopen(request) as response:
+        assert response.status == 202
+        return json.loads(response.read())["job"]
+
+
+def _get(url: str):
+    return urllib.request.urlopen(url)
+
+
+def _wait_for_done(base: str, job_id: str) -> dict:
+    import time
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with urllib.request.urlopen(f"{base}/api/read/{job_id}") as response:
+            answer = json.loads(response.read())
+        if answer["stage"] == "done":
+            return answer
+        time.sleep(0.01)
+    raise AssertionError("the demo never finished the reading")
+
+
+def _app(read: Callable) -> DemoApp:
+    return DemoApp(limits=None, engine_name="paddleocr-vl", environ={}, read=read)
+
+
+def _golden_records() -> list[PageRecord]:
+    rows = [line for line in GOLDEN.read_text(encoding="utf-8").splitlines() if line.strip()]
+    # PageRecord(**row) is the shape test: this fixture is exactly what as_json() writes, no extra field
+    # and no missing one, so a change to the page-record contract cannot leave this document behind.
+    records = [PageRecord(**json.loads(row)) for row in rows]
+    assert [record.page_number for record in records] == [1, 2, 3]
+    assert {record.engine for record in records} == {str(ENGINE)}
+    assert {record.doc_id for record in records} == {"ba02d52504f527bb"}
+    return records
+
+
+def test_the_document_carries_the_page_records_bytes_in_page_order_with_page_separators() -> None:
+    records = _golden_records()
+    # Arrival order is deliberately not page order: the pane sorts by the original 1-based number.
+    pages = tuple(PageText(number=record.page_number, text=record.text) for record in reversed(records))
+    app = _app(_reads(pages))
+    with _serving(app) as base:
+        job_id = _post(base)
+        _wait_for_done(base, job_id)
+
+        with _get(f"{base}/api/read/{job_id}/document") as response:
+            html = response.read().decode("utf-8")
+            content_type = response.headers["Content-Type"]
+            headers = dict(response.headers)
+        with _get(f"{base}/api/read/{job_id}/document.md") as response:
+            markdown = response.read().decode("utf-8")
+            markdown_type = response.headers["Content-Type"]
+
+    # The `.md` is the corpus's projection, byte for byte: the fixture's own page texts in page order,
+    # joined by the shared separator -- nothing normalized, re-wrapped or added.
+    assert markdown_type.startswith("text/markdown")
+    assert markdown == PAGE_SEPARATOR.join(record.text for record in records), (
+        "the .md answer is the page records' bytes, joined exactly as the corpus joins them"
+    )
+
+    # The HTML pane is that text *rendered*, so it carries no claim about bytes: what it controls is
+    # which page is which -- one section per page, in numeric order, each behind its own "Page N".
+    document = Document(html)
+    assert content_type.startswith("text/html")
+    assert headers["X-Document-Pages"] == "3"
+    assert headers["X-Document-Completed"] == "3"
+    assert [section[0] for section in document.sections] == ["1", "2", "3"]
+    assert {section[1] for section in document.sections} == {"complete"}
+    for number, page in enumerate(records, start=1):
+        _, _, section_text = document.section(str(number))
+        assert f'<h2 class="document-page-number">Page {number}</h2>' in html
+        first_line = page.text.splitlines()[0]
+        assert first_line in section_text, f"page {number}'s own words are in its own section"
+        for other in records:
+            if other.page_number != number:
+                assert other.text.splitlines()[0] not in section_text, (
+                    f"page {other.page_number}'s text is not in page {number}'s section"
+                )
+
+
+def test_a_page_still_being_read_is_only_a_skeleton_and_a_delta_never_reaches_the_pane() -> None:
+    outcome = _reading((PageText(1, "the first completed page"), PageText(2, "the second completed page")))
+    reader = BlockingReader(outcome)
+    app = _app(reader)
+    with _serving(app) as base:
+        job_id = _post(base)
+        assert reader.started.wait(5)
+        reader.sink.on_page_count(2)
+        reader.sink.on_page(PageText(1, "the first completed page"))
+        reader.sink.on_delta(2, "| a half | parsed table |")  # a delta is the transcript pane's
+
+        with _get(f"{base}/api/read/{job_id}/document") as response:
+            html = response.read().decode("utf-8")
+        with _get(f"{base}/api/read/{job_id}/document.md") as response:
+            markdown = response.read().decode("utf-8")
+
+        reader.release.set()
+        _wait_for_done(base, job_id)
+
+    document = Document(html)
+    assert document.section("1")[1] == "complete"
+    assert document.section("2")[1] == "pending"
+    assert '<p class="skeleton" data-state="pending">Page 2 is still being read.</p>' in html
+    assert "half" not in document.text, "a half-parsed table is never rendered"
+    assert "second completed page" not in document.text, "a page appears only when its Page Text exists"
+    assert markdown == "the first completed page", "the download carries the pages that are complete"
+
+
+def test_a_failed_read_keeps_the_pages_that_already_completed() -> None:
+    failure = FailedReading(
+        kind="failed",
+        lane="ocr",
+        reason="the worker broke its stream off",
+        plan=_reading((PageText(1, "first"),)).plan,
+        thresholds=OcrRoutingPolicy(),
+    )
+    reader = BlockingReader(failure)
+    app = _app(reader)
+    with _serving(app) as base:
+        job_id = _post(base)
+        assert reader.started.wait(5)
+        reader.sink.on_page_count(2)
+        reader.sink.on_page(PageText(1, "the page that completed before the failure"))
+        with _get(f"{base}/api/read/{job_id}/document") as response:
+            html = response.read().decode("utf-8")
+        reader.release.set()
+        answer = _wait_for_done(base, job_id)
+
+    assert answer["outcome"] == "failed"
+    assert answer["failure"]["reason"] == "the worker broke its stream off"
+    document = Document(html)
+    assert document.section("1")[1] == "complete"
+    assert "the page that completed before the failure" in document.section("1")[2]
+
+
+def test_a_hostile_page_renders_inert_and_the_job_json_still_carries_text_not_html() -> None:
+    hostile = (
+        "# A page the model wrote\n\n"
+        "<script>alert('script')</script>\n\n"
+        '<img src="x" onerror="alert(\'onerror\')">\n\n'
+        "[a link](https://evil.example/steal)\n\n"
+        "[click](javascript:alert('target'))\n"
+    )
+    app = _app(_reads((PageText(1, hostile),)))
+    with _serving(app) as base:
+        job_id = _post(base)
+        answer = _wait_for_done(base, job_id)
+        with _get(f"{base}/api/read/{job_id}") as response:
+            raw_job = response.read().decode("utf-8")
+        with _get(f"{base}/api/read/{job_id}/document") as response:
+            fragment = response.read().decode("utf-8")
+
+    assert answer["reading"]["pages"] == [{"number": 1, "text": hostile}]
+    assert "<section" not in raw_job, "the job answer never carries the rendered document"
+    assert "data-page" not in raw_job
+    assert "document-page" not in raw_job
+
+    document = Document(fragment)
+    assert {tag for tag, _ in document.elements} <= {
+        "article", "section", "h1", "h2", "h3", "p", "em", "strong", "code", "pre", "blockquote",
+        "hr", "table", "thead", "tbody", "tr", "th", "td", "ul", "ol", "li", "br",
+    }
+    for tag, attrs in document.elements:
+        assert tag not in {"script", "style", "iframe", "img", "a", "object", "embed", "form", "svg"}
+        for name, value in attrs.items():
+            assert not name.lower().startswith("on"), f"{tag}[{name}] is an event handler"
+            assert name.lower() not in {"href", "src", "srcdoc", "action"}
+            assert "javascript:" not in (value or "").lower()
+    assert "<script" not in fragment.lower()
+    assert "<img" not in fragment.lower()
+    assert "<a " not in fragment.lower()
+    assert "evil.example" not in fragment, "a link's target does not survive its element"
+    assert "a link" in document.text and "click" in document.text, "the text stays; navigation does not"
+
+
+def test_marker_residue_renders_as_the_residue_and_the_markdown_keeps_it() -> None:
+    residue = "Before <|det|>table [10,20,30,40]<|/det|> after.\n\nThe row that follows."
+    app = _app(_reads((PageText(1, residue),)))
+    with _serving(app) as base:
+        job_id = _post(base)
+        _wait_for_done(base, job_id)
+        with _get(f"{base}/api/read/{job_id}/document") as response:
+            fragment = response.read().decode("utf-8")
+        with _get(f"{base}/api/read/{job_id}/document.md") as response:
+            markdown = response.read().decode("utf-8")
+
+    assert "<|det|>table [10,20,30,40]<|/det|>" in Document(fragment).text
+    assert markdown == residue, "the demo contributes no second cleanup"
+
+
+def test_the_document_endpoint_says_rendering_is_not_installed(monkeypatch) -> None:
+    def missing():
+        raise ImportError("No module named 'nh3'")
+
+    monkeypatch.setattr(demo_render, "_dependencies", missing)
+    app = _app(_reads((PageText(1, "a page nobody may see unescaped"),)))
+    with _serving(app) as base:
+        job_id = _post(base)
+        _wait_for_done(base, job_id)
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            _get(f"{base}/api/read/{job_id}/document")
+        with _get(f"{base}/api/read/{job_id}/document.md") as response:
+            markdown = response.read().decode("utf-8")
+
+    assert caught.value.code == 503
+    assert caught.value.headers["Content-Type"].startswith("application/json")
+    answer = json.loads(caught.value.read())
+    assert answer["rendering"] == "not-installed"
+    assert "rendering is not installed" in answer["error"]
+    assert "a page nobody may see unescaped" not in answer["error"], "absence never leaks the text"
+    assert markdown == "a page nobody may see unescaped", "markdown needs no optional dependency"
+
+
+def test_the_markdown_answer_is_the_one_shared_projection(monkeypatch) -> None:
+    """The demo must call the corpus's projection, not restate its ordering or its blank-line join."""
+    import finepdfs.interfaces.demo_server as demo_server
+
+    calls: list[tuple[int, ...]] = []
+
+    def projection(pages) -> str:
+        calls.append(tuple(page.number for page in pages))
+        return "the shared projection's answer"
+
+    monkeypatch.setattr(demo_server, "document_markdown", projection)
+    app = _app(_reads((PageText(2, "second"), PageText(1, "first"))))
+    with _serving(app) as base:
+        job_id = _post(base)
+        _wait_for_done(base, job_id)
+        with _get(f"{base}/api/read/{job_id}/document.md") as response:
+            markdown = response.read().decode("utf-8")
+
+    assert markdown == "the shared projection's answer"
+    assert calls == [(1, 2)], "the demo hands the shared projection the pages in page-number order"
+
+
+def test_an_unknown_job_has_no_document() -> None:
+    app = _app(_reads((PageText(1, "text"),)))
+    with _serving(app) as base:
+        for suffix in ("document", "document.md"):
+            with pytest.raises(urllib.error.HTTPError) as caught:
+                _get(f"{base}/api/read/0123456789abcdef/{suffix}")
+            assert caught.value.code == 404
+
+class _PageByPageEngine:
+    """An OCR lane's engine that reports page 1, waits, then answers with both pages.
+
+    Page 1 arrives through the sink while the Reading is still running, so the pane can be asked what it
+    has before the job finishes. Page 2 is deliberately never reported: the finished Reading must remain
+    authoritative for it.
+    """
+
+    def __init__(self) -> None:
+        self.identity = EngineIdentity("paddleocr-vl", "weights-c5630abae1d9")
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self._pages = (PageText(1, "the first page"), PageText(2, "the second page"))
+
+    def extract(self, document, sink=None):
+        from finepdfs.domain.document import ExtractedDocument
+
+        assert sink is not None, "the demo handed its engine no read sink"
+        sink.on_page(self._pages[0])
+        self.started.set()
+        assert self.release.wait(5), "the test never released the second page"
+        return ExtractedDocument(pages=self._pages, engine=self.identity)
+
+
+class _ReadyEndpoint:
+    def ready(self) -> bool:
+        return True
+
+
+class _Lease:
+    def __init__(self, engine) -> None:
+        self._engine = engine
+
+    def __enter__(self):
+        return self._engine, _ReadyEndpoint()
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+
+class _ScannedProbe:
+    """Routing's answer for a two-page scan: the OCR lane, and the page count the pane needs at once."""
+
+    def measure(self, content: bytes) -> TextLayerQuality:
+        return TextLayerQuality(
+            page_count=2, pages_with_text=0, character_count=0, garbled_ratio=0.0, image_dominated_pages=2
+        )
+
+
+def test_a_completed_page_shows_before_the_reading_finishes_and_the_rest_stay_skeletons() -> None:
+    """The page count starts with routing, page 1 lands when it completes, and the answer ends complete."""
+    from datetime import datetime
+
+    from finepdfs.application.curate import CurationPolicy
+    from finepdfs.application.demo_read import DemoRead
+    from finepdfs.domain.demo import DemoLimits, SpendGatePolicy
+    from finepdfs.infrastructure.demo.ledger import InMemoryGateLedger
+
+    engine = _PageByPageEngine()
+    limits = DemoLimits()
+    ledger = InMemoryGateLedger(clock=lambda: datetime.now(), limits=limits)
+    read = DemoRead(
+        probe=_ScannedProbe(),
+        engines={},
+        policy=CurationPolicy(engine_name=ENGINE.name, routing=OcrRoutingPolicy()),
+        gates=SpendGatePolicy(limits),
+        ledger=ledger,
+        worker=lambda: _Lease(engine),
+    ).read
+    app = DemoApp(limits=limits, engine_name=ENGINE.name, environ={}, ledger=ledger, read=read)
+    try:
+        with _serving(app) as base:
+            job_id = _post(base)
+            assert engine.started.wait(5)
+
+            with _get(f"{base}/api/read/{job_id}/document") as response:
+                mid_html = response.read().decode("utf-8")
+                mid_pages = response.headers["X-Document-Pages"]
+                mid_completed = response.headers["X-Document-Completed"]
+            with _get(f"{base}/api/read/{job_id}/document.md") as response:
+                mid_markdown = response.read().decode("utf-8")
+
+            engine.release.set()
+            _wait_for_done(base, job_id)
+            with _get(f"{base}/api/read/{job_id}/document") as response:
+                final_html = response.read().decode("utf-8")
+            with _get(f"{base}/api/read/{job_id}/document.md") as response:
+                final_markdown = response.read().decode("utf-8")
+            stored = app.job(job_id).document()
+    finally:
+        app.close()
+
+    mid = Document(mid_html)
+    assert mid_pages == "2", "the pane knows every page from routing, before the read ends"
+    assert mid_completed == "1"
+    assert 'data-pages="2"' in mid_html
+    assert mid.section("1")[1] == "complete"
+    assert mid.section("2")[1] == "pending"
+    assert "the first page" in mid.section("1")[2]
+    assert "the second page" not in mid.text, "a page appears only once its Page Text exists"
+    assert mid_markdown == "the first page"
+
+    final = Document(final_html)
+    assert [final.section(number)[1] for number in ("1", "2")] == ["complete", "complete"]
+    assert "the first page" in final.section("1")[2]
+    assert "the second page" in final.section("2")[2]
+    assert final_markdown == "the first page\n\nthe second page"
+    assert [(page.number, page.text) for page in stored.pages] == [
+        (1, "the first page"),
+        (2, "the second page"),
+    ], "the finished Reading was recorded as the job's completed document"
+
+
+class ReportingReader:
+    """A reader that reports what it can through the sink, then answers ``outcome`` -- or raises.
+
+    A reader that raises is the queue's own breakage: the use case never answered, so the job's document
+    view is what the pane has to draw the pages it never reached from.
+    """
+
+    def __init__(self, pages: int, page: PageText, *, outcome: Reading | Refusal | None = None,
+                 error: Exception | None = None) -> None:
+        self._pages = pages
+        self._page = page
+        self._outcome = outcome
+        self._error = error
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, content, client, on_stage, name, sink=None):
+        on_stage("routing")
+        on_stage("reading")
+        sink.on_page_count(self._pages)
+        sink.on_page(self._page)
+        self.started.set()
+        assert self.release.wait(5), "the test never released the reading"
+        if self._error is not None:
+            raise self._error
+        return self._outcome
+
+
+def test_a_breakage_after_the_count_renders_every_page_it_never_reached_as_unread() -> None:
+    """A reader that raised ended the job: the pages it never reached are unread, not still being read."""
+    reader = ReportingReader(
+        3,
+        PageText(1, "the page that completed before the queue broke"),
+        error=RuntimeError("the OCR engine could not be built from the worker's lease"),
+    )
+    app = _app(reader)
+    with _serving(app) as base:
+        job_id = _post(base)
+        assert reader.started.wait(5)
+        reader.release.set()
+        answer = _wait_for_done(base, job_id)
+        with _get(f"{base}/api/read/{job_id}/document") as response:
+            html = response.read().decode("utf-8")
+            headers = dict(response.headers)
+
+    assert answer["outcome"] is None, "a breakage is carried in ``failure``, as the demo always answered"
+    assert answer["failure"]["kind"] == "failed"
+    document = Document(html)
+    assert headers["X-Document-Pages"] == "3", "the count routing gave the job still names the pages"
+    assert headers["X-Document-Completed"] == "1"
+    assert [section[0] for section in document.sections] == ["1", "2", "3"]
+    assert [section[1] for section in document.sections] == ["complete", "unread", "unread"], (
+        "a page the failed read never reached names itself unread, never a skeleton nothing replaces"
+    )
+    assert "the page that completed before the queue broke" in document.section("1")[2]
+    assert "still being read" not in html
+
+
+def test_a_refusal_after_the_count_draws_no_page_still_being_read() -> None:
+    """A refusal read nothing: the count routing gave it must not leave the pane promising a page."""
+    refusal = Refusal(
+        kind="unavailable",
+        reason="the demo could not reach its OCR worker: no address is configured",
+        plan=_reading((PageText(1, "a page no lane read"),)).plan,
+        thresholds=OcrRoutingPolicy(),
+    )
+    reader = ReportingReader(
+        2, PageText(1, "a page no lane read"), outcome=refusal
+    )
+    app = _app(reader)
+    with _serving(app) as base:
+        job_id = _post(base)
+        assert reader.started.wait(5)
+        reader.release.set()
+        answer = _wait_for_done(base, job_id)
+        with _get(f"{base}/api/read/{job_id}/document") as response:
+            html = response.read().decode("utf-8")
+            headers = dict(response.headers)
+
+    assert answer["outcome"] == "refused"
+    assert "X-Document-Pages" not in headers, "a refusal never has a page count to promise"
+    assert 'data-pages=' not in html
+    assert 'data-page=' not in html, "no page is drawn for a read that never ran"
+    assert "still being read" not in html

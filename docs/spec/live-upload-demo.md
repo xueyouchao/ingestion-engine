@@ -3,11 +3,14 @@
 - **Status:** implemented on `feature/live-upload-demo` -- the demo server, the deployed app and the Warm
   Control, tested offline. Not deployed and not measured; the operator's record is
   [the live demo runbook](../deploy/live-demo-runbook.md). Implements
-  [ADR-0012](../adr/0012-serve-the-upload-demos-ocr-from-a-deployed-modal-app.md).
+  [ADR-0012](../adr/0012-serve-the-upload-demos-ocr-from-a-deployed-modal-app.md). The page's three panes
+  are [ADR-0014](../adr/0014-stream-the-raw-read-beside-the-rendered-page.md)'s (accepted 2026-10-22), and
+  they are recorded here as the page contract.
 - **Planning date:** 2026-10-19.
 - **Reviewed baseline:** `fa0286e` (the ADR's own branch, `docs/adr-0012-modal-ocr-for-the-live-demo`).
 - **Related:** [FinePDFs integration](finepdfs-integration.md), [PDF workflow demo](pdf-workflow-demo.md),
-  [glossary](../GLOSSARY.md), [live demo runbook](../deploy/live-demo-runbook.md),
+  [glossary](../GLOSSARY.md), [ADR-0014](../adr/0014-stream-the-raw-read-beside-the-rendered-page.md),
+  [live demo runbook](../deploy/live-demo-runbook.md),
   [Modal worker runbook](../deploy/modal-worker-runbook.md).
 
 ## Problem Statement
@@ -45,7 +48,10 @@ Three Spend Gates bound what a visitor can cost: a page cap on the upload, a rat
 a daily budget of OCR pages. When a gate closes the page says which gate it hit and why. A cold worker is
 a stage on the page ("warming the OCR worker") followed by the number that was measured, never an error
 and never a pretend fast answer. An OCR that fails is a failed Reading, reported verbatim, and the demo
-keeps nothing: no uploaded PDF, no extracted text, no page image survives the response.
+keeps nothing: no uploaded PDF, no extracted text, no page image survives the response. What it shows is
+the read itself: the worker's raw output as the transport delivered it, beside the page as it would be
+published -- rendered from the pipeline's own Page Text, never from the transcript (ADR-0014, the page
+contract below).
 
 ## User Stories
 
@@ -72,32 +78,41 @@ keeps nothing: no uploaded PDF, no extracted text, no page image survives the re
 21. As a visitor, I want the limits shown before I upload, so that a refusal is never a surprise.
 22. As a visitor, I want the remaining daily budget shown, so that I can see the demo is still open for OCR.
 23. As a visitor, I want a mostly-native PDF to be routed by the same policy the batch runs use, so that the demo's decision is the pipeline's decision.
-24. As an operator, I want to deploy the OCR worker once and let it scale to zero, so that an idle demo costs storage and not GPU time.
-25. As an operator, I want the deployed worker pinned to the same image, weights and detail as the batch worker, so that a Reading from the demo is comparable with a Reading from a run.
-26. As an operator, I want a cold start to be a page state and never a new Engine Identity, so that the memo is not invalidated by the address or the lifecycle.
-27. As an operator, I want the endpoint to refuse a request without the bearer, so that a public GPU endpoint is not a bill waiting to happen.
-28. As an operator, I want the token to live in a Modal Secret and never in the page, the contract or the browser, so that rotating it is one change in one place.
-29. As an operator, I want a command that reports and changes whether the worker is held warm, so that I can keep it warm for a session on purpose.
-30. As an operator, I want that command to name what a warm worker costs per minute, so that leaving it on is a decision and not an accident.
-31. As an operator, I want the warm control to be off by default, so that the demo's resting cost is zero.
-32. As an operator, I want the demo server to report which gate it hit and how much budget is left, so that I can size the gates from real use.
-33. As an operator, I want the page cap, the rate limit and the daily budget configurable, so that I can change the spend posture without a code change.
-34. As an operator, I want one command that prints the address, model, detail and warm state of the deployed worker, so that wiring the demo server is copy and paste rather than derivation.
-35. As an operator, I want the demo server to lease its GPU through the existing provider, so that pointing it at a leased worker is one flag.
-36. As an operator, I want the demo server to keep no state on disk, so that a demo host holds nothing about anyone's document.
-37. As an operator, I want a runbook that says how to check auth, deployment and the cold-start number instead of asserting them, so that the document cannot go stale.
-38. As a maintainer, I want the gates to be one pure policy with one order, so that two callers cannot disagree about which gate closed.
-39. As a maintainer, I want the demo's engine wiring read from the same environment names the flow reads, so that the demo and a run cannot drift into two engines.
-40. As a maintainer, I want the demo to reuse `ExtractionStep` rather than re-decide routing, so that a policy change moves both or neither.
-41. As a maintainer, I want the deployed app to import no vendor SDK under `src/`, so that the base install stays vendor-free (ADR-0001, ADR-0007).
-42. As a maintainer, I want the demo server's API tested through HTTP with fakes, so that the honest behaviour of stages and refusals is pinned without a GPU.
-43. As a maintainer, I want the deploy half tested against a fake SDK, so that the pins, the bearer and the autoscaler calls are pinned offline.
-44. As a maintainer, I want a test that the demo keeps nothing, so that the retention promise in the ADR is a check and not a sentence.
-45. As a maintainer, I want the glossary to name a Reading, a Spend Gate, a Gate Ledger and the Warm Control, so that tickets and code use one vocabulary.
+24. As a visitor, I want to watch the OCR lane's raw output arrive as it is produced, so that I see a read happening and not only its result.
+25. As a visitor, I want the page as it would be published, rendered from what the pipeline exports, so that I can judge the product and not only the process.
+26. As a visitor, I want to copy that document or download its markdown, so that I can take it into a review under my own file name.
+27. As a visitor, I want to be told when a lane has nothing to stream, so that an empty pane is not mistaken for a broken demo.
+28. As a visitor, I want a failed read to keep the pages and the transcript it already produced, so that one failure does not erase what the worker did read.
+29. As an operator, I want to deploy the OCR worker once and let it scale to zero, so that an idle demo costs storage and not GPU time.
+30. As an operator, I want the deployed worker pinned to the same image, weights and detail as the batch worker, so that a Reading from the demo is comparable with a Reading from a run.
+31. As an operator, I want a cold start to be a page state and never a new Engine Identity, so that the memo is not invalidated by the address or the lifecycle.
+32. As an operator, I want the endpoint to refuse a request without the bearer, so that a public GPU endpoint is not a bill waiting to happen.
+33. As an operator, I want the token to live in a Modal Secret and never in the page, the contract or the browser, so that rotating it is one change in one place.
+34. As an operator, I want a command that reports and changes whether the worker is held warm, so that I can keep it warm for a session on purpose.
+35. As an operator, I want that command to name what a warm worker costs per minute, so that leaving it on is a decision and not an accident.
+36. As an operator, I want the warm control to be off by default, so that the demo's resting cost is zero.
+37. As an operator, I want the demo server to report which gate it hit and how much budget is left, so that I can size the gates from real use.
+38. As an operator, I want the page cap, the rate limit and the daily budget configurable, so that I can change the spend posture without a code change.
+39. As an operator, I want one command that prints the address, model, detail and warm state of the deployed worker, so that wiring the demo server is copy and paste rather than derivation.
+40. As an operator, I want the demo server to lease its GPU through the existing provider, so that pointing it at a leased worker is one flag.
+41. As an operator, I want the demo server to keep no state on disk, so that a demo host holds nothing about anyone's document.
+42. As an operator, I want a runbook that says how to check auth, deployment and the cold-start number instead of asserting them, so that the document cannot go stale.
+43. As an operator, I want the raw transcript's byte ceiling and heartbeat configurable, so that I can bound a stream's memory and a quiet connection without a code change.
+44. As an operator, I want the rendered document to come only from a pinned renderer and sanitizer, so that a missing extra is a stated absence and never unescaped model text.
+45. As a maintainer, I want the gates to be one pure policy with one order, so that two callers cannot disagree about which gate closed.
+46. As a maintainer, I want the demo's engine wiring read from the same environment names the flow reads, so that the demo and a run cannot drift into two engines.
+47. As a maintainer, I want the demo to reuse `ExtractionStep` rather than re-decide routing, so that a policy change moves both or neither.
+48. As a maintainer, I want the deployed app to import no vendor SDK under `src/`, so that the base install stays vendor-free (ADR-0001, ADR-0007).
+49. As a maintainer, I want the demo server's API tested through HTTP with fakes, so that the honest behaviour of stages and refusals is pinned without a GPU.
+50. As a maintainer, I want the deploy half tested against a fake SDK, so that the pins, the bearer and the autoscaler calls are pinned offline.
+51. As a maintainer, I want a test that the demo keeps nothing, so that the retention promise in the ADR is a check and not a sentence.
+52. As a maintainer, I want the glossary to name a Reading, a Spend Gate, a Gate Ledger and the Warm Control, so that tickets and code use one vocabulary.
+53. As a maintainer, I want the rendered pane built from the same Page Text the corpus exports, through the corpus's one projection, so that the demo can never be prettier than the product.
+54. As a maintainer, I want a test that a hostile page renders inert and that the job answer stays text, so that the sanitizer's allowlist and the data answer are checks and not sentences.
 
 ## Implementation Decisions
 
-### The demo is three modules, one per layer
+### The demo is three layers, and the interface layer is its composition root
 
 - **Domain policy** (`domain/demo.py`): the limits, the usage snapshot, the gate decisions, the
   Reading stage names, and the outcome types. Pure; no I/O, no clock, no HTTP.
@@ -105,16 +120,20 @@ keeps nothing: no uploaded PDF, no extracted text, no page image survives the re
   client identity into one Reading. It reuses `ExtractionStep.route`/`extract_with` from
   `application/curate.py` -- routing is *the* policy and the demo must not have its own copy -- and it
   never cleans, language-tags, publishes or deduplicates.
-- **Interface** (`interfaces/demo_server.py` + `interfaces/demo_jobs.py` + `interfaces/demo_page.py`): the
-  Reading Queue, the HTTP server, the job protocol, and the page asset. This is the composition root: it
-  reads `FINEPDFS_*`, leases the GPU through `leased_environment`, builds the engine and the endpoint
-  probe, and owns the Gate Ledger for the life of the process.
+- **Interface** (`interfaces/demo_server.py` + `interfaces/demo_jobs.py` + `interfaces/demo_job.py` +
+  `interfaces/demo_page.py`, and ADR-0014's `demo_transcript.py` and `demo_render.py`): the HTTP server,
+  the Reading Queue, the page asset, one Demo Job per upload -- its stage, answer, bounded raw transcript
+  and document view, read by every pane -- and the document's pinned renderer and sanitizer. This is the
+  composition root: it reads `FINEPDFS_*`, leases the GPU through `leased_environment`, builds the engine
+  and the endpoint probe, and owns the Gate Ledger for the life of the process.
 
 The entry point is the console script `finepdfs-live-demo` (`finepdfs.interfaces.demo_server:main`;
 `python -m finepdfs.interfaces.demo_server` is the module fallback), binding `127.0.0.1:8766` by default. Its
 HTTP surface is `GET /` (the page), `GET /api/status`, `POST /api/read` (the document as the body,
-`Content-Type: application/pdf`, `image/png`, `image/jpeg` or `image/tiff`, answering `202 {"job": ...}`)
-and `GET /api/read/<id>` (the job JSON).
+`Content-Type: application/pdf`, `image/png`, `image/jpeg` or `image/tiff`, answering `202 {"job": ...}`),
+`GET /api/read/<id>` (the job JSON), `GET /api/read/<id>/events` (the raw transcript, as
+`text/event-stream`), `GET /api/read/<id>/document` (the rendered document, as an inert HTML fragment) and
+`GET /api/read/<id>/document.md` (the same pages as markdown).
 
 A scan is a document too. A picture of a page carries no text layer, so it is exactly the case the OCR
 lane exists for: the reader MuPDF gives one page per image frame (a three-frame TIFF is three pages), the
@@ -131,6 +150,70 @@ the gates and before any GPU time.
 
 Nothing under `src/` imports Modal, and nothing under `src/` imports `deploy/`.
 
+### The page is three panes: what was sent, what came back, what would be published
+
+ADR-0014 amends the page, not the flow: no declared state, record, page record, chunk, chunk id or search
+index moves because of it. The page shows three panes in one row -- **1. What you sent** (the upload
+control, the statements about the worker and retention, and the stage timeline with the measured
+warm-up), **2. What came back: the raw transcript** (the worker's own output, arriving), and **3. What
+would be published: the rendered document** (the page projection). A wide screen puts them side by side; anything
+narrower stacks them in that order. The Routing Decision, the Engine Identity, and the refusal and
+failure panels keep their wording and follow the row. The sixth user story is unchanged, and its "page
+text the chosen lane actually read" is the rendered pane's own source: the pane and the corpus show the
+same Page Texts, rendered.
+
+**The raw transcript pane is the transport's verbatim output, set as text.** It holds exactly what the worker
+emitted -- echoed prompt, fences, layout markers, before any normalization -- tagged with its 1-based
+page because several pages are in flight at once, and the page sets it with `textContent`: a delta is
+never parsed as HTML, and neither pane has a link or an image. A lane with nothing to stream (the text
+layer, a local command engine) says so in words -- "this lane does not stream" -- rather than animating
+a stream it never received. The pane exists to make the transformation visible; what is in it is proof
+of work, never evidence, and nothing in it is exported, recorded or cited.
+
+**The transcript is ephemeral and bounded.** One ring buffer per page, with the byte ceiling below;
+a page that outruns its ceiling keeps its newest bytes and reports the drop as a `truncated` event with a
+cumulative `dropped_bytes`, never as a silently shortened page. The job frees it the moment the Reading
+finishes. `GET /api/read/<id>/events` answers `text/event-stream; charset=utf-8` with `Cache-Control:
+no-store` and five event names -- `delta`, `truncated`, `page` (the Page Text that page exported),
+`error` (kind, lane and the job answer's own redacted words) and terminal `done` -- plus a heartbeat
+comment while the read is quiet. A subscriber that connects late, or reloads, is replayed from the start,
+and for a truncated page that replay is the `truncated` marker first and then the retained tail, so the
+loss is named before the text that survived it; a subscriber that is already watching hears the marker
+where the drop happened, because that is when it happened. A browser closes the stream on `done` instead
+of reconnecting. An unknown job id is `404`; a job that already finished is `410`, because its
+transcript is not kept -- and with a ceiling of `0` the events endpoint answers `410` for every job,
+naming that ceiling rather than a finish a queued or running read has not reached. The job answer was
+always the final answer, and it never carries a transcript, a page of HTML or a `data-page`.
+
+**The document is its own answer, so the data answer is never markup.** `GET /api/read/<id>/document`
+returns one inert HTML fragment: an `<article class="document">` holding one `<section
+class="document-page" data-page="N" data-state="complete|pending|unread">` per page, in the original
+1-based numeric order, each complete page introduced by its `Page N` separator; a page still being read
+is a `pending` skeleton and a delta never reaches it, so a half-read table cannot appear, and after a
+failed read the pages it never reached are `unread` and say they were not read -- a failed read, the
+queue's own breakage included, is not still reading. The page numbers are the pages the job has plus the
+count routing gave it, and the last one is whichever of the two is greater: with no count, no page the
+read never reported is drawn and no page after the last one reported is invented, and a page the read did
+report is never cut off by a smaller count. A failure keeps the count, which names the pages it never
+reached; a refusal drops it, because a read that never ran has no page to come.
+`X-Document-Completed` and (once the job knows it) `X-Document-Pages` say how much of it is real. `GET /api/read/<id>/document.md`
+returns the same completed pages as the markdown the corpus writes -- the one shared projection
+(`document_markdown`), byte for byte -- and needs no optional dependency. The pane offers a copy button
+and a `.md` download named after the uploaded file. Rendering is server-side and the page inserts exactly
+one fragment, at one call site.
+
+**Rendering is allowlisted and pinned, and absence is stated.** A markdown renderer and a sanitizer,
+pinned exactly in the optional `[demo]` extra and in `docs/demo/requirements-demo.txt`, carried by the
+`dev` extra too so the offline gate that runs the pane's tests installs them, and imported lazily, turn
+Page Text into that fragment against a structural allowlist: headings, paragraphs, lists,
+emphasis, code blocks, blockquotes, rules and tables with `colspan`/`rowspan` and nothing else -- no
+`script`, `style`, `iframe`, `img` or `a`, no `on*` attribute and no URL, so model output cannot create
+navigation or run. Math stays text. Without the extra the document endpoint answers `503` in words
+(`rendering: not-installed`), the page says so in its own sentence, and the `.md` answer still works.
+Normalization stays where it was -- one function, the adapter's `strip_model_preamble` -- so a marker an
+engine leaked shows as residue in both panes: the demo contributes no second cleanup and must never be
+prettier than the product.
+
 ### A Reading is an outcome, not a bool
 
 `DemoRead.read(content, client, on_stage, name)` returns exactly one of three outcomes, all carrying the
@@ -143,7 +226,11 @@ Routing Decision when one was made:
   daily budget, an unreadable upload, or a full queue. A refusal names its kind and its reason in
   words, and carries no page text.
 - **failed** -- a lane was chosen and the read failed. The reason is the underlying error's own words,
-  never a summary, and the kind is the exclusion kind `failed` that already exists. Those words are shown
+  never a summary, and the kind is the exclusion kind `failed` that already exists. A page the worker
+  cut off before it was finished -- the model's own token limit above all, whether the answer arrived as
+  a stream or in one blocking call -- is this outcome and not a short page: the exported Page Text is
+  never the part the worker managed to send. The blocking answer a batch run reads carries the same
+  `finish_reason`, so the guard is on that path too, not only on a stream. Those words are shown
   through the composition root's redactor, because an engine's transport error quotes the address it
   called and the job answer is public: no address and no bearer reaches the page. No Reading is recorded,
   because the demo records nothing anywhere.
@@ -177,6 +264,9 @@ One Reading runs at a time and a bounded number wait behind it. The single slot 
 per-read environment lease safe (a lease mutates `os.environ`, which the flow's own model already
 assumes is one run at a time), and it is what ADR-0012 means when it says what serialises uploads is the
 demo server's queue and not Modal. A full queue is a refusal with its own kind, not an unbounded wait.
+The most recent finished jobs stay answerable, so a page that polls a moment late still gets its answer;
+one bound covers them, and a job past it is forgotten with everything it held -- its answer and its
+document -- while its raw transcript was already freed when the Reading ended. Nothing survives a restart.
 
 The protocol is therefore a job, not a long request: the upload answers `202` with a job id, and the page
 polls that job for its stage. The stages are `queued`, `routing`, `warming`, `reading`, and the terminal
@@ -220,10 +310,10 @@ kept in memory, bounded, so a page that polls a moment late still reads its answ
 survives a restart.
 
 The page states, before the upload control, that the document is sent to a rented GPU to be read and that
-nothing is kept after the response. Below it the order is the answer first: the stage timeline with the
-measured warm-up, the Routing Decision with its features and thresholds, the page text the lane read, then
-the Engine Identity that produced it -- and a refusal or failure panel in place of the reading when there
-is none.
+nothing is kept after the response. Once a Reading starts, that pane also carries the stage timeline with
+the measured warm-up, the two panes beside it carry the raw transcript and the rendered document as they
+arrive, and the Routing Decision with its features and thresholds and the Engine Identity that produced
+the text follow the row -- with a refusal or failure panel in place of the reading when there is none.
 
 ### The deployed app is one container, scale to zero, one bearer
 
@@ -256,9 +346,10 @@ the only names it owns are the demo's limits.
 
 ### The demo server's own limits
 
-Every limit is a default with an environment override, so the spend posture is a setting. The defaults live
-in `domain/demo.py` and the variables are read by `interfaces/demo_server.py`; the operator's copy of this
-table, with the checks, is [the live demo runbook](../deploy/live-demo-runbook.md):
+Every limit is a default with an environment override, so the spend posture -- and, for the transcript,
+the stream's shape -- is a setting. The defaults live in `domain/demo.py` and the variables are read by
+`interfaces/demo_server.py`; the operator's copy of this table, with the checks, is
+[the live demo runbook](../deploy/live-demo-runbook.md):
 
 - upload size (`FINEPDFS_DEMO_UPLOAD_BYTES`, default 20 MiB) -- refused in the handler, before the body is
   fully read;
@@ -269,12 +360,23 @@ table, with the checks, is [the live demo runbook](../deploy/live-demo-runbook.m
   lane would exceed it;
 - Reading Queue depth (`FINEPDFS_DEMO_QUEUE_DEPTH`, default 3 waiting) -- refused when full;
 - warm timeout (`FINEPDFS_DEMO_WARM_TIMEOUT_SECONDS`, default 900 s) and poll interval
-  (`FINEPDFS_DEMO_POLL_INTERVAL_SECONDS`, default 2 s) -- a read that never warms fails.
+  (`FINEPDFS_DEMO_POLL_INTERVAL_SECONDS`, default 2 s) -- a read that never warms fails;
+- transcript ceiling (`FINEPDFS_DEMO_TRANSCRIPT_BYTES`, flag `--transcript-bytes`, default 262144 bytes --
+  256 KiB of raw output kept per page, the unit being raw bytes of the worker's text; `0` keeps no
+  transcript at all and the events endpoint then answers `410`) -- what a page's ring buffer holds before it
+  is marked `truncated`;
+- stream heartbeat (`FINEPDFS_DEMO_HEARTBEAT_SECONDS`, flag `--heartbeat-seconds`, default 15 s of quiet,
+  the unit being seconds, and it must be positive) -- how long a silent `text/event-stream` waits before
+  it writes a heartbeat comment; a zero or negative interval is refused when the demo starts, because it
+  would never block and the stream loop would spin.
 
 The console script takes one flag per limit (`--page-cap`, `--rate-limit-reads`,
 `--rate-limit-window-seconds`, `--daily-ocr-pages`, `--upload-bytes`, `--queue-depth`, `--warm-timeout`,
-`--poll-interval`), each overriding the matching variable for that run and replacing no other. An exported
-variable with an empty value means the default.
+`--poll-interval`, `--transcript-bytes`, `--heartbeat-seconds`), each overriding the matching variable for
+that run and replacing no other. An exported variable with an empty value means the default. The ceiling
+and the heartbeat bound a stream's memory and a quiet connection; neither is charged against a Spend
+Gate, and neither number has been measured against a live worker -- the runbook carries the command that
+reads the running process's own values instead.
 
 A client is the left-most `X-Forwarded-For` hop when a proxy set one, else the peer address. This is a
 spend brake and not an identity: a public deployment must sit behind a proxy that sets the header, and
@@ -289,19 +391,28 @@ intermediate counters that the page never shows, or the order of statements insi
 
 The seams, highest first:
 
-1. **The demo server's HTTP API** (`tests/interfaces/test_demo_server.py`). The whole feature through
+1. **The demo server's HTTP API** (`tests/interfaces/test_demo_server.py`, and for ADR-0014's two answers
+   `tests/interfaces/test_demo_transcript.py`, `test_demo_document_server.py`). The whole feature through
    one seam: POST a PDF, poll the job, read the decision and the page texts; watch a refusal per kind; see
    the queue refuse a second upload while one is running. The real `ThreadingHTTPServer` runs on port 0
-   with a fake probe, fake engines, a fake endpoint probe and an in-memory ledger. Prior art:
-   `tests/interfaces/test_explorer.py`.
-2. **The use case** (`tests/application/test_demo_read.py`). `DemoRead` with hand-written fakes, the way
+   with a fake probe, fake engines, a fake endpoint probe and an in-memory ledger. The stream and the
+   fragment are tested through the same seam: a subscriber that reloads is replayed delta for delta, a
+   disconnect is charged once, a finished job answers `410`, the golden page records come back in page
+   order, and a hostile page renders inert. Prior art: `tests/interfaces/test_explorer.py`.
+2. **The page asset's own JavaScript** (`tests/interfaces/test_demo_page_raw.py`,
+   `tests/interfaces/test_demo_page_document.py`). The page's pure functions run under Node when Node is
+   present and are skipped when it is not, fed the answers the real server produced: a delta reaches the
+   raw transcript pane as text, a reload converges on the job's answer, a skeleton is replaced by its page, and the
+   three panes are in the visitor's reading order. The rest -- one `innerHTML`, no second status
+   vocabulary -- is a static assertion on the asset, because the suite has no browser.
+3. **The use case** (`tests/application/test_demo_read.py`). `DemoRead` with hand-written fakes, the way
    `tests/application/test_curate_document.py` tests `CurateDocument`: the gate order, a cold endpoint
    announced as a stage and its wait reported, a lane failure verbatim, and the promise that a native
    read never touches the OCR engine.
-3. **The gate policy and the ledger** (`tests/domain/test_demo_gates.py`, plus the ledger's own test).
+4. **The gate policy and the ledger** (`tests/domain/test_demo_gates.py`, plus the ledger's own test).
    Boundary values for each gate, the order between them, the day rollover, and that a failed read is
    not refunded. Pure and fast.
-4. **The deploy half** (`tests/deploy/test_modal_serve.py`, `tests/deploy/test_modal_warm.py`, and the
+5. **The deploy half** (`tests/deploy/test_modal_serve.py`, `tests/deploy/test_modal_warm.py`, and the
    existing contract/image tests extended). A fake Modal module, exactly as `tests/deploy/fake_modal.py`
    already stands in for the SDK: the app declares one container, a zero floor, the pinned image and the
    Secret; the launcher passes the bearer through to vLLM; the warm control computes the price and calls

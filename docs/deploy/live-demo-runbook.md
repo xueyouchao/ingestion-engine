@@ -18,6 +18,11 @@ place.
 > `/api/status`, `modal container list`, `modal secret list` and `modal billing rates`. **Not** run: the
 > `modal deploy` itself, the Warm Control against a deployed app, the bearer check against a live
 > container, and any measurement of a cold start.
+>
+> **Added 2026-10-22, for ADR-0014's transcript.** §13's two local checks were run the same way: the demo
+> server's `--help` prints the transcript ceiling and the heartbeat with their defaults, and `/api/status`
+> carries both as limits. Neither was exercised against a live worker, and neither number is a
+> measurement; §13 says what to look at, not what you will see.
 
 The commands name how to check machine state; they do not claim what the answer will be
 (`CODING_STANDARDS.md`).
@@ -32,8 +37,11 @@ The commands name how to check machine state; they do not claim what the answer 
 | `deploy/gpu/server.py` | the in-container launcher both postures spawn; `--print-command` prints the pinned command with the bearer masked |
 | `deploy/modal/image.py` | the pinned worker image, `WORKER_ENTRYPOINT` and the weights Volume |
 | `src/finepdfs/interfaces/demo_server.py` | the demo host: HTTP surface, composition root, `FINEPDFS_DEMO_*` reader |
-| `src/finepdfs/interfaces/demo_jobs.py` | the Reading Queue and the job JSON a page polls |
-| `src/finepdfs/interfaces/demo_page.py` | the page asset (self-contained HTML) |
+| `src/finepdfs/interfaces/demo_jobs.py` | the Reading Queue: the slot, admission, the waiting list and the retention bound |
+| `src/finepdfs/interfaces/demo_page.py` | the page asset (self-contained HTML): the three panes |
+| `src/finepdfs/interfaces/demo_transcript.py` | the raw read's bounded per-page store and its `text/event-stream` (§13) |
+| `src/finepdfs/interfaces/demo_job.py` | one job's per-job state: stage, answer, transcript, document view (retention is the queue's) |
+| `src/finepdfs/interfaces/demo_render.py` | the pinned renderer and sanitizer behind `/document`; the `503` sentence when they are absent |
 | `src/finepdfs/domain/demo.py` | the limits' defaults and `SpendGatePolicy` |
 | `src/finepdfs/infrastructure/demo/ledger.py` | `InMemoryGateLedger`, the only Gate Ledger adapter |
 | `docs/deploy/modal-worker-runbook.md` | the *other* GPU posture: a Sandbox leased per run. Its budget gate and teardown checks apply to §7 |
@@ -255,12 +263,15 @@ Check that the demo host answers, without spending anything:
 curl -fsS http://127.0.0.1:8766/api/status      # the demo server must be running (§5)
 ```
 
-Observed on 2026-10-19 with the demo's defaults and no endpoint configured:
+Observed on 2026-10-22 with the demo's defaults and no endpoint configured -- the shape of the answer,
+and the defaults a fresh process reads; the values a running process enforces are the ones this command
+prints for it:
 
 ```json
 {"limits": {"page_cap": 25, "rate_limit_reads": 5, "rate_limit_window_seconds": 600,
  "daily_ocr_page_budget": 300, "upload_bytes": 20971520, "queue_depth": 3,
- "warm_timeout_seconds": 900, "poll_interval_seconds": 2},
+ "warm_timeout_seconds": 900, "poll_interval_seconds": 2,
+ "transcript_bytes": 262144, "heartbeat_seconds": 15},
  "ocr_pages_remaining": 300, "queue": {"active": 0, "waiting": 0}, "ocr_endpoint_configured": false}
 ```
 
@@ -324,10 +335,13 @@ The HTTP surface, and what each answer means:
 
 | Request | Answer |
 | --- | --- |
-| `GET /` | the page: the statements about where the bytes go and what is kept, the limits and the remaining budget before the upload control, and the decision, the Engine Identity and the page text once a Reading arrives |
+| `GET /` | the page, three panes: what you sent (the statements about where the bytes go and what is kept, the limits and the remaining budget, then the stages), what came back (the raw read, streamed), and what would be published (the rendered document, page by page); the decision, the Engine Identity and a refusal or failure panel follow the row |
 | `GET /api/status` | the §4 status object: limits, remaining OCR budget, queue depth, whether an OCR endpoint is configured -- never the bearer or the address |
 | `POST /api/read` | the document as the body, `Content-Type: application/pdf`, `image/png`, `image/jpeg` or `image/tiff` (a scan is read as one page per image frame, so a three-frame TIFF is three pages); `202 {"job": "<id>"}`; `413` over the byte cap; `400` for an empty body, another media type or no `Content-Length`; `503` when the queue is full |
-| `GET /api/read/<id>` | the job JSON: `stage`, `outcome`, `elapsed_ms`, `warmed_ms` (milliseconds measured from the first readiness question, zero when the worker answered at once, `null` only on the text layer, which asks nothing), `refusal`, `failure`, `reading` (lane, reason, the five features, the thresholds, the Engine Identity, and each page with its original 1-based number); `404` for an unknown id |
+| `GET /api/read/<id>` | the job JSON: `stage`, `outcome`, `elapsed_ms`, `warmed_ms` (milliseconds measured from the first readiness question, zero when the worker answered at once, `null` only on the text layer, which asks nothing), `refusal`, `failure`, `reading` (lane, reason, the five features, the thresholds, the Engine Identity, and each page with its original 1-based number); `404` for an unknown id. It carries no transcript and no markup, whatever the other answers show |
+| `GET /api/read/<id>/events` | the raw read as `text/event-stream` (`delta`, `truncated`, `page`, `error`, `done`, plus a heartbeat comment): what the worker emitted, verbatim, until the Reading finishes; then the transcript is freed and the same URL answers `410`. An unknown id is `404` (§13) |
+| `GET /api/read/<id>/document` | the rendered document as one inert HTML fragment: one `data-page`/`data-state` section per page in original numeric order, a skeleton for a page still being read, `X-Document-Completed` and `X-Document-Pages` saying how much is real; `503` with `rendering: not-installed` when the `[demo]` extra is absent |
+| `GET /api/read/<id>/document.md` | the same completed pages as the corpus's own markdown projection, byte for byte -- the file the pane's download saves; it needs no optional dependency, so it works when `/document` answers `503` |
 
 `POST` answers immediately; the page polls the job. The stages are `queued`, `routing`, `warming`,
 `reading`, and `done` carries the outcome. A visitor sees a slow first OCR as a measured warm-up
@@ -361,12 +375,14 @@ the server starts, or passing its flag for one run:
 | `FINEPDFS_DEMO_RATE_LIMIT_READS` per `FINEPDFS_DEMO_RATE_LIMIT_WINDOW_SECONDS` | `--rate-limit-reads`, `--rate-limit-window-seconds` | 5 reads per 600 s, per client | one visitor's reads in a sliding window | kind `rate-limit` |
 | `FINEPDFS_DEMO_DAILY_OCR_PAGES` | `--daily-ocr-pages` | 300 OCR pages per UTC day | the demo's whole OCR spend for the day, across all visitors | kind `daily-budget` |
 
-Four more settings are the demo's but are not spend: `FINEPDFS_DEMO_UPLOAD_BYTES`
+Six more settings are the demo's but are not spend: `FINEPDFS_DEMO_UPLOAD_BYTES`
 (`--upload-bytes`, default `20971520`, 20 MiB -- refused as an HTTP `413` with kind `upload` before the
 body is read), `FINEPDFS_DEMO_QUEUE_DEPTH` (`--queue-depth`, default 3 Readings waiting -- refused as an
-HTTP `503` with kind `busy`) and `FINEPDFS_DEMO_WARM_TIMEOUT_SECONDS` / `FINEPDFS_DEMO_POLL_INTERVAL_SECONDS`
+HTTP `503` with kind `busy`), `FINEPDFS_DEMO_WARM_TIMEOUT_SECONDS` / `FINEPDFS_DEMO_POLL_INTERVAL_SECONDS`
 (`--warm-timeout`, `--poll-interval`, defaults 900 s and 2 s -- a read that never warms fails rather than
-waiting for ever).
+waiting for ever), and the raw transcript's two, `FINEPDFS_DEMO_TRANSCRIPT_BYTES` (`--transcript-bytes`)
+and `FINEPDFS_DEMO_HEARTBEAT_SECONDS` (`--heartbeat-seconds`) -- §13, because neither is a gate: nothing is
+charged or refused by them.
 
 ```bash
 export FINEPDFS_DEMO_DAILY_OCR_PAGES=50          # the variable is the configuration
@@ -625,6 +641,11 @@ nobody reads more into its page than is there:
 * nothing retained: only page images leave the host, for the length of the Reading; the uploaded bytes are
   dropped when the Reading finishes, the job objects live only in memory (bounded), and the Modal Volume
   holds weights, not documents. The page states all of this before the upload control;
+* no raw output kept: the middle pane's transcript is a bounded ring buffer per page (§13) held only
+  while the Reading runs, then freed -- never written to disk, never in the job answer, never cited, and
+  not evidence of OCR quality;
+* no HTML in the job answer: the rendered document is its own endpoint, built server-side from the same
+  Page Texts the corpus exports, and the demo contributes no cleanup of its own;
 * no durable state: a restart loses every job, every counter and every queued Reading.
 
 ## 12. Known limits of the counters
@@ -654,3 +675,79 @@ The Gate Ledger is in memory, and that has consequences a reader of `/api/status
 * **`/api/status` is this process's view.** Its `limits` are the ones in force since the process started
   and its `ocr_pages_remaining` is this process's ledger; changing a variable takes a restart, and a
   restart resets the number.
+
+## 13. The raw transcript's two bounds, and how to check them
+
+The page's middle pane streams the worker's own output (ADR-0014). Two limits bound that stream, and
+neither is a Spend Gate: no upload is refused and no page is charged because of them. They bound memory
+per page and silence per stream. Both are the demo's own limits -- defaults in
+`src/finepdfs/domain/demo.py`, read by `src/finepdfs/interfaces/demo_server.py` like every other one, so
+§6's rule applies: the variable before the start, or the flag for one run:
+
+| Variable | Flag | Default | Unit | What it bounds |
+| --- | --- | --- | --- | --- |
+| `FINEPDFS_DEMO_TRANSCRIPT_BYTES` | `--transcript-bytes` | 262144 | raw bytes kept per page | one page's ring buffer before a `truncated` event names what it dropped. `0` keeps no transcript: the events endpoint answers `410` for every job |
+| `FINEPDFS_DEMO_HEARTBEAT_SECONDS` | `--heartbeat-seconds` | 15 | seconds of quiet | how long a silent `text/event-stream` waits before it writes the comment line `: heartbeat`. It must be positive: a zero or negative interval never blocks, so the demo refuses it at startup instead of spinning the stream loop |
+
+Check them against the build you have, not against this file. The flag and the limit's own words are the
+first half of the check, because a flag's help text and the table above are read from the same entry:
+
+```bash
+.venv/bin/finepdfs-live-demo --help          # or: PYTHONPATH=src .venv/bin/python -m finepdfs.interfaces.demo_server --help
+```
+
+What each answer means:
+
+* a line `--transcript-bytes TRANSCRIPT_BYTES` whose help reads `raw transcript bytes kept per page
+  (default 262144)`: this build has the ceiling, and that is the default it ships with. A number you did
+  not pass and did not export is the default, nothing else.
+* a line `--heartbeat-seconds HEARTBEAT_SECONDS` whose help reads `seconds between stream heartbeats
+  (default 15)`: likewise, for the quiet interval.
+* either flag absent: this build predates ADR-0014. Its page has no raw pane and its `/api/status` will
+  list fewer limits, so nothing below can be checked on it.
+
+The second half is the running process, because a flag only says what it would do -- `/api/status`
+carries the limits that process is enforcing (§4, §6):
+
+```bash
+curl -fsS http://127.0.0.1:8766/api/status \
+  | python -c 'import json,sys; limits=json.load(sys.stdin)["limits"]; print(limits["transcript_bytes"], limits["heartbeat_seconds"])'
+```
+
+* two numbers, e.g. `262144 15`: the ceiling in bytes per page, then the quiet seconds. They are what
+  the process is enforcing; a flag or variable passed for that run shows up here, not in the defaults.
+* `KeyError: 'transcript_bytes'`: the running process is a build without the transcript limit. Restart
+  the demo server from this checkout (§5); the numbers above are about the process and not the machine.
+* a nonzero exit with an HTTP error (`curl` `-f` fails): the demo server is not answering (§5). Nothing
+  about the stream has been checked until this command prints.
+
+Neither number says anything about a live stream by itself: the ceiling is what *would* be dropped, and
+the heartbeat is what *would* be sent. Watch them happen on a running job: `JOB` is any job id this
+process still has -- §9's POST and `$JOB` show how to make and keep one, any small upload works, no cold
+start is needed, and the job must still be running, because the store is freed when it finishes:
+
+```bash
+curl -sN "http://127.0.0.1:8766/api/read/$JOB/events"
+```
+
+* `: heartbeat` between events on a read that is quiet for longer than the interval: the heartbeat is in
+  force. It is a comment, not an event, so the page ignores it and no `data:` line follows it.
+* `event: truncated` with `data: {"page": N, "dropped_bytes": M}`: page `N` outran the ceiling, kept its
+  newest bytes, and dropped `M` bytes cumulatively. The page says so in words beside what remains.
+* `410` and `{"error": "the read <id> has finished; its raw transcript is not kept"}`: the Reading ended
+  and the store was freed -- the normal answer for a reloaded or late subscriber, not a fault.
+* with `FINEPDFS_DEMO_TRANSCRIPT_BYTES=0`, `410` and
+  `{"error": "the read <id> keeps no raw transcript: the demo's transcript ceiling is 0 bytes"}` for
+  **any** job, queued or running as well as finished: nothing was ever kept, and the status is the same
+  `410` while the sentence names that absence instead of a finish the read may not have reached.
+* `404` and `{"error": "no job <id>"}`: this process never issued that id (a restart forgets jobs, §12).
+* nothing at all for longer than the interval and no `: heartbeat` either: the stream is not the demo's
+  -- check §5's host and port, and any proxy in front of it.
+
+**None of this has been measured against a live worker.** The ceiling and the heartbeat are the values
+the demo ships with; nobody sized them from evidence, because nobody has watched a real OCR worker's
+output through them. How often a page comes near 256 KiB, and whether 15 s of quiet suits whatever sits
+in front of the demo host, is unknown. Size them from what the checks above show -- a `truncated` event
+says the ceiling is too low for that page, and a quiet connection that does not stay open says the
+interval is too long for whatever is in front of the demo -- and record what you saw beside the numbers
+you chose, rather than trusting this file's defaults.

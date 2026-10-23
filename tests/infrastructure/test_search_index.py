@@ -44,7 +44,7 @@ class ControlledEngine:
         self._pages = pages_by_digest
         self.calls = 0
 
-    def extract(self, document) -> ExtractedDocument:
+    def extract(self, document, sink=None) -> ExtractedDocument:
         self.calls += 1
         return ExtractedDocument(pages=self._pages[document.digest], engine=self.identity)
 

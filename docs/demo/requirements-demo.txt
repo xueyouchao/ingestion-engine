@@ -1,6 +1,6 @@
 # The observed working demo environment, pinned so a fresh install reproduces the same page text,
 # chunk ids and citations. The base install stays model-free (pyproject.toml dependencies); everything
-# below is the optional OCR and CPU tooling the runbook's measured runs used.
+# below is the optional OCR, CPU and rendering tooling the demo uses.
 #
 # Install the base first, then the CPU wheels from the CPU index, then this file:
 #
@@ -14,3 +14,16 @@
 docling==2.140.0
 torch==2.10.0+cpu
 easyocr==1.7.2
+# The rendered document pane (ADR-0014): markdown-it-py turns Page Text into structural HTML and nh3
+# sanitizes it against the structural allowlist. Pinned exactly because the fragment is golden-tested: a
+# different renderer or sanitizer can change markup for the same Page Text, so a bump is a reviewed change
+# with the pane's evidence. Both are installed here rather than in the base install, and they are also
+# the `[demo]` extra in pyproject.toml -- `pip install -e '.[demo]'` is the shorter way to install just
+# this pair. Only the demo's document endpoint imports them, and lazily, so without them:
+#   - `GET /api/read/<id>/document` answers `503` in words ("rendering is not installed: ...", with
+#     `rendering: not-installed`), never unescaped model text, and the page says so in its own sentence;
+#   - `GET /api/read/<id>/document.md` still answers: the markdown is the corpus's own projection and
+#     needs no optional dependency, so the copy button and the download keep working;
+#   - the base install stays free of both, and the demo server still starts and reads documents.
+markdown-it-py==4.2.0
+nh3==0.3.7

@@ -56,10 +56,13 @@ third changes only the publish decision. Read
 the real Docling page evidence and the honest failures, and
 [`docs/demo/pdf-demo-corpus.md`](docs/demo/pdf-demo-corpus.md) for the pin.
 
-The live upload demo is the other shape: a visitor uploads a PDF and sees the routing decision and the text
-the chosen lane read (`finepdfs-live-demo`, `127.0.0.1:8766`), with its OCR worker deployed on Modal and its
-spend bounded by three gates. [`docs/deploy/live-demo-runbook.md`](docs/deploy/live-demo-runbook.md) is the
-operator's procedure, including the slot for a cold start that nobody has measured yet.
+The live upload demo is the other shape: a visitor uploads a PDF and sees the routing decision, the
+worker's raw read arriving as the transport delivered it, and the page as it would be published
+(`finepdfs-live-demo`, `127.0.0.1:8766`), with its OCR worker deployed on Modal and its spend bounded by
+three gates. Rendering the published pane needs ADR-0014's pinned pair
+(`.venv/bin/pip install -e ".[demo]"`); without it that pane says so in words and the document's
+markdown download still works. [`docs/deploy/live-demo-runbook.md`](docs/deploy/live-demo-runbook.md) is
+the operator's procedure, including the slot for a cold start that nobody has measured yet.
 
 ## Browser explorer (P1, read-only)
 
