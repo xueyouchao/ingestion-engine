@@ -94,10 +94,12 @@ class VlmChatTransport:
     def _post_answer(self, messages: list[dict]) -> StreamedAnswer:
         """One blocking request: the whole answer and the reason the worker stopped sending it."""
         request = self._request(messages, stream=False)
+        # ``HTTPException`` too: an ``IncompleteRead`` is what a connection cut mid-answer raises, and it
+        # is not an ``OSError``, so without it the batch path leaks a bare ``http.client`` error.
         try:
             with self._opener(request, timeout=self._endpoint.timeout_seconds) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, ValueError) as error:
+        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as error:
             raise VlmTransportError(f"could not reach {self._endpoint.chat_completions_url()}: {error}") from error
         return _message_answer(payload, self._endpoint)
 

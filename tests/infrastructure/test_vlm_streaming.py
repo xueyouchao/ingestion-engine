@@ -228,6 +228,44 @@ def test_a_connection_cut_mid_stream_is_named_as_the_transport_failure_it_is() -
     assert "http://worker.invalid/v1/chat/completions" in str(raised.value)
 
 
+class _CutAnswer:
+    """A blocking answer whose body is cut mid-read, the way a dropped connection ends one."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        raise self._error
+
+
+def test_a_connection_cut_mid_answer_is_a_transport_failure_on_both_paths() -> None:
+    """The batch path every corpus run takes and the demo's stream name a cut connection the same way.
+
+    ``IncompleteRead`` is an ``HTTPException``, not an ``OSError``: uncaught, the batch path would raise a
+    bare ``http.client.IncompleteRead`` with no endpoint in it at all.
+    """
+    incomplete = http.client.IncompleteRead(b'{"choices":', None)
+    endpoint = ChatEndpoint(base_url="http://worker.invalid/v1", model="m")
+
+    blocking = VlmChatTransport(endpoint, opener=lambda _request, timeout: _CutAnswer(incomplete))
+    streaming = VlmChatTransport(endpoint, opener=lambda _request, timeout: _BreakingResponse(incomplete))
+
+    with pytest.raises(VlmTransportError) as blocking_raised:
+        blocking.complete_answer_with_page_image(OCR_PROMPT, _page_png())
+    with pytest.raises(VlmTransportError) as streaming_raised:
+        streaming.stream_with_page_image(OCR_PROMPT, _page_png(), lambda _delta: None)
+
+    for raised in (blocking_raised, streaming_raised):
+        assert endpoint.chat_completions_url() in str(raised.value), "the failure names the endpoint"
+        assert "IncompleteRead" in str(raised.value), "and keeps the connection's own words"
+
+
 def test_a_frame_whose_content_is_parts_is_the_text_of_those_parts() -> None:
     """Some servers answer a stream with content parts; the page is their text, as in the blocking answer."""
     frames = [
