@@ -165,7 +165,7 @@ for (const id of ["document-pane", "document-note", "document", "document-copy",
 globalThis.byId = (id) => elements[id];
 globalThis.fetch = async () => { throw new Error("connection reset"); };
 const state = {
-  document: { job: "job-1", completed: 0, total: null, finished: false, failed: false, absent: false },
+  document: { job: "job-1", completed: 0, total: null, finished: false, failed: false },
   fileName: "",
 };
 """
@@ -587,8 +587,8 @@ def test_the_pane_note_tells_a_failed_read_from_a_document_the_pipeline_would_pu
     failed, read = _run(
         ("documentNote",),
         "const notes = ["
-        "{job: 'a', completed: 1, total: 2, finished: true, failed: true, absent: false}, "
-        "{job: 'b', completed: 2, total: 2, finished: true, failed: false, absent: false}"
+        "{job: 'a', completed: 1, total: 2, finished: true, failed: true}, "
+        "{job: 'b', completed: 2, total: 2, finished: true, failed: false}"
         "];\nconsole.log(JSON.stringify(notes.map(documentNote)));",
     )
 

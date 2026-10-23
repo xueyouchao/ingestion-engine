@@ -613,7 +613,7 @@ async function copyRaw() {
 // labels nothing itself: it shows the server's answer, again, each time the job poll ticks.
 
 function documentModel(jobId) {
-  return { job: jobId, completed: 0, total: null, finished: false, failed: false, absent: false };
+  return { job: jobId, completed: 0, total: null, finished: false, failed: false };
 }
 
 function documentNote(model) {
@@ -747,7 +747,7 @@ async function refreshDocument(jobId) {
   }
   if (state.document === null || state.document.job !== jobId) return;
   if (response.status === 503) {
-    state.document.absent = true;
+    // The absence is this pane's own sentence, not state the model keeps: nothing reads a flag for it.
     byId("document").replaceChildren();
     setDocumentNote(documentAbsent());
     setDocumentControls(true);
