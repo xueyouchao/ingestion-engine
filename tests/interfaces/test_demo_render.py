@@ -165,6 +165,28 @@ def test_an_empty_document_says_so_without_inventing_a_page() -> None:
     assert '<p class="document-empty" data-state="pending">No page has completed yet.</p>' in fragment
 
 
+def test_the_page_fragment_is_exported_so_a_second_pane_shows_the_same_bytes() -> None:
+    """The bundle's document pane renders pages through this function, not beside it.
+
+    One projection, one allowlist: a page fragment the demo pane inserts and a page fragment the bundle
+    inserts are the same string for the same Page Text, and both come from the numeric ordering rule.
+    """
+    pages = (PageText(2, "the second page"), PageText(1, "# The first page"))
+
+    fragments = demo_render.render_pages(pages)
+
+    assert _page_numbers("".join(fragments)) == ["1", "2"], "one fragment per page, in numeric order"
+    assert fragments[0].startswith(
+        '<section class="document-page" data-page="1" data-state="complete">\n'
+        '<h2 class="document-page-number">Page 1</h2>\n'
+    ), "the fragment carries the page vocabulary, with no wrapper of its own"
+    assert fragments[0].endswith("</section>")
+    assert "<h1>The first page</h1>" in fragments[0], "the page is the projection's, allowlist and all"
+    article = demo_render.render_document(DocumentView(pages=pages, total=2))
+    for fragment in fragments:
+        assert fragment in article, "the pane and the bundle insert the same bytes"
+
+
 def test_the_structural_markup_a_page_can_carry_renders_as_structure() -> None:
     page = PageText(
         1,
