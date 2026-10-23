@@ -129,7 +129,10 @@ class DemoJob:
             return DocumentView(
                 pages=pages_in_order(self._pages.values()),
                 total=self._total,
-                failed=isinstance(self._outcome, FailedReading),
+                # A breakage never reaches the use case, so it is recorded here rather than in an
+                # outcome; a reader that raised still ended the job, and a page it never reached is
+                # unread rather than a skeleton nothing will replace.
+                failed=isinstance(self._outcome, FailedReading) or self._broken is not None,
             )
 
     def answer(self) -> dict[str, Any]:
@@ -177,6 +180,14 @@ class DemoJob:
             if isinstance(outcome, Reading):
                 # The Reading's accepted pages are the document now, and they are held once: the pages a
                 # lane reported mid-read are dropped rather than kept beside them.
+                self._pages.clear()
+                self._total = None
+            elif isinstance(outcome, Refusal):
+                # A refusal read nothing, so no page can ever arrive and no page text belongs to it: the
+                # count routing gave before the lane was refused must not leave the pane promising a
+                # page, and a page a composition reported around it is not a refusal's document. A
+                # failure keeps its count, because the pages it never reached still have numbers and are
+                # named as unread.
                 self._pages.clear()
                 self._total = None
             transcript = self._transcript

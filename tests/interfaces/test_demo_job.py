@@ -128,6 +128,41 @@ def test_a_page_number_that_repeats_is_replaced_rather_than_duplicated() -> None
     assert [(page.number, page.text) for page in job.document().pages] == [(1, "the final telling")]
 
 
+def test_a_breakage_after_the_count_is_a_failed_read_not_a_job_still_reading() -> None:
+    """The queue's own record ends the job, so no page it never reached may still be drawn as pending."""
+    job = _job()
+    job.on_page_count(3)
+    job.on_page(PageText(1, "the page that completed before the queue broke"))
+
+    job.finish(None, FailedReading.broke(RuntimeError("the worker could not be built")))
+
+    view = job.document()
+    assert view.failed is True, "the queue's breakage is a failure, not a document nothing will complete"
+    assert view.total == 3, "the pages the failure never reached keep the numbers routing gave them"
+    assert [(page.number, page.text) for page in view.pages] == [
+        (1, "the page that completed before the queue broke")
+    ], "the page that really completed is kept"
+
+
+def test_a_refusal_after_the_count_promises_no_page_that_can_never_arrive() -> None:
+    """A refusal read nothing, so a count routing gave must not leave a page still being read."""
+    refusal = Refusal(
+        kind="unavailable",
+        reason="the demo could not reach its OCR worker: no address is configured",
+        plan=PLAN,
+        thresholds=OcrRoutingPolicy(),
+    )
+    job = _job()
+    job.on_page_count(2)
+
+    job.finish(refusal)
+
+    view = job.document()
+    assert view.total is None, "no page can ever arrive for a refusal, so no count may promise one"
+    assert view.failed is False, "a refusal is not a failure; the refusal panel is the whole answer"
+    assert view.pages == ()
+
+
 def test_a_finished_reading_is_the_document_and_its_page_texts_are_held_once() -> None:
     """ADR-0012 keeps nothing: the accepted pages are the job's view, not a second copy beside it."""
     reading = _reading((PageText(2, "second"), PageText(1, "first")))
