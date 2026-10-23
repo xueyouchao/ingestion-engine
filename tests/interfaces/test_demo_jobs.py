@@ -45,6 +45,16 @@ PLAN = RoutingPlan(
     engine_name="pymupdf",
 )
 
+# What a composition that broke may quote, and what must never reach a visitor's screen: a configured
+# worker's address and the bearer the lease minted are leaks, not diagnoses.
+WORKER = "https://workspace--finepdfs-demo-ocr.modal.run/v1"
+LEASE_BEARER = "eyJhbGciOiJIUzI1NiJ9.a-lease-token"
+
+
+def _redacted(message: str) -> str:
+    """The composition root's redactor: both of the things a broken composition can name are hidden."""
+    return message.replace(WORKER, "<the OCR worker>").replace(LEASE_BEARER, "<the bearer>")
+
 
 def _reading(warm_ms: int | None = None) -> Reading:
     return Reading(
@@ -87,9 +97,29 @@ class BlockingReader:
         return _reading()
 
 
+class BreakingReader:
+    """A composition that raised where no lane could answer: the queue's own breakage, in its own words."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, content, client, on_stage, name, sink=None):
+        on_stage("routing")
+        self.started.set()
+        assert self.release.wait(5), "the test never released the reader"
+        raise self._error
+
+
 @contextmanager
-def _queue(read, limits: DemoLimits | None = None, retained_jobs: int = 32):
-    queue = ReadingQueue(read, limits, retained_jobs=retained_jobs)
+def _queue(
+    read,
+    limits: DemoLimits | None = None,
+    retained_jobs: int = 32,
+    redact: Callable[[str], str] = str,
+):
+    queue = ReadingQueue(read, limits, retained_jobs=retained_jobs, redact=redact)
     try:
         yield queue
     finally:
@@ -284,3 +314,37 @@ def test_a_failed_job_quotes_the_lane_and_the_reason() -> None:
     assert answer["failure"] == {"kind": "failed", "lane": "ocr", "reason": failure.reason}
     assert answer["refusal"] is None
     assert answer["reading"] is None
+
+
+def test_the_queues_own_breakage_is_redacted_in_the_stream_and_in_the_job_answer() -> None:
+    """A worker or engine that cannot be built may quote the address and the bearer, and both panes are public.
+
+    The queue catches whatever the composition raised around ``DemoRead.read``, so its words are arbitrary:
+    both answers a visitor can read must show them through the configured redaction, not around it.
+    """
+    reader = BreakingReader(
+        RuntimeError(f"could not build the OCR engine for {WORKER}: the bearer {LEASE_BEARER} was refused")
+    )
+    with _queue(reader, redact=_redacted) as queue:
+        job = queue.submit(b"one", "203.0.113.7", "mine.pdf")
+        assert reader.started.wait(5)
+        transcript = job.transcript()
+        assert transcript is not None, "the job still holds the transcript its failure will end"
+        reader.release.set()
+        answer = _done(queue, job.id)
+
+    assert answer["outcome"] is None, "a breakage is carried in ``failure``, as the demo always answered"
+    failure = answer["failure"]["reason"]
+    events = [(event.name, event.data) for event in transcript.since(0)[0]]
+    shown = [data["reason"] for name, data in events if name == "error"]
+    assert len(shown) == 1, "the failure is told to the stream exactly once"
+    assert shown == [failure], "one failure, one telling: the stream and the answer carry the same words"
+    assert WORKER not in failure and LEASE_BEARER not in failure, (
+        "neither the worker's address nor the bearer reaches the job answer"
+    )
+    assert WORKER not in shown[0] and LEASE_BEARER not in shown[0], (
+        "neither the worker's address nor the bearer reaches the transcript's error event"
+    )
+    assert "<the OCR worker>" in failure and "<the bearer>" in failure, (
+        "the reason is still the error's own words, shown through the redaction"
+    )

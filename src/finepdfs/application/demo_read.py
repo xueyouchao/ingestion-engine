@@ -93,13 +93,17 @@ class FailedReading:
     thresholds: OcrRoutingPolicy
 
     @classmethod
-    def broke(cls, error: BaseException) -> FailedReading:
+    def broke(cls, error: BaseException, redact: Callable[[str], str] = str) -> FailedReading:
         """The demo's own breakage, before any lane could answer: no plan was made and none is named.
 
         The demo server's queue wraps what it cannot turn into one of the three outcomes in this, so a
-        composition that raised still ends a job with the same shape every other failure has.
+        composition that raised still ends a job with the same shape every other failure has. Its words
+        are arbitrary -- a worker or an engine that could not be built may quote the address it was
+        configured with and the bearer it was handed -- so they are shown through ``redact``, exactly as
+        a lane's failure is: this reason reaches both the transcript's ``error`` event and the job
+        answer, and both are public.
         """
-        return cls(kind="failed", lane="", reason=_words(error), plan=None, thresholds=OcrRoutingPolicy())
+        return cls(kind="failed", lane="", reason=redact(_words(error)), plan=None, thresholds=OcrRoutingPolicy())
 
     def payload(self) -> dict[str, str]:
         """The failure as the transcript's ``error`` event and the job answer's ``failure`` carry it."""

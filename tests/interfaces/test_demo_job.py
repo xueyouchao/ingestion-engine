@@ -24,6 +24,7 @@ PLAN = RoutingPlan(
     engine_name="pymupdf",
 )
 WORKER = "http://127.0.0.1:9/v1"
+LEASE_BEARER = "eyJhbGciOiJIUzI1NiJ9.a-lease-token"
 
 
 def _reading(pages: tuple[PageText, ...] = (PageText(1, "one"), PageText(2, "two"))) -> Reading:
@@ -38,7 +39,7 @@ def _reading(pages: tuple[PageText, ...] = (PageText(1, "one"), PageText(2, "two
 
 
 def _redact(message: str) -> str:
-    return message.replace(WORKER, "<the OCR worker>")
+    return message.replace(WORKER, "<the OCR worker>").replace(LEASE_BEARER, "<the bearer>")
 
 
 def _job(transcript_bytes: int = 1024) -> DemoJob:
@@ -207,23 +208,28 @@ def test_the_job_is_not_finished_by_the_stage_a_reader_announces_after_its_last_
     assert job.answer()["outcome"] is None
 
 
-def test_the_jobs_own_breakage_is_redacted_for_the_transcript_and_quoted_in_the_answer() -> None:
-    """A failure's words reach the stream through the configured redaction and the answer as they were."""
+def test_the_jobs_own_breakage_is_redacted_where_a_visitor_can_read_it() -> None:
+    """A breakage reaches the stream and the job answer through the redaction, in one telling.
+
+    Both are public, and a composition that could not build its worker may quote the address and the
+    bearer it was handed: ``broke`` shows its words through the redactor that call site was given.
+    """
     job = _job()
     job.advance("reading")
     transcript = job.transcript()
     assert transcript is not None
-    broken = FailedReading(
-        kind="failed", lane="", reason=f"connect to {WORKER} failed", plan=None, thresholds=OcrRoutingPolicy()
+    broken = FailedReading.broke(
+        RuntimeError(f"connect to {WORKER} failed with bearer {LEASE_BEARER}"), _redact
     )
 
     job.finish(None, broken)
 
+    shown = "connect to <the OCR worker> failed with bearer <the bearer>"
     assert _events(transcript) == [
-        ("error", {"kind": "failed", "lane": "", "reason": "connect to <the OCR worker> failed"}),
+        ("error", {"kind": "failed", "lane": "", "reason": shown}),
         ("done", {"outcome": "failed"}),
-    ], "the worker's address never reaches the stream"
+    ], "the worker's address and the bearer never reach the stream"
     assert job.transcript() is None
-    assert job.answer()["failure"] == {"kind": "failed", "lane": "", "reason": f"connect to {WORKER} failed"}
+    assert job.answer()["failure"] == {"kind": "failed", "lane": "", "reason": shown}
     assert job.answer()["outcome"] is None, "a breakage is carried in ``failure``, as the demo always answered"
     assert job.stage == "done"

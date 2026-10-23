@@ -188,7 +188,7 @@ class ReadingQueue:
         try:
             return self._read(waiting.content, waiting.client, job.advance, job.name, job), None
         except Exception as error:  # the queue must answer, whatever the composition did
-            return None, FailedReading.broke(error)
+            return None, FailedReading.broke(error, self._redact)
 
     def _remember(self, job: DemoJob) -> None:
         """Keep the most recent finished jobs, forgetting the oldest beyond that one bound."""

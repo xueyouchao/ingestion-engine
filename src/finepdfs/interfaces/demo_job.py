@@ -166,8 +166,9 @@ class DemoJob:
         """Publish the answer, end the transcript and free it: the job retires itself.
 
         ``broken`` is the queue's own record for a reader that raised before the use case could turn it
-        into one of its three outcomes. The stream's ``error`` event is shown through the configured
-        redaction; the job answer carries the words exactly as they arrived.
+        into one of its three outcomes. It is already shown through the configured redaction where it
+        was built (``FailedReading.broke``), so the transcript and the job answer carry one telling of
+        it; the stream is shown through ``redact`` once more, which is idempotent for that reason.
         """
         with self._lock:
             self._outcome = outcome
