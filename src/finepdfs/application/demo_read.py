@@ -36,6 +36,7 @@ from finepdfs.domain.ports import (
     OcrEndpointUnavailable,
     OcrEngine,
     OcrWorker,
+    PageCountSink,
     ReadSink,
     TextLayerProbe,
 )
@@ -176,7 +177,8 @@ class DemoRead:
     ) -> ReadingOutcome:
         """Route the upload, pass the gates, read it with the lane the decision chose.
 
-        ``sink`` watches the chosen lane's read (ADR-0014); every outcome is the same with or without one,
+        ``sink`` watches the chosen lane's read (ADR-0014) and, when it is also a ``PageCountSink``, is
+        offered routing's page count before the first delta; every outcome is the same with or without one,
         and a caller that leaves it out -- the batch flow, every existing test -- is served as before.
         """
         started = self._clock()
@@ -199,14 +201,11 @@ class DemoRead:
             return closed
 
         # The page count is routing's answer, so a pane that draws one placeholder per page can start
-        # before the first delta (ADR-0014). A sink written against the older two-method contract has no
-        # ``on_page_count`` at all, so the count is offered only to a sink that provides it: it is an
-        # informational extra, and an absent method here must never turn a readable upload into a
-        # failed job.
-        if sink is not None:
-            count_page = getattr(sink, "on_page_count", None)
-            if count_page is not None:
-                count_page(page_count)
+        # before the first delta (ADR-0014). It is not an engine capability, so it is offered only to a
+        # sink that asked for it by implementing ``PageCountSink``: an engine's sink, and a watcher with
+        # no use for the count, is never asked and never has to answer.
+        if isinstance(sink, PageCountSink):
+            sink.on_page_count(page_count)
 
         if ocr_pages is not None:
             return self._read_ocr(plan, content, name, on_stage, started, client, ocr_pages, sink)

@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Collection, Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from finepdfs.domain.chunks import Chunk
 from finepdfs.domain.crawl import CrawlQuery, CrawlRecord
@@ -36,6 +36,7 @@ class TextLayerProbe(Protocol):
     def measure(self, content: bytes) -> TextLayerQuality: ...
 
 
+@runtime_checkable
 class ReadSink(Protocol):
     """A caller watching an Extraction happen, page by page (ADR-0014).
 
@@ -54,23 +55,28 @@ class ReadSink(Protocol):
     results when it finishes -- has nothing to report and calls neither of those, so a caller that
     received nothing knows the lane did not stream instead of inferring a cadence of its own.
 
-    ``on_page_count`` is the one method no engine calls. The use case that starts the read reports it
-    from routing, before the first delta and before any lane has run, so a viewer can draw a placeholder
-    for every page from the start rather than inventing one from the pages that arrived -- the count is
-    routing's answer, and no engine knows it. It is part of this protocol rather than a second one
-    because the same watcher answers both questions; a watcher with no use for the count implements it
-    as a no-op.
-
-    A sink written against the older two-method contract -- ``on_delta`` and ``on_page`` only -- does not
-    have this method at all, and the caller asks for the count only from a sink that provides it, so an
-    informational extra never turns a readable upload into a failed job.
+    These two are everything an engine reports, so they are the whole port. The page count is not an
+    engine capability -- routing answers it before any lane runs -- and a watcher that wants it is also
+    a ``PageCountSink``, which the use case asks separately.
     """
 
     def on_delta(self, page_number: int, text: str) -> None: ...
 
     def on_page(self, page: PageText) -> None: ...
 
-    def on_page_count(self, page_count: int) -> None: ...
+
+@runtime_checkable
+class PageCountSink(Protocol):
+    """A watcher that wants the page count routing reported, before the first delta (ADR-0014).
+
+    No engine calls this. The use case that starts the read offers routing's answer once, before a lane
+    runs, so a viewer can draw a placeholder for every page from the start instead of inventing a count
+    from the pages that arrived. It is a protocol of its own because the count is not an engine
+    capability and the engine's sink may only promise what an engine can report; a watcher with no use
+    for the count simply does not implement it, and is never asked.
+    """
+
+    def on_page_count(self, pages: int) -> None: ...
 
 
 class OcrEngine(Protocol):

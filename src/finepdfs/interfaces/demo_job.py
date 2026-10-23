@@ -6,10 +6,10 @@ one object owns all of it and every pane reads it -- the events endpoint asks th
 the document answer for its view, and ``GET /api/read/<id>`` for its eight keys. Nothing is merged after
 the fact: a third pane is a method here, not a second store for the server to join.
 
-The job is the ``ReadSink`` the read reports to. The use case hands it routing's page count before the
-first delta; the engine hands it every delta and every completed Page Text. A delta goes to the
-transcript and never to the document, because that pane is built from Page Text only and a half-parsed
-table is therefore never rendered.
+The job is the ``ReadSink`` the engine reports to and the ``PageCountSink`` the use case reports
+routing's page count to: the engine hands it every delta and every completed Page Text, and the use case
+hands it the count before the first delta. A delta goes to the transcript and never to the document,
+because that pane is built from Page Text only and a half-parsed table is therefore never rendered.
 
 **A finished Reading is authoritative, and it is held once.** Its Page Texts are the accepted ones, so
 the pane reads them from the outcome and the job drops whatever a lane reported mid-read rather than
@@ -80,10 +80,10 @@ class DemoJob:
     """One upload's per-job state, as every pane sees it.
 
     ``advance`` is the stage the read reached and ``finish`` is what it answered; ``on_delta`` and
-    ``on_page`` are what the engine reports, and ``on_page_count`` is what the use case reports before
-    the engine runs at all (``domain.ports.ReadSink``). The reader thread writes
-    and a handler thread reads, so every field is touched under one lock and every view is a copy taken
-    under it. ``redact`` is what a failure's words are shown through on the wire: a configured address or
+    ``on_page`` are what the engine reports (``domain.ports.ReadSink``), and ``on_page_count`` is what the
+    use case reports before the engine runs at all (``domain.ports.PageCountSink``). The reader thread
+    writes and a handler thread reads, so every field is touched under one lock and every view is a copy
+    taken under it. ``redact`` is what a failure's words are shown through on the wire: a configured address or
     token in an engine's error is a leak, and the composition root is the one place that knows both.
     """
 

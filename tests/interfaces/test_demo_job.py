@@ -12,6 +12,7 @@ from finepdfs.application.curate import RoutingPlan
 from finepdfs.application.demo_read import FailedReading, Reading, Refusal
 from finepdfs.domain.document import EngineIdentity, PageText, TextLayerQuality
 from finepdfs.domain.ocr import OcrRoutingPolicy, RoutingDecision
+from finepdfs.domain.ports import PageCountSink, ReadSink
 from finepdfs.interfaces.demo_job import DemoJob, DocumentView
 from finepdfs.interfaces.demo_transcript import RawTranscript
 
@@ -49,6 +50,14 @@ def _job(transcript_bytes: int = 1024) -> DemoJob:
 def _events(transcript: RawTranscript) -> list[tuple[str, dict]]:
     """The transcript's own events, read whether or not the job still holds it."""
     return [(event.name, event.data) for event in transcript.since(0)[0]]
+
+
+def test_a_job_is_the_engine_s_sink_and_also_the_one_that_wants_the_page_count() -> None:
+    """One watcher answers both questions, but they are two ports: the count is nobody's engine report."""
+    job = _job()
+
+    assert isinstance(job, ReadSink), "a lane reports its deltas and pages to the job"
+    assert isinstance(job, PageCountSink), "the use case offers the job routing's count before the lane runs"
 
 
 def test_a_job_that_has_reported_nothing_is_an_empty_document_not_a_guess() -> None:
