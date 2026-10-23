@@ -189,6 +189,170 @@ const state = {
     assert "could not be read" in answered["note"], "the failure is said in the pane's own note"
 
 
+@requires_node
+def test_the_document_model_carries_exactly_the_state_the_pane_reads() -> None:
+    """Absence is said by the pane's own note, so the model keeps no field nothing observes."""
+    keys = _run(
+        ("documentModel",),
+        "console.log(JSON.stringify(Object.keys(documentModel('job-1')).sort()));",
+    )
+
+    assert keys == ["completed", "failed", "finished", "job", "total"], (
+        "the model carries the job id, the counts and the two terminal facts the note reads -- nothing "
+        "else; the 503 answer is a sentence in the pane, not a field on the model"
+    )
+
+
+# A DOM stand-in with just what one job tick touches: the classes of each element, the fragment
+# container's innerHTML and the notes' text. ``fetch`` answers the pane's one endpoint per URL, so a
+# test can hand the tick the document the real server would have returned.
+TICK_STUBS = """
+const classes = new Map();
+function element(id) {
+  const own = classes.get(id) || new Set();
+  classes.set(id, own);
+  return {
+    classList: {
+      add: (name) => own.add(name),
+      remove: (name) => own.delete(name),
+      contains: (name) => own.has(name),
+    },
+    textContent: "",
+    innerHTML: "",
+    replaceChildren() { this.innerHTML = ""; },
+    disabled: false,
+  };
+}
+const elements = {};
+for (const id of ["decision", "engine-identity", "document-pane", "refusal", "failure", "error",
+                  "document", "document-note", "document-copy", "document-download", "decision-lane",
+                  "decision-reason", "engine-value", "failure-lane", "failure-reason", "upload-button"]) {
+  elements[id] = element(id);
+}
+for (const id of ["decision", "engine-identity", "document-pane", "refusal", "failure"]) {
+  elements[id].classList.add("hidden");
+}
+globalThis.byId = (id) => elements[id];
+function renderTimeline() {}
+function settleRaw() {}
+function stopPolling() { state.timer = null; }
+function loadStatus() {}
+function renderFeatureRows() {}
+function showError(message) {
+  elements["error"].textContent = message;
+  elements["error"].classList.remove("hidden");
+}
+const state = { document: null, seen: new Set(), timer: null, raw: null, fileName: "" };
+const fetch_answers = {};
+globalThis.fetch = async (url) => {
+  if (!fetch_answers[url]) throw new Error("unexpected fetch " + url);
+  return fetch_answers[url]();
+};
+"""
+
+FRAGMENT = (
+    '<article class="document" data-pages="1" data-completed="1">\n'
+    '<section class="document-page" data-page="1" data-state="complete">'
+    '<h2 class="document-page-number">Page 1</h2>\n<p>a page read whole</p></section>\n</article>'
+)
+
+
+def _tick(job: dict) -> dict:
+    """Run one job tick through the page's own ``renderJob``, then read the document pane afterwards."""
+    source = "\n".join(
+        _function(name)
+        for name in (
+            "hideResults",
+            "documentModel",
+            "documentNote",
+            "insertDocument",
+            "setDocumentNote",
+            "setDocumentControls",
+            "refreshDocument",
+            "renderJob",
+            "renderReading",
+            "renderFailure",
+        )
+    )
+    script = (
+        f"{TICK_STUBS}\n{source}\n"
+        f"const fragment = {json.dumps(FRAGMENT)};\n"
+        f"const job = {json.dumps(job)};\n"
+        "fetch_answers['/api/read/job-1/document'] = () => ({\n"
+        "  ok: true, status: 200,\n"
+        "  headers: { get: (name) => (name === 'X-Document-Completed' ? '1' : "
+        "name === 'X-Document-Pages' ? '1' : null) },\n"
+        "  text: async () => fragment,\n"
+        "});\n"
+        "state.document = documentModel('job-1');\n"
+        "renderJob(job, 'job-1');\n"
+        "setTimeout(() => console.log(JSON.stringify({\n"
+        "  hidden: elements['document-pane'].classList.contains('hidden'),\n"
+        "  fragment: elements['document'].innerHTML,\n"
+        "  note: elements['document-note'].textContent,\n"
+        "  failure: !elements['failure'].classList.contains('hidden'),\n"
+        "  refusal: !elements['refusal'].classList.contains('hidden'),\n"
+        "})), 20);\n"
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def _job(**overrides) -> dict:
+    job = {
+        "job": "job-1",
+        "stage": "done",
+        "outcome": "read",
+        "elapsed_ms": 5,
+        "warmed_ms": None,
+        "refusal": None,
+        "failure": None,
+        "reading": {
+            "lane": "ocr",
+            "reason": "the text layer was too thin to read",
+            "engine": "paddleocr-vl@http://127.0.0.1:8000",
+            "features": {},
+            "thresholds": {},
+        },
+    }
+    job.update(overrides)
+    return job
+
+
+@requires_node
+def test_the_finishing_tick_leaves_the_pane_showing_the_document_it_just_received() -> None:
+    """The terminal panels start with ``hideResults()``, so the last ask must come after they are drawn.
+
+    Asked first -- as it was -- ``renderReading``/``renderFailure`` hide the pane that the final answer
+    was about to fill, and polling has already stopped, so nothing ever shows it again.
+    """
+    read = _tick(_job())
+    failed = _tick(_job(outcome="failed", reading=None, failure={
+        "kind": "failed", "lane": "ocr", "reason": "the worker broke its stream off"
+    }))
+
+    for answered, outcome in ((read, "read"), (failed, "failed")):
+        assert answered["hidden"] is False, (
+            f"the {outcome} outcome ended with the pane hidden, holding the document it had just inserted"
+        )
+        assert answered["fragment"] == FRAGMENT, f"the {outcome} tick inserted the finished document"
+    assert read["failure"] is False, "a read shows no failure panel"
+    assert failed["failure"] is True, "a failed read still shows its failure panel"
+    assert "failed" in failed["note"], "the last ask ran after the outcome was set, so the note names it"
+
+
+@requires_node
+def test_a_mid_poll_tick_still_asks_for_the_document_and_shows_what_arrived() -> None:
+    """The pane rides every tick, not only the last one: a skeleton becomes its page mid-read."""
+    answered = _tick(_job(stage="reading", outcome=None, reading=None))
+
+    assert answered["hidden"] is False, "a mid-read tick still shows the pane as soon as it asks"
+    assert answered["fragment"] == FRAGMENT, "and inserts whatever the server answered"
+    assert answered["failure"] is False and answered["refusal"] is False, "no terminal panel is drawn mid-read"
+
+
+
 # -- the real server, end to end --------------------------------------------------------------------
 #
 # The page's three panes are fed by three real answers: the upload's job id, the job poll and the two
