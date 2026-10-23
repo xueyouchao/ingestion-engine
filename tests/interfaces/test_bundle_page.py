@@ -45,11 +45,16 @@ def _payload() -> dict:
         "dpi": 72,
         "page_separator": PAGE_SEPARATOR,
         "states": [{"label": "paddleocr-vl"}, {"label": "pymupdf"}],
-        "documents": {"doc-a": {"url": "https://a.example/a.pdf", "reads": {}}},
+        "documents": {
+            "doc-a": {"url": "https://a.example/a.pdf", "reads": {}},
+            # A document only one reading published: the other reading shows it and has no page of it.
+            "doc-b": {"url": "https://a.example/b.pdf", "reads": {}},
+        },
         "pages": {
             "doc-a:1": {"readings": {"paddleocr-vl": _reading(1), "pymupdf": _reading(1)}},
             "doc-a:2": {"readings": {"paddleocr-vl": _reading(2), "pymupdf": _reading(2)}},
             "doc-a:3": {"readings": {"paddleocr-vl": _reading(3)}},
+            "doc-b:1": {"readings": {"paddleocr-vl": _reading(1)}},
         },
         "excluded": {},
     }
@@ -222,18 +227,19 @@ def test_the_toggle_switches_the_pane_between_the_rendered_document_and_its_mark
 
 @requires_node
 def test_a_document_with_no_accepted_page_says_so_instead_of_showing_an_empty_box() -> None:
+    """A document one lane read and the other did not: the pane says which reading is empty, in words."""
     answer = _run(
         PANES,
-        'state.label = "pymupdf"; state.doc = "doc-empty";\n'
+        'state.label = "pymupdf"; state.doc = "doc-b";\n'
         'const body = documentBody(documentPages(), "rendered");\n'
         "console.log(JSON.stringify({body, pages: documentPages().length}));",
         label="pymupdf",
     )
 
     assert answer["pages"] == 0
-    assert '<p class="missing">' in answer["body"]
-    assert "published no page of this document" in answer["body"]
-    assert "<article" not in answer["body"] and "<pre" not in answer["body"]
+    assert answer["body"] == (
+        '<p class="missing">The pymupdf reading published no page of this document.</p>'
+    ), "one honest sentence, not an empty box"
 
 
 @requires_node
