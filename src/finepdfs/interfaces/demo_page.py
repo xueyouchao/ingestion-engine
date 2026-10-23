@@ -735,6 +735,9 @@ async function refreshDocument(jobId) {
   // page completes. The fragment is replaced whole: its page numbers, order and states are the
   // server's answer, not an accumulation this page keeps.
   if (state.document === null || state.document.job !== jobId) return;
+  // The pane is shown before its first answer, and independently of it: when the fetch fails, the
+  // sentence saying so must be written into a pane the visitor can see rather than a hidden element.
+  byId("document-pane").classList.remove("hidden");
   let response;
   try {
     response = await fetch("/api/read/" + encodeURIComponent(jobId) + "/document", { cache: "no-store" });
@@ -743,7 +746,6 @@ async function refreshDocument(jobId) {
     return;
   }
   if (state.document === null || state.document.job !== jobId) return;
-  byId("document-pane").classList.remove("hidden");
   if (response.status === 503) {
     state.document.absent = true;
     byId("document").replaceChildren();
