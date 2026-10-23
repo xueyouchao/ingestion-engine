@@ -94,10 +94,12 @@ class VlmChatTransport:
     def _post_answer(self, messages: list[dict]) -> StreamedAnswer:
         """One blocking request: the whole answer and the reason the worker stopped sending it."""
         request = self._request(messages, stream=False)
+        # ``HTTPException`` too: an ``IncompleteRead`` is what a connection cut mid-answer raises, and it
+        # is not an ``OSError``, so without it the batch path leaks a bare ``http.client`` error.
         try:
             with self._opener(request, timeout=self._endpoint.timeout_seconds) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, ValueError) as error:
+        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as error:
             raise VlmTransportError(f"could not reach {self._endpoint.chat_completions_url()}: {error}") from error
         return _message_answer(payload, self._endpoint)
 
@@ -155,10 +157,9 @@ def _streamed_answer(response: Any, endpoint: ChatEndpoint, on_delta: Callable[[
     url = endpoint.chat_completions_url()
     pieces: list[str] = []
     finish_reason: str | None = None
-    try:
-        lines = iter(response)
-    except (OSError, http.client.HTTPException) as error:  # the connection failed before a line arrived
-        raise VlmTransportError(f"{url} broke its stream off: {error}") from error
+    # ``iter`` is ``HTTPResponse.__iter__``, which returns ``self`` and reads nothing, so the line read
+    # below is the only call that can fail: one guard, in the place the connection is touched.
+    lines = iter(response)
     while True:
         try:
             line = next(lines, None)
@@ -166,7 +167,7 @@ def _streamed_answer(response: Any, endpoint: ChatEndpoint, on_delta: Callable[[
             raise VlmTransportError(f"{url} broke its stream off: {error}") from error
         if line is None:
             break
-        text = line.decode("utf-8").strip()
+        text = _line_text(line, url)
         if not text or not text.startswith("data:"):
             continue  # the blank line between frames, a comment heartbeat, or another field
         payload = text.removeprefix("data:").strip()
@@ -187,6 +188,19 @@ def _streamed_answer(response: Any, endpoint: ChatEndpoint, on_delta: Callable[[
             pieces.append(text)
             on_delta(text)  # the caller's own code: its failure is never dressed as the worker's
     raise VlmTransportError(f"{url} ended its stream without [DONE]")
+
+
+def _line_text(line: bytes, url: str) -> str:
+    """One stream line as text, or a failure naming the frame whose bytes are not UTF-8.
+
+    The worker's frames are bytes, and this adapter is what turns them into text: a frame it cannot
+    decode is one more unusable frame from the worker, named the way a non-JSON frame is named, rather
+    than a codec error that never names the endpoint it came from.
+    """
+    try:
+        return line.decode("utf-8").strip()
+    except UnicodeDecodeError as error:
+        raise VlmTransportError(f"{url} sent a frame that is not UTF-8: {line!r}") from error
 
 
 def _frame_answer(frame: dict, finish_reason: str | None, url: str) -> tuple[str, str | None]:

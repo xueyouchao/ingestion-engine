@@ -9,6 +9,7 @@ PaddleOCR-VL page, so no network and no model are needed and the wire is the rea
 from __future__ import annotations
 
 import http.client
+import inspect
 import json
 from pathlib import Path
 from typing import Self
@@ -17,6 +18,7 @@ import pymupdf
 import pytest
 
 from finepdfs.domain.document import Document
+from finepdfs.infrastructure.engines import vlm_chat
 from finepdfs.infrastructure.engines.paddleocr_vl import (
     OCR_PROMPT,
     PaddleOcrError,
@@ -175,7 +177,12 @@ def test_a_sink_that_breaks_is_not_reported_as_the_worker_breaking_its_stream() 
 
 
 class _BreakingResponse:
-    """A response whose stream fails while it is being read, the way a cut connection does."""
+    """A response whose stream fails while it is being read, the way a cut connection does.
+
+    ``HTTPResponse.__iter__`` returns ``self`` and performs no read, so a dropped connection can only
+    surface from the line read itself: this stand-in raises from ``__next__``, which is the call the
+    adapter's own read makes.
+    """
 
     def __init__(self, error: BaseException) -> None:
         self._error = error
@@ -187,7 +194,24 @@ class _BreakingResponse:
         return None
 
     def __iter__(self):
+        return self
+
+    def __next__(self):
         raise self._error
+
+
+def test_a_dropped_connection_is_caught_once_around_the_line_read_it_happens_in() -> None:
+    """``iter(response)`` cannot fail, so the read has exactly one guard, and it is the line read."""
+    source = inspect.getsource(vlm_chat._streamed_answer)
+    guard = "except (OSError, http.client.HTTPException)"
+
+    assert source.count(guard) == 1, (
+        "one place catches a dropped connection; a try around iter() can never fire, because "
+        "HTTPResponse.__iter__ returns self and reads nothing"
+    )
+    assert "next(lines, None)" in source[: source.index(guard)], (
+        "the one guard wraps the line read, which is the only call that touches the connection"
+    )
 
 
 def test_a_connection_cut_mid_stream_is_named_as_the_transport_failure_it_is() -> None:
@@ -202,6 +226,78 @@ def test_a_connection_cut_mid_stream_is_named_as_the_transport_failure_it_is() -
         transport.stream_with_page_image(OCR_PROMPT, _page_png(), lambda _delta: None)
 
     assert "http://worker.invalid/v1/chat/completions" in str(raised.value)
+
+
+class _CutAnswer:
+    """A blocking answer whose body is cut mid-read, the way a dropped connection ends one."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        raise self._error
+
+
+def test_a_connection_cut_mid_answer_is_a_transport_failure_on_both_paths() -> None:
+    """The batch path every corpus run takes and the demo's stream name a cut connection the same way.
+
+    ``IncompleteRead`` is an ``HTTPException``, not an ``OSError``: uncaught, the batch path would raise a
+    bare ``http.client.IncompleteRead`` with no endpoint in it at all.
+    """
+    incomplete = http.client.IncompleteRead(b'{"choices":', None)
+    endpoint = ChatEndpoint(base_url="http://worker.invalid/v1", model="m")
+
+    blocking = VlmChatTransport(endpoint, opener=lambda _request, timeout: _CutAnswer(incomplete))
+    streaming = VlmChatTransport(endpoint, opener=lambda _request, timeout: _BreakingResponse(incomplete))
+
+    with pytest.raises(VlmTransportError) as blocking_raised:
+        blocking.complete_answer_with_page_image(OCR_PROMPT, _page_png())
+    with pytest.raises(VlmTransportError) as streaming_raised:
+        streaming.stream_with_page_image(OCR_PROMPT, _page_png(), lambda _delta: None)
+
+    for raised in (blocking_raised, streaming_raised):
+        assert endpoint.chat_completions_url() in str(raised.value), "the failure names the endpoint"
+        assert "IncompleteRead" in str(raised.value), "and keeps the connection's own words"
+
+
+class _LinesResponse:
+    """A response whose stream is exactly the bytes it was handed, read the way ``HTTPResponse`` is read."""
+
+    def __init__(self, lines: list[bytes]) -> None:
+        self._lines = iter(lines)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> bytes:
+        return next(self._lines)
+
+
+def test_a_frame_that_is_not_utf8_is_named_as_the_frame_it_is() -> None:
+    """A frame of undecodable bytes fails as this read, not as a codec error with no endpoint in it."""
+    frame = b'data: {"choices": [{"index": 0, "delta": {"content": "\xff\xfe"}}]}'
+    endpoint = ChatEndpoint(base_url="http://worker.invalid/v1", model="m")
+    transport = VlmChatTransport(endpoint, opener=lambda _request, timeout: _LinesResponse([frame]))
+
+    with pytest.raises(VlmTransportError) as raised:
+        transport.stream_with_page_image(OCR_PROMPT, _page_png(), lambda _delta: None)
+
+    assert endpoint.chat_completions_url() in str(raised.value), "the failure names the endpoint"
+    assert "not UTF-8" in str(raised.value), "and says what the frame was, as a non-JSON frame does"
+    assert "\\xff\\xfe" in str(raised.value), "and shows the bytes the worker sent"
+    assert isinstance(raised.value.__cause__, UnicodeDecodeError), "the codec's error is wrapped, not lost"
 
 
 def test_a_frame_whose_content_is_parts_is_the_text_of_those_parts() -> None:

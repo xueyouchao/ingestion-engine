@@ -613,7 +613,7 @@ async function copyRaw() {
 // labels nothing itself: it shows the server's answer, again, each time the job poll ticks.
 
 function documentModel(jobId) {
-  return { job: jobId, completed: 0, total: null, finished: false, failed: false, absent: false };
+  return { job: jobId, completed: 0, total: null, finished: false, failed: false };
 }
 
 function documentNote(model) {
@@ -747,7 +747,7 @@ async function refreshDocument(jobId) {
   }
   if (state.document === null || state.document.job !== jobId) return;
   if (response.status === 503) {
-    state.document.absent = true;
+    // The absence is this pane's own sentence, not state the model keeps: nothing reads a flag for it.
     byId("document").replaceChildren();
     setDocumentNote(documentAbsent());
     setDocumentControls(true);
@@ -831,11 +831,14 @@ function renderJob(job, jobId) {
     state.document.finished = true;
     state.document.failed = job.outcome === "failed";
   }
-  // One last ask, so the finished Reading -- not the last mid-read view -- is what the visitor sees.
-  refreshDocument(jobId);
+  // One last ask, so the finished Reading -- not the last mid-read view -- is what the visitor sees. It
+  // runs after the terminal panels because each of them starts with hideResults(), which hides the
+  // document pane; asked before them, the pane that had just received the document would end this tick
+  // hidden, and polling has already stopped, so nothing would show it again.
   if (job.outcome === "read") renderReading(job.reading);
   else if (job.outcome === "failed") renderFailure(job.failure);
   else showError("the job finished without an outcome");
+  refreshDocument(jobId);
 }
 
 function stopPolling() {
