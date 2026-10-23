@@ -266,6 +266,40 @@ def test_a_connection_cut_mid_answer_is_a_transport_failure_on_both_paths() -> N
         assert "IncompleteRead" in str(raised.value), "and keeps the connection's own words"
 
 
+class _LinesResponse:
+    """A response whose stream is exactly the bytes it was handed, read the way ``HTTPResponse`` is read."""
+
+    def __init__(self, lines: list[bytes]) -> None:
+        self._lines = iter(lines)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> bytes:
+        return next(self._lines)
+
+
+def test_a_frame_that_is_not_utf8_is_named_as_the_frame_it_is() -> None:
+    """A frame of undecodable bytes fails as this read, not as a codec error with no endpoint in it."""
+    frame = b'data: {"choices": [{"index": 0, "delta": {"content": "\xff\xfe"}}]}'
+    endpoint = ChatEndpoint(base_url="http://worker.invalid/v1", model="m")
+    transport = VlmChatTransport(endpoint, opener=lambda _request, timeout: _LinesResponse([frame]))
+
+    with pytest.raises(VlmTransportError) as raised:
+        transport.stream_with_page_image(OCR_PROMPT, _page_png(), lambda _delta: None)
+
+    assert endpoint.chat_completions_url() in str(raised.value), "the failure names the endpoint"
+    assert "not UTF-8" in str(raised.value), "and says what the frame was, as a non-JSON frame does"
+    assert "\\xff\\xfe" in str(raised.value), "and shows the bytes the worker sent"
+    assert isinstance(raised.value.__cause__, UnicodeDecodeError), "the codec's error is wrapped, not lost"
+
+
 def test_a_frame_whose_content_is_parts_is_the_text_of_those_parts() -> None:
     """Some servers answer a stream with content parts; the page is their text, as in the blocking answer."""
     frames = [

@@ -167,7 +167,7 @@ def _streamed_answer(response: Any, endpoint: ChatEndpoint, on_delta: Callable[[
             raise VlmTransportError(f"{url} broke its stream off: {error}") from error
         if line is None:
             break
-        text = line.decode("utf-8").strip()
+        text = _line_text(line, url)
         if not text or not text.startswith("data:"):
             continue  # the blank line between frames, a comment heartbeat, or another field
         payload = text.removeprefix("data:").strip()
@@ -188,6 +188,19 @@ def _streamed_answer(response: Any, endpoint: ChatEndpoint, on_delta: Callable[[
             pieces.append(text)
             on_delta(text)  # the caller's own code: its failure is never dressed as the worker's
     raise VlmTransportError(f"{url} ended its stream without [DONE]")
+
+
+def _line_text(line: bytes, url: str) -> str:
+    """One stream line as text, or a failure naming the frame whose bytes are not UTF-8.
+
+    The worker's frames are bytes, and this adapter is what turns them into text: a frame it cannot
+    decode is one more unusable frame from the worker, named the way a non-JSON frame is named, rather
+    than a codec error that never names the endpoint it came from.
+    """
+    try:
+        return line.decode("utf-8").strip()
+    except UnicodeDecodeError as error:
+        raise VlmTransportError(f"{url} sent a frame that is not UTF-8: {line!r}") from error
 
 
 def _frame_answer(frame: dict, finish_reason: str | None, url: str) -> tuple[str, str | None]:
