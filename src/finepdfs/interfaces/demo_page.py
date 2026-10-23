@@ -554,6 +554,9 @@ function openRawStream(jobId) {
     renderRaw(state.raw);
   };
   for (const name of ["delta", "truncated", "page"]) source.addEventListener(name, apply);
+  // A handler from the job an upload replaced still fires after the new job's stream is open, so both
+  // terminal handlers check that they are still the current job's before touching ``state.events`` or
+  // ``state.raw``: a stale ``done`` or error may only end the stream it belongs to.
   source.addEventListener("error", (event) => {
     // The server's own ``error`` event carries the read's words; the EventSource failure has no data
     // and means this endpoint will answer nothing more for the job (a finished job frees its transcript).
@@ -561,11 +564,16 @@ function openRawStream(jobId) {
       apply(event);
       return;
     }
+    if (state.rawJob !== jobId) return;
     closeRawStream();
+    // ``upload()`` resets ``state.raw`` to null; an error that arrives around that reset has no pane to
+    // write, and closing the stream is the whole answer.
+    if (state.raw === null) return;
     state.raw.available = false;
     renderRaw(state.raw);
   });
   source.addEventListener("done", (event) => {
+    if (state.rawJob !== jobId) return;
     apply(event);
     closeRawStream();
   });

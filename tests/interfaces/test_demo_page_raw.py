@@ -518,6 +518,77 @@ def test_a_failed_read_keeps_the_transcript_it_produced_and_the_failure_panel_na
     assert '"raw"' not in _function("hideResults"), "a new outcome never hides the transcript it produced"
 
 
+STREAM_STUBS = """
+const state = { raw: null, rawJob: null, events: null };
+let renders = 0;
+function renderRaw() { renders += 1; }
+const opened = [];
+class FakeEventSource {
+  constructor(url) {
+    this.url = url;
+    this.listeners = {};
+    this.closed = false;
+    opened.push(this);
+  }
+  addEventListener(name, handler) {
+    (this.listeners[name] = this.listeners[name] || []).push(handler);
+  }
+  close() { this.closed = true; }
+  fire(name, event) { for (const handler of this.listeners[name] || []) handler(event); }
+}
+globalThis.EventSource = FakeEventSource;
+"""
+
+
+@requires_node
+def test_a_stale_streams_done_and_error_leave_the_new_jobs_stream_and_pane_alone() -> None:
+    """A handler from the job an upload replaced still fires; it may not close or write the new job's stream."""
+    source = "\n".join(
+        _function(name)
+        for name in ("rawModel", "applyRawEvent", "appendRawEvent", "closeRawStream", "openRawStream")
+    )
+    script = (
+        f"{STREAM_STUBS}\n{source}\n"
+        "openRawStream('old');\n"
+        "const older = opened[0];\n"
+        "older.fire('delta', {data: JSON.stringify({page: 1, text: 'the old job text'})});\n"
+        "openRawStream('new');\n"
+        "const newer = opened[1];\n"
+        "const model = state.raw;\n"
+        "const rendersBeforeStale = renders;\n"
+        "older.fire('done', {data: JSON.stringify({outcome: 'read'})});\n"
+        "const afterDone = {open: !newer.closed && state.events === newer, pane: state.raw === model};\n"
+        "older.fire('error', {});\n"
+        "const afterError = {\n"
+        "  open: !newer.closed && state.events === newer,\n"
+        "  pane: state.raw === model && model.available === true && model.finished === false,\n"
+        "};\n"
+        "const rendersAfterStale = renders;\n"
+        "state.raw = null;\n"
+        "newer.fire('error', {});\n"
+        "console.log(JSON.stringify({\n"
+        "  afterDone: afterDone,\n"
+        "  afterError: afterError,\n"
+        "  staleRenders: rendersAfterStale - rendersBeforeStale,\n"
+        "  oldClosed: older.closed,\n"
+        "  nullRawDidNotThrow: true,\n"
+        "}));"
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    answered = json.loads(result.stdout)
+
+    assert answered["afterDone"] == {"open": True, "pane": True}, (
+        "an old job's ``done`` never closes the new job's stream or replaces its model"
+    )
+    assert answered["afterError"] == {"open": True, "pane": True}, (
+        "an old job's connection error leaves the new job's stream open and its pane untouched"
+    )
+    assert answered["staleRenders"] == 0, "neither stale handler redraws the new job's pane"
+    assert answered["oldClosed"] is True, "the open that replaced the old job still closed the old stream"
+    assert answered["nullRawDidNotThrow"] is True, "an error while ``state.raw`` is null does not throw"
+
+
 def test_the_page_opens_one_event_stream_per_job_and_closes_it_on_done() -> None:
     """One EventSource for the job, closed on ``done`` and on the next upload, so nothing leaks."""
     page = demo_page.DEMO_HTML
